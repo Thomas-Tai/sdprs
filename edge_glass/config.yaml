@@ -1,0 +1,86 @@
+# ============================================================
+# SDPRS Edge Glass Node Configuration
+# Smart Disaster Prevention Response System
+# Version: 1.0
+# ============================================================
+
+# Node identification
+node_id: "glass_node_01"              # Unique node identifier
+
+# Camera settings
+camera:
+  source: 0                           # 0 = default camera, or device path
+  resolution: [1280, 720]             # 720p resolution
+  fps: 15                             # Frame rate
+
+# Circular buffer settings
+buffer:
+  duration_seconds: 10                # Buffer duration in seconds
+
+# Visual detection settings
+visual:
+  edge_density_threshold: 1.5         # Multiplier relative to baseline
+  baseline_window_seconds: 60         # Adaptive baseline window
+  brightness_anomaly_percent: 50      # Brightness anomaly exclusion threshold
+  min_contour_length_px: 100          # Minimum contour length in pixels (~30cm)
+  roi_polygon: [[100,50],[1180,50],[1180,670],[100,670]]  # ROI polygon vertices
+  canny_threshold1: 50                # Canny edge detection lower threshold
+  canny_threshold2: 150               # Canny edge detection upper threshold
+
+# Audio detection settings
+audio:
+  device_index: 1                     # Audio device index
+  mode: "adaptive"                    # "fixed" | "adaptive"
+  sample_rate: 44100                  # Sample rate in Hz
+  channels: 1                         # Number of audio channels
+  chunk_size: 512                     # Audio chunk size
+  # Adaptive mode parameters
+  rolling_baseline_seconds: 30        # Rolling baseline window for environment
+  delta_db_threshold: 20              # Sudden increase relative to baseline (dB)
+  spectral_flatness_threshold: 0.3    # Spectral flatness threshold
+  attack_time_ms: 10                  # Attack time threshold
+  analysis_window_ms: 500             # Analysis window duration
+  # Fixed mode parameters (backup)
+  fixed_db_threshold: 90              # Fixed dB threshold
+  fixed_freq_threshold_hz: 3000       # Fixed frequency threshold
+
+# Trigger engine settings
+trigger:
+  correlation_window_seconds: 2       # Correlation window for visual+audio fusion
+  cooldown_seconds: 30                # Cooldown period between events
+
+# Thermal management settings
+thermal:
+  fps_reduce_temp: 75                 # Temperature threshold to reduce FPS
+  pause_visual_temp: 80               # Temperature threshold to pause visual processing
+  critical_alert_temp: 85             # Temperature threshold for critical alert
+
+# Server connection settings
+server:
+  api_url: "http://central-server:8000/api"  # Central server API URL
+  api_key: "changeme-random-secret-key"      # CHANGE THIS! Must match server EDGE_API_KEY
+  mqtt_broker: "central-server"              # MQTT broker address
+  mqtt_port: 1883                           # MQTT broker port
+
+# Stream settings
+stream:
+  type: "hls"                         # Stream type: HLS
+  auto_stop_minutes: 5                # Auto-stop duration in minutes
+  tunnel_port: 18554                  # Reverse SSH tunnel remote port (unique per node)
+
+# Snapshot settings (continuous monitoring)
+snapshot:
+  enabled: true                       # Enable continuous snapshot
+  fps: 1                              # Snapshot frame rate
+  fps_degraded: 0.2                   # Degraded mode frame rate (1 per 5 seconds)
+  width: 854                          # Snapshot width
+  height: 480                         # Snapshot height
+  jpeg_quality: 50                    # JPEG quality (1-100)
+
+# Event storage settings
+events:
+  local_backup_dir: "./events"        # Local MP4 backup directory
+  max_local_files: 20                 # Maximum number of local backup files
+
+# Timezone
+timezone: "Asia/Macau"                # Local timezone

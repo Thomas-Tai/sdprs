@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}監控牆 - SDPRS 防災監控{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 頁面標題 -->
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-gray-800">監控牆 — 即時攝像頭快照</h1>
+        <span class="text-sm text-gray-500">自動每秒刷新</span>
+    </div>
+    
+    {% if glass_nodes %}
+    <!-- 快照網格 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        {% for node in glass_nodes %}
+        <div class="snapshot-card bg-white rounded-lg shadow overflow-hidden relative" data-node-id="{{ node.node_id }}">
+            <!-- 頂部：節點資訊 -->
+            <div class="flex justify-between items-center p-2 bg-gray-800 text-white rounded-t-lg">
+                <span class="font-mono text-sm">{{ node.node_id }}</span>
+                <span id="status-dot-{{ node.node_id }}" class="status-dot {% if node.status == 'ONLINE' %}bg-green-500{% else %}bg-red-500{% endif %}"></span>
+            </div>
+            
+            <!-- 快照圖片 -->
+            <div class="relative">
+                <img
+                    id="snapshot-{{ node.node_id }}"
+                    src="/api/edge/{{ node.node_id }}/snapshot/latest?t={{ now_ts }}"
+                    alt="{{ node.node_id }} 快照"
+                    class="w-full aspect-video object-cover bg-gray-200"
+                    loading="lazy"
+                >
+                
+                <!-- 離線遮罩 -->
+                <div id="offline-overlay-{{ node.node_id }}" class="offline-overlay absolute inset-0 flex items-center justify-center {% if node.status != 'OFFLINE' %}hidden{% endif %}">
+                    <span class="text-white font-bold text-lg">⚠️ 離線</span>
+                </div>
+                
+                <!-- 快照停滯遮罩 -->
+                <div id="stale-overlay-{{ node.node_id }}" class="stale-overlay absolute inset-0 flex items-center justify-center {% if not node.is_stale %}hidden{% endif %}">
+                    <span class="text-white font-bold">⚠️ 快照停滯</span>
+                </div>
+            </div>
+            
+            <!-- 底部：時間資訊 -->
+            <div class="p-2 bg-gray-100 rounded-b-lg text-sm text-gray-600">
+                <span id="snapshot-time-{{ node.node_id }}" data-node-id="{{ node.node_id }}">
+                    {% if node.snapshot_timestamp %}
+                        {{ node.snapshot_timestamp }}
+                    {% else %}
+                        無快照
+                    {% endif %}
+                </span>
+            </div>
+            
+            <!-- 點擊跳轉 -->
+            <a href="/alerts?node={{ node.node_id }}" class="absolute inset-0 z-10" title="查看 {{ node.node_id }} 詳情"></a>
+        </div>
+        {% endfor %}
+    </div>
+    
+    {% else %}
+    <!-- 空狀態 -->
+    <div class="text-center text-gray-500 py-12">
+        <div class="text-6xl mb-4">📹</div>
+        <p class="text-xl">尚無已註冊的攝像頭節點</p>
+        <p class="mt-2">邊緣節點上線後將自動出現在此處</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<!-- Monitor-specific JS -->
+<script src="/static/js/monitor.js"></script>
+{% endblock %}

@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+
+{% block title %}警報詳情 #{{ event.id }} - SDPRS 防災監控{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 返回按鈕 -->
+    <div>
+        <a href="/" class="text-blue-600 hover:text-blue-800 text-sm">← 返回警報列表</a>
+    </div>
+    
+    <!-- 兩欄佈局 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- 左欄：影片區域 -->
+        <div class="space-y-4">
+            <!-- 事件影片播放器 -->
+            <div class="bg-white rounded-lg shadow p-4">
+                <h3 class="text-lg font-semibold mb-3">事件影片</h3>
+                
+                {% if event.status == "PENDING_VIDEO" %}
+                <div class="video-container bg-gray-100 rounded-lg flex items-center justify-center h-64">
+                    <div class="text-center text-gray-500">
+                        <div class="text-4xl mb-2">⏳</div>
+                        <p>影片上傳中...</p>
+                    </div>
+                </div>
+                {% elif event.mp4_path %}
+                <div class="video-container rounded-lg overflow-hidden">
+                    <video id="event-video" controls class="w-full">
+                        <source src="/storage/{{ event.mp4_path }}" type="video/mp4">
+                        您的瀏覽器不支援影片播放
+                    </video>
+                </div>
+                {% else %}
+                <div class="video-container bg-gray-100 rounded-lg flex items-center justify-center h-64">
+                    <div class="text-center text-gray-500">
+                        <div class="text-4xl mb-2">📹</div>
+                        <p>無影片</p>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- 即時串流播放器 -->
+            <div id="stream-container" class="bg-white rounded-lg shadow p-4 hidden">
+                <h3 class="text-lg font-semibold mb-3">即時串流</h3>
+                <div class="video-container rounded-lg overflow-hidden bg-black">
+                    <video id="stream-video" controls autoplay class="w-full"></video>
+                </div>
+                <button id="stop-stream-btn" class="mt-3 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded">
+                    停止串流
+                </button>
+            </div>
+        </div>
+        
+        <!-- 右欄：資訊 + 操作 -->
+        <div class="space-y-4">
+            <!-- 警報資訊卡片 -->
+            <div class="bg-white rounded-lg shadow p-4">
+                <h3 class="text-lg font-semibold mb-4">警報資訊</h3>
+                
+                <div class="info-card">
+                    <div class="info-row">
+                        <span class="info-label">警報 ID</span>
+                        <span class="info-value">#{{ event.id }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">節點</span>
+                        <span class="info-value font-mono">{{ event.node_id }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">觸發時間</span>
+                        <span class="info-value">{{ event.timestamp }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">狀態</span>
+                        <span class="info-value">
+                            {% if event.status == 'PENDING_VIDEO' %}
+                            <span class="status-badge pending-video">⏳ 等待影片</span>
+                            {% elif event.status == 'PENDING' %}
+                            <span class="status-badge pending">🔴 待處理</span>
+                            {% elif event.status == 'RESOLVED' %}
+                            <span class="status-badge resolved">🟢 已處理</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">視覺置信度</span>
+                        <span class="info-value">{{ "%.2f"|format(event.visual_confidence) if event.visual_confidence else '-' }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">音訊峰值</span>
+                        <span class="info-value">{{ "%.1f dB"|format(event.audio_db_peak) if event.audio_db_peak else '-' }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">音訊頻率峰值</span>
+                        <span class="info-value">{{ "%.0f Hz"|format(event.audio_freq_peak_hz) if event.audio_freq_peak_hz else '-' }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">建立時間</span>
+                        <span class="info-value">{{ event.created_at or '-' }}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 操作按鈕 -->
+            <div class="bg-white rounded-lg shadow p-4">
+                <h3 class="text-lg font-semibold mb-4">操作</h3>
+                
+                {% if event.status != "RESOLVED" %}
+                <!-- 即時查看按鈕 -->
+                <button id="start-stream-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded mb-3">
+                    📹 即時查看
+                </button>
+                {% endif %}
+                
+                <!-- 標記已處理區域 -->
+                {% if event.status == "PENDING" %}
+                <div id="resolve-section" class="resolve-section">
+                    <h4 class="font-medium mb-2">標記已處理</h4>
+                    <textarea id="resolve-notes" 
+                              class="w-full border border-gray-300 rounded p-2 mb-3" 
+                              rows="3" 
+                              placeholder="輸入處理備註（可選）"></textarea>
+                    <button id="resolve-btn" class="w-full bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">
+                        ✓ 標記已處理
+                    </button>
+                </div>
+                {% endif %}
+                
+                <!-- 已處理資訊 -->
+                {% if event.status == "RESOLVED" %}
+                <div class="bg-green-50 border border-green-200 rounded p-4">
+                    <h4 class="font-medium text-green-800 mb-2">已處理</h4>
+                    <div class="text-sm text-green-700">
+                        <p>處理人員: {{ event.resolved_by or '-' }}</p>
+                        <p>處理時間: {{ event.resolved_at or '-' }}</p>
+                        <p>備註: {{ event.notes or "無" }}</p>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- 成功提示 -->
+            <div id="success-message" class="success-message hidden">
+                ✓ 警報已標記為已處理
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+const eventId = {{ event.id }};
+const nodeId = "{{ event.node_id }}";
+const eventStatus = "{{ event.status }}";
+let hls = null;
+
+// ===== 即時串流 =====
+const startStreamBtn = document.getElementById('start-stream-btn');
+const stopStreamBtn = document.getElementById('stop-stream-btn');
+const streamContainer = document.getElementById('stream-container');
+const streamVideo = document.getElementById('stream-video');
+
+if (startStreamBtn) {
+    startStreamBtn.addEventListener('click', async () => {
+        startStreamBtn.disabled = true;
+        startStreamBtn.textContent = '🔄 啟動中...';
+        
+        try {
+            // 發送啟動串流指令
+            const response = await fetch(`/api/stream/${nodeId}/start`, { method: 'POST' });
+            if (!response.ok) throw new Error('Failed to start stream');
+            
+            // 輪詢等待串流啟動
+            let attempts = 0;
+            const maxAttempts = 8; // 最多等待 16 秒
+            
+            while (attempts < maxAttempts) {
+                await new Promise(r => setTimeout(r, 2000));
+                
+                const statusResponse = await fetch(`/api/stream/${nodeId}/status`);
+                const statusData = await statusResponse.json();
+                
+                if (statusData.stream_status && statusData.stream_status.status === 'active') {
+                    // 串流已啟動，使用 HLS.js 播放
+                    startHlsPlayer();
+                    return;
+                }
+                
+                attempts++;
+            }
+            
+            throw new Error('Stream start timeout');
+            
+        } catch (error) {
+            console.error('Stream start failed:', error);
+            alert('串流啟動失敗: ' + error.message);
+            startStreamBtn.disabled = false;
+            startStreamBtn.textContent = '📹 即時查看';
+        }
+    });
+}
+
+function startHlsPlayer() {
+    if (!Hls.isSupported()) {
+        alert('您的瀏覽器不支援 HLS 播放');
+        return;
+    }
+    
+    hls = new Hls();
+    hls.loadSource(`/stream/${nodeId}/index.m3u8`);
+    hls.attachMedia(streamVideo);
+    
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        streamContainer.classList.remove('hidden');
+        startStreamBtn.classList.add('hidden');
+        streamVideo.play();
+    });
+    
+    hls.on(Hls.Events.ERROR, (event, data) => {
+        console.error('HLS error:', data);
+    });
+}
+
+if (stopStreamBtn) {
+    stopStreamBtn.addEventListener('click', async () => {
+        try {
+            await fetch(`/api/stream/${nodeId}/stop`, { method: 'POST' });
+            
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            
+            streamContainer.classList.add('hidden');
+            if (startStreamBtn) {
+                startStreamBtn.classList.remove('hidden');
+                startStreamBtn.disabled = false;
+                startStreamBtn.textContent = '📹 即時查看';
+            }
+        } catch (error) {
+            console.error('Failed to stop stream:', error);
+        }
+    });
+}
+
+// ===== 標記已處理 =====
+const resolveBtn = document.getElementById('resolve-btn');
+
+if (resolveBtn) {
+    resolveBtn.addEventListener('click', async () => {
+        const notes = document.getElementById('resolve-notes').value || null;
+        
+        try {
+            const response = await fetch(`/api/alerts/${eventId}/resolve`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    resolved_by: "{{ current_user }}",
+                    notes: notes
+                })
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to resolve');
+            }
+            
+            // 顯示成功訊息
+            document.getElementById('resolve-section').classList.add('hidden');
+            document.getElementById('success-message').classList.remove('hidden');
+            
+            // 更新狀態顯示
+            location.reload();
+            
+        } catch (error) {
+            console.error('Failed to resolve:', error);
+            alert('處理失敗: ' + error.message);
+        }
+    });
+}
+
+// ===== WebSocket 整合 =====
+function handleWSMessage(msg) {
+    updateStatusBar(msg);
+    
+    if (msg.type === 'alert_updated' && msg.data.alert_id === eventId) {
+        // 影片已上傳，刷新頁面
+        location.reload();
+    }
+    
+    if (msg.type === 'alert_resolved' && msg.data.alert_id === eventId) {
+        // 已處理，刷新頁面
+        location.reload();
+    }
+}
+</script>
+
+<!-- HLS.js -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+{% endblock %}

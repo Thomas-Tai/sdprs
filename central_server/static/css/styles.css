@@ -1,0 +1,217 @@
+/* SDPRS 自訂樣式 */
+
+/* 狀態徽章 */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.status-badge.pending {
+    background-color: #FEE2E2;
+    color: #991B1B;
+}
+
+.status-badge.pending-video {
+    background-color: #FEF3C7;
+    color: #92400E;
+}
+
+.status-badge.resolved {
+    background-color: #D1FAE5;
+    color: #065F46;
+}
+
+/* 監控牆 */
+.snapshot-card {
+    transition: transform 0.2s ease;
+}
+.snapshot-card:hover {
+    transform: scale(1.02);
+}
+
+/* 狀態指示燈 */
+.status-dot {
+    display: inline-block;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+}
+.status-dot.online {
+    background-color: #10B981;
+    box-shadow: 0 0 4px #10B981;
+}
+.status-dot.offline {
+    background-color: #EF4444;
+    box-shadow: 0 0 4px #EF4444;
+}
+
+/* 新警報高亮動畫 */
+@keyframes highlight-fade {
+    from { background-color: #FEF3C7; }
+    to { background-color: transparent; }
+}
+.alert-new {
+    animation: highlight-fade 2s ease-out;
+}
+
+/* 水位進度條 */
+.water-level-bar {
+    position: relative;
+    height: 1.5rem;
+    background-color: #E5E7EB;
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+.water-level-fill {
+    height: 100%;
+    border-radius: 0.5rem;
+    transition: width 0.5s ease;
+}
+.water-level-fill.low {
+    background-color: #10B981;
+}
+.water-level-fill.medium {
+    background-color: #F59E0B;
+}
+.water-level-fill.high {
+    background-color: #EF4444;
+}
+
+/* 離線遮罩 */
+.offline-overlay {
+    background-color: rgba(239, 68, 68, 0.4);
+}
+.stale-overlay {
+    background-color: rgba(245, 158, 11, 0.3);
+}
+
+/* 響應式：手機端調整 */
+@media (max-width: 640px) {
+    .stat-bar {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .stat-item {
+        font-size: 0.75rem;
+    }
+}
+
+/* 暗色導覽列 */
+.nav-dark {
+    background-color: #1F2937;
+}
+
+/* 表格行懸停 */
+.alert-row:hover {
+    background-color: #F9FAFB;
+}
+
+/* 漢堡選單動畫 */
+.mobile-menu {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+.mobile-menu.open {
+    max-height: 300px;
+}
+
+/* 按鈕樣式 */
+.btn-view {
+    color: #2563EB;
+    text-decoration: none;
+    font-weight: 500;
+}
+.btn-view:hover {
+    color: #1D4ED8;
+    text-decoration: underline;
+}
+
+/* 視頻播放器 */
+.video-container {
+    position: relative;
+    background-color: #000;
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+/* 載入中狀態 */
+.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+/* 閾值標記線 */
+.threshold-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background-color: #6B7280;
+}
+.threshold-line::after {
+    content: attr(data-label);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.625rem;
+    color: #6B7280;
+    white-space: nowrap;
+}
+
+/* 警報詳情卡片 */
+.info-card {
+    background-color: #F9FAFB;
+    border: 1px solid #E5E7EB;
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #E5E7EB;
+}
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    color: #6B7280;
+    font-size: 0.875rem;
+}
+
+.info-value {
+    font-weight: 500;
+    color: #111827;
+}
+
+/* 串流容器 */
+#stream-container {
+    margin-top: 1rem;
+}
+
+/* 解決區域 */
+.resolve-section {
+    background-color: #FEF3C7;
+    border: 1px solid #F59E0B;
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+/* 成功提示 */
+.success-message {
+    background-color: #D1FAE5;
+    border: 1px solid #10B981;
+    color: #065F46;
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin-top: 1rem;
+}

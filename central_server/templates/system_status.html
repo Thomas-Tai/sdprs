@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+
+{% block title %}系統狀態 - SDPRS 防災監控{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 頁面標題 -->
+    <h1 class="text-2xl font-bold text-gray-800">系統狀態 — 節點健康監控</h1>
+    
+    <!-- 玻璃偵測節點區塊 -->
+    <div>
+        <h2 class="text-lg font-semibold text-gray-700 mb-4">玻璃偵測節點</h2>
+        
+        {% if glass_nodes %}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {% for node in glass_nodes %}
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-mono font-medium">{{ node.node_id }}</span>
+                    <span id="node-status-{{ node.node_id }}" class="{% if node.status == 'ONLINE' %}text-green-600{% else %}text-red-600{% endif %}">
+                        {% if node.status == 'ONLINE' %}🟢 在線{% else %}🔴 離線{% endif %}
+                    </span>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                        <span class="text-gray-500">CPU:</span>
+                        <span id="node-cpu-{{ node.node_id }}" class="font-medium {% if node.cpu_temp and node.cpu_temp > 80 %}text-red-600{% elif node.cpu_temp and node.cpu_temp > 70 %}text-yellow-600{% else %}text-gray-800{% endif %}">
+                            {{ "%.1f°C"|format(node.cpu_temp) if node.cpu_temp else '-' }}
+                        </span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">記憶體:</span>
+                        <span id="node-memory-{{ node.node_id }}" class="font-medium">{{ "%.1f%%"|format(node.memory_usage_percent) if node.memory_usage_percent else '-' }}</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">緩衝區:</span>
+                        <span class="font-medium {% if node.buffer_health == 'ok' %}text-green-600{% elif node.buffer_health == 'degraded' %}text-yellow-600{% else %}text-red-600{% endif %}">
+                            {% if node.buffer_health == 'ok' %}✅ 正常{% elif node.buffer_health == 'degraded' %}⚠️ 降級{% else %}❌ 異常{% endif %}
+                        </span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">運行時間:</span>
+                        <span class="font-medium">{{ node.uptime_seconds }}</span>
+                    </div>
+                </div>
+                
+                <div class="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-500">
+                    最後心跳: <span id="node-heartbeat-{{ node.node_id }}">{{ node.last_heartbeat or '-' }}</span>
+                </div>
+                
+                <div class="mt-2 text-xs text-gray-500">
+                    串流狀態: 
+                    {% if node.stream_status and node.stream_status.status == 'active' %}
+                    <span class="text-blue-600">▶ 運行中 (端口: {{ node.stream_status.tunnel_port }})</span>
+                    {% else %}
+                    <span class="text-gray-400">未啟動</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        {% else %}
+        <div class="text-center text-gray-500 py-8 bg-white rounded-lg">
+            尚無玻璃偵測節點
+        </div>
+        {% endif %}
+    </div>
+    
+    <!-- 水泵節點區塊 -->
+    <div>
+        <h2 class="text-lg font-semibold text-gray-700 mb-4">水泵節點</h2>
+        
+        {% if pump_nodes %}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {% for node in pump_nodes %}
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-mono font-medium">{{ node.node_id }}</span>
+                    <span id="pump-status-{{ node.node_id }}" class="{% if node.status == 'ONLINE' %}text-green-600{% else %}text-red-600{% endif %}">
+                        {% if node.status == 'ONLINE' %}🟢 在線{% else %}🔴 離線{% endif %}
+                    </span>
+                </div>
+                
+                <div class="flex items-center gap-4 mb-3">
+                    <div>
+                        <span class="text-gray-500 text-sm">水泵:</span>
+                        <span id="pump-state-{{ node.node_id }}" class="font-medium {% if node.pump_state == 'ON' %}text-red-600{% else %}text-green-600{% endif %}">
+                            {% if node.pump_state == 'ON' %}🔴 運行中{% else %}🟢 停止{% endif %}
+                        </span>
+                    </div>
+                </div>
+                
+                <!-- 水位進度條 -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="text-gray-500">水位:</span>
+                        <span id="pump-level-{{ node.node_id }}" class="font-medium">{{ "%.1f%%"|format(node.water_level) if node.water_level is not none else '-' }}</span>
+                    </div>
+                    <div class="water-level-bar">
+                        <div class="water-level-fill {% if node.water_level and node.water_level > 80 %}high{% elif node.water_level and node.water_level < 20 %}low{% else %}medium{% endif %}" 
+                             style="width: {{ node.water_level if node.water_level else 0 }}%"></div>
+                        <!-- 閾值標記 -->
+                        <div class="threshold-line" style="left: 20%;" data-label="LOW"></div>
+                        <div class="threshold-line" style="left: 80%;" data-label="HIGH"></div>
+                    </div>
+                </div>
+                
+                <div class="text-xs text-gray-500">
+                    最後心跳: <span id="pump-heartbeat-{{ node.node_id }}">{{ node.last_heartbeat or '-' }}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        {% else %}
+        <div class="text-center text-gray-500 py-8 bg-white rounded-lg">
+            尚無水泵節點
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// WebSocket 訊息處理
+function handleWSMessage(msg) {
+    updateStatusBar(msg);
+    
+    if (msg.type === 'node_status') {
+        const d = msg.data;
+        updateNodeStatus(d.node_id, d.status);
+        if (d.cpu_temp !== undefined) {
+            updateCpuTemp(d.node_id, d.cpu_temp);
+        }
+        if (d.memory_usage_percent !== undefined) {
+            updateMemory(d.node_id, d.memory_usage_percent);
+        }
+        updateHeartbeat(d.node_id, new Date().toLocaleString('zh-TW'));
+    }
+    
+    if (msg.type === 'pump_status') {
+        const d = msg.data;
+        updatePumpState(d.node_id, d.pump_state);
+        updateWaterLevel(d.node_id, d.water_level);
+    }
+}
+
+function updateNodeStatus(nodeId, status) {
+    const el = document.getElementById(`node-status-${nodeId}`);
+    if (!el) return;
+    
+    if (status === 'ONLINE') {
+        el.textContent = '🟢 在線';
+        el.className = 'text-green-600';
+    } else {
+        el.textContent = '🔴 離線';
+        el.className = 'text-red-600';
+    }
+}
+
+function updateCpuTemp(nodeId, temp) {
+    const el = document.getElementById(`node-cpu-${nodeId}`);
+    if (!el) return;
+    
+    el.textContent = temp.toFixed(1) + '°C';
+    
+    if (temp > 80) {
+        el.className = 'font-medium text-red-600';
+    } else if (temp > 70) {
+        el.className = 'font-medium text-yellow-600';
+    } else {
+        el.className = 'font-medium text-gray-800';
+    }
+}
+
+function updateMemory(nodeId, percent) {
+    const el = document.getElementById(`node-memory-${nodeId}`);
+    if (!el) return;
+    
+    el.textContent = percent.toFixed(1) + '%';
+}
+
+function updateHeartbeat(nodeId, time) {
+    const el = document.getElementById(`node-heartbeat-${nodeId}`) || 
+               document.getElementById(`pump-heartbeat-${nodeId}`);
+    if (!el) return;
+    
+    el.textContent = time;
+}
+
+function updatePumpState(nodeId, state) {
+    const el = document.getElementById(`pump-state-${nodeId}`);
+    if (!el) return;
+    
+    if (state === 'ON') {
+        el.textContent = '🔴 運行中';
+        el.className = 'font-medium text-red-600';
+    } else {
+        el.textContent = '🟢 停止';
+        el.className = 'font-medium text-green-600';
+    }
+}
+
+function updateWaterLevel(nodeId, level) {
+    const textEl = document.getElementById(`pump-level-${nodeId}`);
+    const barEl = document.querySelector(`#pump-status-${nodeId}?.water-level-fill`) || 
+                  document.querySelector(`[id="pump-level-${nodeId}"]?.closest('.water-level-bar')?.water-level-fill`);
+    
+    if (textEl) {
+        textEl.textContent = level.toFixed(1) + '%';
+    }
+    
+    // Find the fill element
+    const card = document.getElementById(`pump-status-${nodeId}`)?.closest('.bg-white');
+    if (card) {
+        const fill = card.querySelector('.water-level-fill');
+        if (fill) {
+            fill.style.width = level + '%';
+            fill.className = 'water-level-fill ' + (level > 80 ? 'high' : level < 20 ? 'low' : 'medium');
+        }
+    }
+}
+</script>
+{% endblock %}

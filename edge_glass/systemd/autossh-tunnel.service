@@ -1,0 +1,60 @@
+# SDPRS AutoSSH Reverse Tunnel Service
+# systemd service file for SSH reverse tunnel to central server
+#
+# 安裝: sudo cp autossh-tunnel.service /etc/systemd/system/
+# 啟用: sudo systemctl daemon-reload && sudo systemctl enable autossh-tunnel
+# 啟動: sudo systemctl start autossh-tunnel
+# 狀態: sudo systemctl status autossh-tunnel
+# 日誌: journalctl -u autossh-tunnel -f
+#
+# 前置條件:
+# 1. SSH 金鑰已生成: ssh-keygen -t ed25519 -f /home/sdprs/.ssh/id_ed25519 -N ""
+# 2. 公鑰已加入中央伺服器: /home/sdprs/.ssh/authorized_keys
+# 3. 環境變數文件已建立: /opt/sdprs/edge_glass/.env.tunnel
+
+[Unit]
+Description=SDPRS AutoSSH Reverse Tunnel
+Documentation=https://github.com/sdprs/sdprs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sdprs
+Group=sdprs
+
+# AutoSSH environment
+Environment=AUTOSSH_GATETIME=0
+Environment=AUTOSSH_PORT=0
+
+# Load configuration from file
+EnvironmentFile=/opt/sdprs/edge_glass/.env.tunnel
+
+# AutoSSH command with SSH options
+# -M 0: Disable monitoring port, use SSH keepalive instead
+# -N: No remote command
+# ServerAliveInterval 30: Send keepalive every 30 seconds
+# ServerAliveCountMax 3: Disconnect after 3 missed keepalives (90s total)
+# StrictHostKeyChecking=no: Skip host key verification
+# ExitOnForwardFailure=yes: Exit if port forwarding fails
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o "ServerAliveInterval 30" \
+  -o "ServerAliveCountMax 3" \
+  -o "StrictHostKeyChecking=accept-new" \
+  -o "ExitOnForwardFailure=yes" \
+  -i ${SSH_KEY} \
+  -R ${TUNNEL_PORT}:localhost:8554 \
+  ${SSH_USER}@${SERVER_HOST}
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autossh-tunnel
+
+[Install]
+WantedBy=multi-user.target

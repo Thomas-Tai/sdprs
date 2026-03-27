@@ -1,0 +1,54 @@
+# SDPRS Central Server Service
+# systemd service file for FastAPI backend
+#
+# 安裝: sudo cp sdprs-server.service /etc/systemd/system/
+# 啟用: sudo systemctl daemon-reload && sudo systemctl enable sdprs-server
+# 啟動: sudo systemctl start sdprs-server
+# 狀態: sudo systemctl status sdprs-server
+# 日誌: journalctl -u sdprs-server -f
+# 停止: sudo systemctl stop sdprs-server
+# 重啟: sudo systemctl restart sdprs-server
+#
+# 架構說明:
+# - Pi 5 上同時運行: sdprs-server (FastAPI), mosquitto (MQTT), nginx (反向代理)
+# - uvicorn 只用 1 worker，因為 WebSocket 和 MQTT 回調共享記憶體狀態
+# - 多 worker 會導致狀態不同步、WebSocket 推送不完整
+
+[Unit]
+Description=SDPRS Central Server (FastAPI)
+Documentation=https://github.com/sdprs/sdprs
+After=network-online.target mosquitto.service
+Wants=network-online.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+User=sdprs
+Group=sdprs
+WorkingDirectory=/opt/sdprs
+EnvironmentFile=/opt/sdprs/.env
+
+# 使用 1 個 worker（共享記憶體狀態）
+ExecStart=/opt/sdprs/central_server/venv/bin/uvicorn central_server.main:app --host 0.0.0.0 --port 8000 --workers 1
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sdprs-server
+
+# Resource limits (optional)
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

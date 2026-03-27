@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SDPRS 防災監控{% endblock %}</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/styles.css">
+    
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- 頂部導覽列 (固定) -->
+    <nav class="nav-dark sticky top-0 z-50 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4">
+            <div class="flex items-center justify-between h-16">
+                <!-- 左側：系統名稱 -->
+                <div class="flex items-center">
+                    <span class="text-white text-xl font-bold">SDPRS 防災監控</span>
+                </div>
+                
+                <!-- 中間：導覽連結 (桌面版) -->
+                <div class="hidden md:flex items-center space-x-4">
+                    <a href="/" class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium {% if request.url.path == '/' %}bg-gray-800 text-white{% endif %}">主控台</a>
+                    <a href="/monitor" class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium {% if request.url.path == '/monitor' %}bg-gray-800 text-white{% endif %}">監控牆</a>
+                    <a href="/system" class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium {% if request.url.path == '/system' %}bg-gray-800 text-white{% endif %}">系統狀態</a>
+                </div>
+                
+                <!-- 右側：靜音按鈕 + 登出 -->
+                <div class="flex items-center space-x-4">
+                    <!-- 靜音按鈕 -->
+                    <button id="mute-btn" class="text-2xl focus:outline-none" title="切換靜音">
+                        🔊
+                    </button>
+                    
+                    <!-- 登出按鈕 -->
+                    <form action="/logout" method="POST" class="inline">
+                        <button type="submit" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">
+                            登出
+                        </button>
+                    </form>
+                </div>
+                
+                <!-- 手機版漢堡選單 -->
+                <div class="md:hidden">
+                    <button id="mobile-menu-btn" class="text-gray-300 hover:text-white focus:outline-none">
+                        <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 手機版選單 -->
+            <div id="mobile-menu" class="mobile-menu md:hidden">
+                <div class="px-2 pt-2 pb-3 space-y-1">
+                    <a href="/" class="text-gray-300 hover:text-white block px-3 py-2 rounded-md text-base font-medium">主控台</a>
+                    <a href="/monitor" class="text-gray-300 hover:text-white block px-3 py-2 rounded-md text-base font-medium">監控牆</a>
+                    <a href="/system" class="text-gray-300 hover:text-white block px-3 py-2 rounded-md text-base font-medium">系統狀態</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+    
+    <!-- 概覽狀態列 -->
+    <div class="bg-white shadow">
+        <div class="max-w-7xl mx-auto px-4 py-3">
+            <div class="stat-bar flex flex-wrap items-center gap-4 text-sm">
+                <!-- 待處理 -->
+                <a href="/?status=PENDING" class="stat-item flex items-center gap-1 hover:bg-gray-100 px-2 py-1 rounded">
+                    <span class="text-red-500">🔴</span>
+                    <span>待處理:</span>
+                    <span id="stat-pending" class="font-bold text-red-600">{{ pending_count }}</span>
+                </a>
+                
+                <!-- 已處理 -->
+                <a href="/?status=RESOLVED" class="stat-item flex items-center gap-1 hover:bg-gray-100 px-2 py-1 rounded">
+                    <span class="text-green-500">🟢</span>
+                    <span>已處理:</span>
+                    <span id="stat-resolved" class="font-bold text-green-600">{{ resolved_count }}</span>
+                </a>
+                
+                <!-- 離線節點 -->
+                <div class="stat-item flex items-center gap-1">
+                    <span>⚠️</span>
+                    <span>離線:</span>
+                    <span id="stat-offline" class="font-bold text-orange-600">{{ offline_count }}</span>
+                </div>
+                
+                <!-- 在線節點 -->
+                <div class="stat-item flex items-center gap-1">
+                    <span>📹</span>
+                    <span>節點:</span>
+                    <span class="font-bold">
+                        <span id="stat-online">{{ online_count }}</span>/<span id="stat-total">{{ total_nodes }}</span>
+                    </span>
+                </div>
+                
+                <!-- 水泵運行 -->
+                <div class="stat-item flex items-center gap-1">
+                    <span>💧</span>
+                    <span>水泵運行:</span>
+                    <span id="stat-pump-active" class="font-bold text-blue-600">{{ pump_active_count }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 主內容區 -->
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        {% block content %}{% endblock %}
+    </main>
+    
+    <!-- 共用 JavaScript -->
+    <script>
+        // ===== 靜音控制 =====
+        const muteBtn = document.getElementById('mute-btn');
+        let isMuted = localStorage.getItem('sdprs-muted') === 'true';
+        updateMuteIcon();
+        
+        if (muteBtn) {
+            muteBtn.addEventListener('click', () => {
+                isMuted = !isMuted;
+                localStorage.setItem('sdprs-muted', isMuted);
+                updateMuteIcon();
+            });
+        }
+        
+        function updateMuteIcon() {
+            if (muteBtn) {
+                muteBtn.textContent = isMuted ? '🔇' : '🔊';
+            }
+        }
+        
+        // ===== 手機版漢堡選單 =====
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        const mobileMenu = document.getElementById('mobile-menu');
+        
+        if (mobileMenuBtn && mobileMenu) {
+            mobileMenuBtn.addEventListener('click', () => {
+                mobileMenu.classList.toggle('open');
+            });
+        }
+        
+        // ===== WebSocket 連線 =====
+        let ws = null;
+        let wsReconnectDelay = 1000;
+        
+        function connectWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                wsReconnectDelay = 1000;
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleWSMessage(msg);
+                } catch (e) {
+                    console.error('Failed to parse WebSocket message:', e);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected, reconnecting...');
+                setTimeout(connectWebSocket, wsReconnectDelay);
+                wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        // 預設 handler，各頁面可覆寫
+        function handleWSMessage(msg) {
+            updateStatusBar(msg);
+        }
+        
+        function updateStatusBar(msg) {
+            if (!msg || !msg.type) return;
+            
+            switch (msg.type) {
+                case 'new_alert':
+                    const pendingEl = document.getElementById('stat-pending');
+                    if (pendingEl) {
+                        pendingEl.textContent = parseInt(pendingEl.textContent) + 1;
+                    }
+                    break;
+                    
+                case 'alert_resolved':
+                    const pending = document.getElementById('stat-pending');
+                    const resolved = document.getElementById('stat-resolved');
+                    if (pending) {
+                        pending.textContent = Math.max(0, parseInt(pending.textContent) - 1);
+                    }
+                    if (resolved) {
+                        resolved.textContent = parseInt(resolved.textContent) + 1;
+                    }
+                    break;
+                    
+                case 'node_status':
+                    const onlineEl = document.getElementById('stat-online');
+                    const offlineEl = document.getElementById('stat-offline');
+                    const data = msg.data || {};
+                    
+                    if (onlineEl && offlineEl) {
+                        if (data.status === 'OFFLINE') {
+                            onlineEl.textContent = Math.max(0, parseInt(onlineEl.textContent) - 1);
+                            offlineEl.textContent = parseInt(offlineEl.textContent) + 1;
+                        } else if (data.status === 'ONLINE') {
+                            onlineEl.textContent = parseInt(onlineEl.textContent) + 1;
+                            offlineEl.textContent = Math.max(0, parseInt(offlineEl.textContent) - 1);
+                        }
+                    }
+                    break;
+                    
+                case 'pump_status':
+                    // 更新水泵運行計數
+                    const pumpEl = document.getElementById('stat-pump-active');
+                    if (pumpEl && msg.data) {
+                        fetch('/api/nodes/summary')
+                            .then(r => r.json())
+                            .then(d => {
+                                if (pumpEl) pumpEl.textContent = d.pump_nodes ? d.pump_nodes.active : 0;
+                            })
+                            .catch(() => {});
+                    }
+                    break;
+            }
+        }
+        
+        // 頁面載入後連線 WebSocket
+        document.addEventListener('DOMContentLoaded', () => {
+            connectWebSocket();
+        });
+        
+        // 播放告警音
+        function playAlertSound() {
+            if (isMuted) return;
+            
+            // 使用 Web Audio API 生成告警音
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                // 警報音：兩段遞減音調
+                oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+                oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.2);
+                oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + 0.4);
+                
+                gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+                
+                oscillator.start(audioCtx.currentTime);
+                oscillator.stop(audioCtx.currentTime + 0.6);
+            } catch (e) {
+                console.warn('Failed to play alert sound:', e);
+            }
+        }
+        
+        // 時間格式化
+        function formatTimestamp(isoString) {
+            if (!isoString) return '-';
+            try {
+                const d = new Date(isoString);
+                return d.toLocaleString('zh-TW', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            } catch (e) {
+                return isoString;
+            }
+        }
+        
+        // 格式化運行時間
+        function formatUptime(seconds) {
+            if (!seconds || seconds < 0) return '-';
+            
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            
+            let result = '';
+            if (days > 0) result += `${days} 天 `;
+            if (hours > 0) result += `${hours} 時 `;
+            result += `${minutes} 分`;
+            
+            return result;
+        }
+    </script>
+    
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,48 @@
+# SDPRS Edge Glass Detection Service
+# systemd service file for Raspberry Pi edge node
+#
+# 安裝: sudo cp sdprs-edge.service /etc/systemd/system/
+# 啟用: sudo systemctl daemon-reload && sudo systemctl enable sdprs-edge
+# 啟動: sudo systemctl start sdprs-edge
+# 狀態: sudo systemctl status sdprs-edge
+# 日誌: journalctl -u sdprs-edge -f
+# 停止: sudo systemctl stop sdprs-edge
+# 重啟: sudo systemctl restart sdprs-edge
+
+[Unit]
+Description=SDPRS Edge Glass Detection Service
+Documentation=https://github.com/sdprs/sdprs
+After=network-online.target autossh-tunnel.service
+Wants=network-online.target autossh-tunnel.service
+
+[Service]
+Type=simple
+User=sdprs
+Group=sdprs
+WorkingDirectory=/opt/sdprs/edge_glass
+ExecStart=/opt/sdprs/edge_glass/venv/bin/python edge_glass_main.py --config /opt/sdprs/edge_glass/config.yaml
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sdprs-edge
+
+# Resource limits (optional)
+MemoryMax=1G
+Nice=10
+
+# Security (optional, for hardening)
+# PrivateTmp=yes
+# NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

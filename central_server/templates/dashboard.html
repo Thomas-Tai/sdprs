@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block title %}主控台 - SDPRS 防災監控{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- 頁面標題 -->
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-gray-800">警報事件列表</h1>
+        <span class="text-sm text-gray-500">共 {{ total }} 筆事件</span>
+    </div>
+    
+    <!-- 篩選列 -->
+    <div class="bg-white rounded-lg shadow p-4">
+        <form method="GET" class="flex flex-wrap gap-4">
+            <!-- 狀態篩選 -->
+            <div class="flex items-center gap-2">
+                <label for="status" class="text-sm text-gray-600">狀態篩選：</label>
+                <select name="status" id="status" class="border border-gray-300 rounded-md px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">全部</option>
+                    <option value="PENDING_VIDEO" {% if current_status_filter == 'PENDING_VIDEO' %}selected{% endif %}>等待影片</option>
+                    <option value="PENDING" {% if current_status_filter == 'PENDING' %}selected{% endif %}>待處理</option>
+                    <option value="RESOLVED" {% if current_status_filter == 'RESOLVED' %}selected{% endif %}>已處理</option>
+                </select>
+            </div>
+            
+            <!-- 節點篩選 -->
+            <div class="flex items-center gap-2">
+                <label for="node" class="text-sm text-gray-600">節點篩選：</label>
+                <select name="node" id="node" class="border border-gray-300 rounded-md px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">全部</option>
+                    {% for node in available_nodes %}
+                    <option value="{{ node }}" {% if current_node_filter == node %}selected{% endif %}>{{ node }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <!-- 篩選按鈕 -->
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded-md text-sm">
+                篩選
+            </button>
+            
+            {% if current_status_filter or current_node_filter %}
+            <a href="/" class="text-gray-600 hover:text-gray-800 text-sm">清除篩選</a>
+            {% endif %}
+        </form>
+    </div>
+    
+    <!-- 新警報容器（即時插入用） -->
+    <div id="new-alerts-container" class="space-y-2"></div>
+    
+    <!-- 警報列表表格 -->
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        {% if events %}
+        <!-- 桌面版表格 -->
+        <div class="hidden md:block overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">時間</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">節點 ID</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">狀態</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">視覺置信度</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">音訊峰值</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="alerts-tbody" class="bg-white divide-y divide-gray-200">
+                    {% for event in events %}
+                    <tr id="alert-row-{{ event.id }}" class="alert-row hover:bg-gray-50">
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {{ event.timestamp }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-600">
+                            {{ event.node_id }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if event.status == 'PENDING_VIDEO' %}
+                            <span class="status-badge pending-video">⏳ 等待影片</span>
+                            {% elif event.status == 'PENDING' %}
+                            <span class="status-badge pending">🔴 待處理</span>
+                            {% elif event.status == 'RESOLVED' %}
+                            <span class="status-badge resolved">🟢 已處理</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {{ "%.2f"|format(event.visual_confidence) if event.visual_confidence else '-' }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {{ "%.1f dB"|format(event.audio_db_peak) if event.audio_db_peak else '-' }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm">
+                            <a href="/alerts/{{ event.id }}" class="text-blue-600 hover:text-blue-800 font-medium">
+                                查看
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- 手機版卡片列表 -->
+        <div class="md:hidden divide-y divide-gray-200">
+            {% for event in events %}
+            <div id="alert-card-{{ event.id }}" class="p-4 hover:bg-gray-50">
+                <div class="flex justify-between items-start mb-2">
+                    <span class="text-xs text-gray-500">{{ event.timestamp }}</span>
+                    {% if event.status == 'PENDING_VIDEO' %}
+                    <span class="status-badge pending-video text-xs">⏳ 等待影片</span>
+                    {% elif event.status == 'PENDING' %}
+                    <span class="status-badge pending text-xs">🔴 待處理</span>
+                    {% elif event.status == 'RESOLVED' %}
+                    <span class="status-badge resolved text-xs">🟢 已處理</span>
+                    {% endif %}
+                </div>
+                <div class="font-mono text-sm text-gray-800 mb-2">{{ event.node_id }}</div>
+                <div class="text-xs text-gray-600 mb-3">
+                    視覺: {{ "%.2f"|format(event.visual_confidence) if event.visual_confidence else '-' }} | 
+                    音訊: {{ "%.1f dB"|format(event.audio_db_peak) if event.audio_db_peak else '-' }}
+                </div>
+                <a href="/alerts/{{ event.id }}" class="text-blue-600 text-sm font-medium">
+                    查看詳情 →
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+        
+        {% else %}
+        <!-- 空狀態 -->
+        <div class="text-center py-12">
+            <div class="text-gray-400 text-6xl mb-4">📋</div>
+            <p class="text-gray-500 text-lg">尚無警報事件</p>
+            <p class="text-gray-400 text-sm mt-2">當有玻璃破裂事件時將顯示在此處</p>
+        </div>
+        {% endif %}
+    </div>
+    
+    <!-- 分頁 -->
+    {% if total_pages > 1 %}
+    <div class="flex items-center justify-center space-x-2">
+        {% if current_page > 1 %}
+        <a href="?page={{ current_page - 1 }}{% if current_status_filter %}&status={{ current_status_filter }}{% endif %}{% if current_node_filter %}&node={{ current_node_filter }}{% endif %}" 
+           class="px-3 py-1 border border-gray-300 rounded text-sm text-gray-600 hover:bg-gray-100">
+            上一頁
+        </a>
+        {% endif %}
+        
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == current_page %}
+            <span class="px-3 py-1 bg-blue-600 text-white rounded text-sm">{{ p }}</span>
+            {% else %}
+            <a href="?page={{ p }}{% if current_status_filter %}&status={{ current_status_filter }}{% endif %}{% if current_node_filter %}&node={{ current_node_filter }}{% endif %}" 
+               class="px-3 py-1 border border-gray-300 rounded text-sm text-gray-600 hover:bg-gray-100">
+                {{ p }}
+            </a>
+            {% endif %}
+        {% endfor %}
+        
+        {% if current_page < total_pages %}
+        <a href="?page={{ current_page + 1 }}{% if current_status_filter %}&status={{ current_status_filter }}{% endif %}{% if current_node_filter %}&node={{ current_node_filter }}{% endif %}" 
+           class="px-3 py-1 border border-gray-300 rounded text-sm text-gray-600 hover:bg-gray-100">
+            下一頁
+        </a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<!-- Dashboard-specific JS -->
+<script src="/static/js/dashboard.js"></script>
+{% endblock %}
