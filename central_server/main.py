@@ -185,7 +185,6 @@ def _get_dashboard_context(request: Request) -> dict:
     counts = get_event_counts(db)
 
     return {
-        "request": request,
         "pending_count": counts.get("pending", 0) + counts.get("pending_video", 0),
         "resolved_count": counts.get("resolved", 0),
         "online_count": online_count,
@@ -198,7 +197,7 @@ def _get_dashboard_context(request: Request) -> dict:
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Login page."""
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse(request, "login.html")
 
 
 @app.post("/login")
@@ -213,10 +212,7 @@ async def login(request: Request):
         request.session["user"] = username
         return RedirectResponse(url="/", status_code=303)
 
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "error": "帳號或密碼錯誤"
-    })
+    return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤"})
 
 
 @app.post("/logout")
@@ -254,7 +250,7 @@ async def dashboard_page(request: Request, status: str = None, node: str = None,
         ctx["available_nodes"] = []
 
     ctx["status_filter"] = status
-    return templates.TemplateResponse("dashboard.html", ctx)
+    return templates.TemplateResponse(request, "dashboard.html", ctx)
 
 
 @app.get("/alerts/{alert_id}", response_class=HTMLResponse)
@@ -270,7 +266,7 @@ async def alert_detail_page(request: Request, alert_id: int):
 
     ctx = _get_dashboard_context(request)
     ctx["event"] = event
-    return templates.TemplateResponse("alert_detail.html", ctx)
+    return templates.TemplateResponse(request, "alert_detail.html", ctx)
 
 
 @app.get("/monitor", response_class=HTMLResponse)
@@ -291,7 +287,7 @@ async def monitor_page(request: Request):
     ]
     ctx["glass_nodes"] = glass_nodes
     ctx["now_ts"] = int(_time.time())
-    return templates.TemplateResponse("monitor.html", ctx)
+    return templates.TemplateResponse(request, "monitor.html", ctx)
 
 
 @app.get("/system", response_class=HTMLResponse)
@@ -319,7 +315,7 @@ async def system_status_page(request: Request):
 
     ctx["glass_nodes"] = glass_nodes
     ctx["pump_nodes"] = pump_nodes
-    return templates.TemplateResponse("system_status.html", ctx)
+    return templates.TemplateResponse(request, "system_status.html", ctx)
 
 
 # ===== Exception Handlers =====
