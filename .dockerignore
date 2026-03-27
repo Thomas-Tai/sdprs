@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.git
+.gitignore
+*.md
+edge_glass/
+esp32_pump/
+docs/
+scripts/
+*.log
+.venv/
+venv/
