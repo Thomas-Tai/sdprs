@@ -109,25 +109,28 @@ class MQTTService:
             self.client.tls_set()
 
         try:
-            # Connect to broker
+            # Non-blocking connect — returns immediately; paho retries in background.
+            # This prevents blocking the FastAPI startup when EMQX isn't ready yet.
             logger.info(f"Connecting to MQTT broker at {self.settings.MQTT_BROKER}:{self.settings.MQTT_PORT}")
-            self.client.connect(
+            self.client.connect_async(
                 self.settings.MQTT_BROKER,
                 self.settings.MQTT_PORT,
-                keepalive=60
+                keepalive=60,
             )
-            
-            # Start the network loop in a background thread
+
+            # Start the network loop in a background thread (handles connect + reconnect)
             self.client.loop_start()
             self._running = True
-            
+
             # Start offline detection timer
             self._start_offline_detection()
-            
-            logger.info("MQTT service started")
-            
+
+            logger.info("MQTT service started (connecting in background)")
+
         except Exception as e:
-            logger.error(f"Failed to connect to MQTT broker: {e}")
+            logger.error(f"Failed to initiate MQTT connection: {e}")
+            logger.warning("App will start without MQTT; client will retry automatically")
+            # Keep _running = False so publish() guards work correctly
             self.client = None
     
     def stop(self):
