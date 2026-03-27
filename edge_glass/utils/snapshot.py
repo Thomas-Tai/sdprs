@@ -114,10 +114,7 @@ class SnapshotPusher(threading.Thread):
         """主迴圈。"""
         # 建立 HTTP 客戶端
         self._client = httpx.Client(
-            timeout=httpx.Timeout(
-                connect=self.CONNECT_TIMEOUT,
-                read=self.READ_TIMEOUT,
-            ),
+            timeout=httpx.Timeout(self.READ_TIMEOUT, connect=self.CONNECT_TIMEOUT),
             headers={
                 "X-API-Key": self._api_key,
                 "Content-Type": "image/jpeg",
