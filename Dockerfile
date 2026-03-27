@@ -16,9 +16,7 @@ COPY . .
 # Storage directory for MP4 uploads
 RUN mkdir -p /app/storage
 
-# Zeabur injects $PORT at runtime; default 8000 for local testing
-ENV PORT=8000
+# Zeabur injects PORT=8080 at runtime; EXPOSE must be a literal number
+EXPOSE 8080
 
-EXPOSE $PORT
-
-CMD ["sh", "-c", "uvicorn central_server.main:app --host 0.0.0.0 --port $PORT"]
+CMD ["sh", "-c", "uvicorn central_server.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
