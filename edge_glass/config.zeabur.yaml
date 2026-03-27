@@ -1,0 +1,85 @@
+# ============================================================
+# SDPRS Edge Glass Node Configuration - Zeabur Cloud
+# 雲端部署版本：指向 Zeabur 服務而非本地 LAN
+# 使用方式：CONFIG_FILE=config.zeabur.yaml python edge_glass_main.py
+# ============================================================
+
+node_id: "glass_node_01"
+
+camera:
+  source: 0
+  resolution: [1280, 720]
+  fps: 15
+
+buffer:
+  duration_seconds: 10
+
+visual:
+  edge_density_threshold: 1.5
+  baseline_window_seconds: 60
+  brightness_anomaly_percent: 50
+  min_contour_length_px: 100
+  roi_polygon: [[100,50],[1180,50],[1180,670],[100,670]]
+  canny_threshold1: 50
+  canny_threshold2: 150
+
+audio:
+  device_index: 1
+  mode: "adaptive"
+  sample_rate: 44100
+  channels: 1
+  chunk_size: 512
+  rolling_baseline_seconds: 30
+  delta_db_threshold: 20
+  spectral_flatness_threshold: 0.3
+  attack_time_ms: 10
+  analysis_window_ms: 500
+  fixed_db_threshold: 90
+  fixed_freq_threshold_hz: 3000
+
+trigger:
+  correlation_window_seconds: 2
+  cooldown_seconds: 30
+
+thermal:
+  fps_reduce_temp: 75
+  pause_visual_temp: 80
+  critical_alert_temp: 85
+
+# ── Zeabur 雲端伺服器連線設定 ──────────────────────────────────────────────────
+server:
+  # Zeabur FastAPI 服務的 HTTPS URL（部署後填入實際網址）
+  api_url: "https://your-app.zeabur.app/api"
+
+  # Zeabur EMQX TCP 轉發地址（部署後在 Zeabur 面板確認端口）
+  # 若改用 WebSocket 模式：mqtt_broker: "your-app.zeabur.app"，mqtt_port: 443
+  mqtt_broker: "hkg1.clusters.zeabur.com"
+  mqtt_port: 34567        # TODO: 部署後替換為 Zeabur 實際分配端口
+
+  # EMQX 認證（與 Zeabur 環境變數 MQTT_USERNAME/PASSWORD 一致）
+  mqtt_username: "sdprs"
+  mqtt_password: "changeme"   # TODO: 部署後替換為真實密碼
+  mqtt_use_tls: false         # Zeabur TCP 轉發為純 TCP；WebSocket 模式改 true
+
+  api_key: "changeme-random-secret-key"  # TODO: 與 Zeabur EDGE_API_KEY 一致
+
+# ── 串流設定（雲端 MVP 停用 SSH 隧道）────────────────────────────────────────
+stream:
+  type: "hls"
+  auto_stop_minutes: 5
+  tunnel_port: 18554          # 保留欄位，雲端模式不使用
+  cloud_mode: true            # 設為 true 時 StreamManager 跳過 SSH 隧道
+
+snapshot:
+  enabled: true
+  fps: 1
+  fps_degraded: 0.2
+  width: 854
+  height: 480
+  jpeg_quality: 50
+
+events:
+  local_backup_dir: "./events"
+  max_local_files: 20
+
+timezone: "Asia/Macau"

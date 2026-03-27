@@ -96,7 +96,18 @@ class MQTTService:
         
         # Configure reconnection
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
-        
+
+        # Authentication (EMQX on Zeabur)
+        if getattr(self.settings, "MQTT_USERNAME", ""):
+            self.client.username_pw_set(
+                self.settings.MQTT_USERNAME,
+                self.settings.MQTT_PASSWORD,
+            )
+
+        # TLS (for external broker with TLS enabled)
+        if getattr(self.settings, "MQTT_USE_TLS", False):
+            self.client.tls_set()
+
         try:
             # Connect to broker
             logger.info(f"Connecting to MQTT broker at {self.settings.MQTT_BROKER}:{self.settings.MQTT_PORT}")

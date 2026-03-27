@@ -1,81 +1,62 @@
 # ============================================================
-# SDPRS Central Server - Python Dependencies (M2)
+# SDPRS Central Server - Python Dependencies
 # Smart Disaster Prevention Response System
-# ============================================================
-# 安裝: pip install -r requirements.txt
 # ============================================================
 
 # ------------------------------------------------------------
 # Web Framework
 # ------------------------------------------------------------
-
-# ASGI server with WebSocket support
 uvicorn[standard]>=0.24.0
-
-# Modern web framework for APIs
 fastapi>=0.104.0
 
 # ------------------------------------------------------------
 # MQTT
 # ------------------------------------------------------------
-
-# MQTT client for subscribing to edge node messages
 paho-mqtt>=2.0.0
 
 # ------------------------------------------------------------
 # Data & Validation
 # ------------------------------------------------------------
-
-# Pydantic settings management
 pydantic-settings>=2.0.0
 
 # ------------------------------------------------------------
 # HTTP & File Upload
 # ------------------------------------------------------------
-
-# FastAPI file upload support
 python-multipart>=0.0.6
 
 # ------------------------------------------------------------
 # Templates & Sessions
 # ------------------------------------------------------------
-
-# HTML template engine
 jinja2>=3.1.0
-
-# Session cookie signing (Starlette dependency)
 itsdangerous>=2.1.0
 
 # ------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------
-
-# Environment variables from .env file
 python-dotenv>=1.0.0
 
 # ------------------------------------------------------------
-# Scheduling (M3+)
+# Scheduling
 # ------------------------------------------------------------
-
-# Job scheduling for retention cleanup
 apscheduler>=3.10.0
 
 # ------------------------------------------------------------
-# Image Processing (optional, for placeholder generation)
+# Image Processing
 # ------------------------------------------------------------
-
-# Image manipulation for placeholder snapshots
 pillow>=10.0.0
+
+# ------------------------------------------------------------
+# PostgreSQL (Zeabur cloud deployment)
+# Used when DATABASE_URL env var is set; ignored for SQLite mode
+# ------------------------------------------------------------
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0
+databases[postgresql]>=0.9.0
+psycopg2-binary>=2.9.0
 
 # ------------------------------------------------------------
 # Development / Testing
 # ------------------------------------------------------------
-
-# Testing framework
 pytest>=7.4.0
-
-# Test client for FastAPI
 httpx>=0.25.0
-
-# Coverage reporting
 pytest-cov>=4.1.0
