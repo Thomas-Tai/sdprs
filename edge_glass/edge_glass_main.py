@@ -333,7 +333,6 @@ def main():
 
     while _running:
       try:
-      try:
         loop_start = time.time()
 
         # 1. 攝像頭擷取
