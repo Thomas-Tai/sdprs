@@ -134,7 +134,8 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
 
 
 def _create_tables_postgresql(conn):
-    conn.execute("""
+    import sqlalchemy
+    conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS events (
             id                 SERIAL PRIMARY KEY,
             node_id            TEXT NOT NULL,
@@ -149,8 +150,8 @@ def _create_tables_postgresql(conn):
             notes              TEXT,
             created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-    """)
-    conn.execute("""
+    """))
+    conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS nodes (
             node_id        TEXT PRIMARY KEY,
             node_type      TEXT NOT NULL,
@@ -158,9 +159,9 @@ def _create_tables_postgresql(conn):
             status         TEXT DEFAULT 'OFFLINE',
             metadata       TEXT
         );
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);")
+    """))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))
 
 
 # =============================================================================
