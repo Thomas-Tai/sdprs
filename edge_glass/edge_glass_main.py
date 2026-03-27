@@ -154,12 +154,16 @@ def main():
     global _running
 
     # 解析命令列參數
+    # 優先順序：--config 參數 > CONFIG_FILE 環境變數 > 預設 config.yaml
+    import os as _os
+    _default_config = _os.environ.get("CONFIG_FILE", "config.yaml")
+
     parser = argparse.ArgumentParser(description="SDPRS Edge Glass Node")
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
-        help="Path to config.yaml",
+        default=_default_config,
+        help="Path to config YAML (or set CONFIG_FILE env var)",
     )
     parser.add_argument(
         "--simulate",

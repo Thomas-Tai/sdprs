@@ -49,8 +49,9 @@ class UploadWorker(threading.Thread):
     SCAN_INTERVAL = 1
 
     # HTTP 超時設定
-    CONNECT_TIMEOUT = 5.0
-    READ_TIMEOUT = 30.0
+    # 雲端部署（新加坡）對澳門 Pi 延遲約 50ms，適度增加超時
+    CONNECT_TIMEOUT = 15.0   # 本地 5s → 雲端 15s
+    READ_TIMEOUT = 60.0      # 本地 30s → 雲端 60s（MP4 上傳 WAN）
 
     def __init__(self, event_queue: EventQueue, config: dict):
         """

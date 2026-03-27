@@ -66,11 +66,15 @@ DEFAULTS: Dict[str, Any] = {
         "api_key": "changeme-random-secret-key",
         "mqtt_broker": "central-server",
         "mqtt_port": 1883,
+        "mqtt_username": "",        # EMQX auth username (cloud deployment)
+        "mqtt_password": "",        # EMQX auth password (cloud deployment)
+        "mqtt_use_tls": False,      # Enable TLS for MQTT connection (cloud)
     },
     "stream": {
         "type": "hls",
         "auto_stop_minutes": 5,
         "tunnel_port": 18554,
+        "cloud_mode": False,        # True = skip SSH tunnel, use HTTP push
     },
     "snapshot": {
         "enabled": True,

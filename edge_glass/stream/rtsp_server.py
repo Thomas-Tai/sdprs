@@ -118,18 +118,24 @@ class StreamManager:
                 self._publish_error("mediamtx_failed")
                 return False
 
-            # [2] 啟動 SSH 隧道
-            if not self._start_ssh_tunnel():
-                self._stop_mediamtx()
-                self._publish_error("ssh_tunnel_failed")
-                return False
+            # [2] 啟動串流通道
+            # cloud_mode: 跳過 SSH 隧道，改用 HTTP push（或暫停串流）
+            cloud_mode = self._config.get("stream", {}).get("cloud_mode", False)
+            if cloud_mode:
+                logger.info("Cloud mode: SSH tunnel skipped")
+            else:
+                if not self._start_ssh_tunnel():
+                    self._stop_mediamtx()
+                    self._publish_error("ssh_tunnel_failed")
+                    return False
 
             # [3] 發布 MQTT 狀態
             self._is_active = True
             self._publish_status({
                 "status": "active",
-                "tunnel_port": self._tunnel_port,
+                "tunnel_port": self._tunnel_port if not cloud_mode else 0,
                 "format": "hls",
+                "cloud_mode": cloud_mode,
             })
 
             # [4] 啟動超時計時器

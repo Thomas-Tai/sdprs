@@ -1,0 +1,48 @@
+# SDPRS Edge Glass Detection Service - Zeabur Cloud Mode
+# systemd service file for Raspberry Pi edge node (cloud deployment)
+#
+# 差異：
+#   - 不依賴 autossh-tunnel.service（雲端模式無需 SSH 隧道）
+#   - 使用 config.zeabur.yaml（指向 Zeabur 伺服器）
+#
+# 安裝: sudo cp sdprs-edge-cloud.service /etc/systemd/system/
+# 啟用: sudo systemctl daemon-reload && sudo systemctl enable sdprs-edge-cloud
+# 啟動: sudo systemctl start sdprs-edge-cloud
+# 狀態: sudo systemctl status sdprs-edge-cloud
+# 日誌: journalctl -u sdprs-edge-cloud -f
+
+[Unit]
+Description=SDPRS Edge Glass Detection Service (Zeabur Cloud)
+Documentation=https://github.com/Thomas-Tai/sdprs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sdprs
+Group=sdprs
+WorkingDirectory=/opt/sdprs/edge_glass
+
+# 指定雲端設定檔
+Environment=PYTHONUNBUFFERED=1
+Environment=CONFIG_FILE=/opt/sdprs/edge_glass/config.zeabur.yaml
+
+ExecStart=/opt/sdprs/edge_glass/venv/bin/python edge_glass_main.py
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sdprs-edge
+
+# Resource limits
+MemoryMax=1G
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

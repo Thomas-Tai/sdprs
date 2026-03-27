@@ -86,6 +86,9 @@ class MQTTClient:
                 - node_id: 節點 ID
                 - server.mqtt_broker: MQTT broker 地址
                 - server.mqtt_port: MQTT broker 端口
+                - server.mqtt_username: EMQX 用戶名（雲端部署）
+                - server.mqtt_password: EMQX 密碼（雲端部署）
+                - server.mqtt_use_tls: 是否啟用 TLS（雲端部署）
         """
         if not PAHO_AVAILABLE:
             raise ImportError("paho-mqtt is required. Install with: pip install paho-mqtt")
@@ -94,6 +97,9 @@ class MQTTClient:
         self._node_id = config.get("node_id", "edge_node")
         self._broker = config.get("server", {}).get("mqtt_broker", "localhost")
         self._port = config.get("server", {}).get("mqtt_port", 1883)
+        self._username = config.get("server", {}).get("mqtt_username", "")
+        self._password = config.get("server", {}).get("mqtt_password", "")
+        self._use_tls = config.get("server", {}).get("mqtt_use_tls", False)
 
         # 指令回調字典
         self._command_handlers: Dict[str, Callable] = {}
@@ -121,12 +127,23 @@ class MQTTClient:
         # 設定自動重連
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
 
+        # 認證（EMQX 雲端部署）
+        if self._username:
+            self._client.username_pw_set(self._username, self._password)
+            logger.info("MQTT auth configured (username/password)")
+
+        # TLS（外部 broker 加密連線）
+        if self._use_tls:
+            self._client.tls_set()
+            logger.info("MQTT TLS enabled")
+
         # 設定回調
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
 
-        logger.info(f"MQTT client initialized for node: {self._node_id}")
+        logger.info(f"MQTT client initialized for node: {self._node_id} "
+                    f"-> {self._broker}:{self._port}")
 
     def _on_connect(self, client, userdata, flags, rc):
         """連線成功回調。"""
