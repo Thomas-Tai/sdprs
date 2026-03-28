@@ -643,13 +643,13 @@ docker compose logs -f       # 查看所有容器日誌
    | 變數名稱 | 測試用值 | 說明 |
    |---|---|---|
    | `DASHBOARD_USER` | `admin` | 儀表板帳號（**必填**） |
-   | `DASHBOARD_PASS` | `Sdprs@2026Test` | 儀表板密碼（**必填**） |
-   | `EDGE_API_KEY` | `sdprs-edge-key-a1b2c3d4e5f6` | Pi 端 API 金鑰（**必填**） |
+   | `DASHBOARD_PASS` | `<your-dashboard-password>` | 儀表板密碼（**必填**） |
+   | `EDGE_API_KEY` | `<your-edge-api-key>` | Pi 端 API 金鑰（**必填**） |
    | `SECRET_KEY` | `f8e2d1c4b7a6...` (64 字元 hex) | Session 加密金鑰（**必填**） |
    | `MQTT_BROKER` | `emqx` 或 `broker.emqx.io` | MQTT broker 地址 |
    | `MQTT_PORT` | `1883` | MQTT TCP 端口 |
    | `MQTT_USERNAME` | `sdprs` | EMQX 認證用戶名 |
-   | `MQTT_PASSWORD` | `Sdprs@Mqtt2026` | EMQX 認證密碼 |
+   | `MQTT_PASSWORD` | `<your-mqtt-password>` | EMQX 認證密碼 |
 
    > **注意：** 缺少前 4 個必填變數會導致 `pydantic ValidationError` 並 crash。
    >
@@ -723,7 +723,7 @@ curl https://sdprs.zeabur.app/api/health
 
 # 儀表板登入
 # 瀏覽器開啟 https://sdprs.zeabur.app/login
-# 帳號: admin  密碼: Sdprs@2026Test
+# 帳號: admin  密碼: <your-dashboard-password>
 ```
 
 ### 步驟 5：設定 Pi 邊緣節點連接雲端
@@ -736,9 +736,9 @@ server:
   mqtt_broker: "43.156.145.157"             # EMQX Public TCP 地址（無 EMQX 則保留不影響）
   mqtt_port: 32150                          # EMQX Public TCP 端口
   mqtt_username: "sdprs"
-  mqtt_password: "Sdprs@Mqtt2026"
+  mqtt_password: "<your-mqtt-password>"
   mqtt_use_tls: false
-  api_key: "sdprs-edge-key-a1b2c3d4e5f6"  # 與 Zeabur EDGE_API_KEY 一致
+  api_key: "<your-edge-api-key>"  # 與 Zeabur EDGE_API_KEY 一致
 ```
 
 **5.2 安裝雲端模式 systemd 服務：**
