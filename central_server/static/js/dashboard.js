@@ -11,7 +11,7 @@
  */
 
 // ===== Configuration =====
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 3000; // 3 seconds
 
 // ===== State =====

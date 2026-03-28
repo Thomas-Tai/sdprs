@@ -13,7 +13,7 @@
 const SNAPSHOT_REFRESH_INTERVAL = 1000;  // 1 second
 const STALE_CHECK_INTERVAL = 5000;       // 5 seconds
 const STALE_THRESHOLD = 10;              // 10 seconds
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 3000;
 
 // ===== State =====
