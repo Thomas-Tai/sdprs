@@ -93,6 +93,10 @@ class VisualDetector:
         # [8] 形態學 kernel（預生成）
         self._morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
+        # 防震對齊日誌節流（避免刷爆日誌）
+        self._stabilize_warn_count = 0
+        self._stabilize_warn_interval = fps * 30  # 每 30 秒記錄一次
+
         # [10] 邊緣密度基線
         self._baseline_edge_density: float = 0.0
 
@@ -154,14 +158,18 @@ class VisualDetector:
             kp2, des2 = self._orb.detectAndCompute(gray, None)
 
             if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
-                logger.warning("Not enough feature points for stabilization")
+                self._stabilize_warn_count += 1
+                if self._stabilize_warn_count == 1 or self._stabilize_warn_count % self._stabilize_warn_interval == 0:
+                    logger.info("Stabilization skipped: not enough feature points (count=%d)", self._stabilize_warn_count)
                 return gray
 
             # 匹配特徵點
             matches = self._bf_matcher.match(des1, des2)
 
             if len(matches) < 10:
-                logger.warning("Not enough matches for stabilization")
+                self._stabilize_warn_count += 1
+                if self._stabilize_warn_count == 1 or self._stabilize_warn_count % self._stabilize_warn_interval == 0:
+                    logger.info("Stabilization skipped: not enough matches (count=%d)", self._stabilize_warn_count)
                 return gray
 
             # 取得匹配點座標

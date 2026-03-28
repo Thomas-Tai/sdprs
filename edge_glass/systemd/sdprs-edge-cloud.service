@@ -21,17 +21,21 @@ Wants=network-online.target
 Type=simple
 User=sdprs
 Group=sdprs
+SupplementaryGroups=video audio
 WorkingDirectory=/opt/sdprs/edge_glass
 
 # 指定雲端設定檔
 Environment=PYTHONUNBUFFERED=1
 Environment=CONFIG_FILE=/opt/sdprs/edge_glass/config.zeabur.yaml
 
+# 等待網路就緒（WiFi 可能啟動較慢）
+ExecStartPre=/bin/bash -c "for i in 1 2 3 4 5 6; do curl -sf --max-time 3 https://sdprs.zeabur.app/api/health && break || sleep 5; done || true"
+
 ExecStart=/opt/sdprs/edge_glass/venv/bin/python edge_glass_main.py
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitIntervalSec=600
+StartLimitBurst=10
 TimeoutStartSec=30
 TimeoutStopSec=30
 

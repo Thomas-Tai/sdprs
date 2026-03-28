@@ -112,6 +112,11 @@ if ! id -u sdprs &>/dev/null; then
     echo "已建立 sdprs 用戶"
 fi
 
+# 確保 sdprs 用戶在 video 和 audio 群組（攝像頭 + 麥克風存取）
+usermod -aG video sdprs
+usermod -aG audio sdprs
+echo "sdprs 用戶已加入 video, audio 群組"
+
 # 建立目錄結構
 mkdir -p /opt/sdprs/edge_glass
 mkdir -p /opt/sdprs/edge_glass/events
@@ -234,16 +239,27 @@ chmod 600 /opt/sdprs/edge_glass/.env.tunnel
 # ===== Step 5/6: systemd 服務安裝 =====
 echo -e "${GREEN}[Step 5/6] 安裝 systemd 服務...${NC}"
 
-# 複製服務檔案
+# 複製服務檔案（LAN + 雲端模式）
 cp /opt/sdprs/edge_glass/systemd/sdprs-edge.service /etc/systemd/system/
 cp /opt/sdprs/edge_glass/systemd/autossh-tunnel.service /etc/systemd/system/
+cp /opt/sdprs/edge_glass/systemd/sdprs-edge-cloud.service /etc/systemd/system/
+
+# 安裝 curl（雲端模式 ExecStartPre 需要）
+apt-get install -y curl 2>/dev/null || true
 
 # 重新載入 systemd
 systemctl daemon-reload
 
-# 啟用服務
+# 啟用 LAN 模式服務（預設）
 systemctl enable sdprs-edge
 systemctl enable autossh-tunnel
+
+# 雲端模式提示
+echo ""
+echo -e "如使用 Zeabur 雲端模式，請執行:"
+echo "  sudo systemctl disable sdprs-edge autossh-tunnel"
+echo "  sudo systemctl enable sdprs-edge-cloud"
+echo "  sudo systemctl start sdprs-edge-cloud"
 
 # 啟動服務
 systemctl start sdprs-edge

@@ -19,6 +19,7 @@ Wants=network-online.target autossh-tunnel.service
 Type=simple
 User=sdprs
 Group=sdprs
+SupplementaryGroups=video audio
 WorkingDirectory=/opt/sdprs/edge_glass
 ExecStart=/opt/sdprs/edge_glass/venv/bin/python edge_glass_main.py --config /opt/sdprs/edge_glass/config.yaml
 Restart=on-failure
