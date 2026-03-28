@@ -7,7 +7,7 @@
     <!-- 頁面標題 -->
     <div class="flex items-center justify-between">
         <h1 class="text-2xl font-bold text-gray-800">監控牆 — 即時攝像頭快照</h1>
-        <span class="text-sm text-gray-500">自動每秒刷新</span>
+        <span class="text-sm text-gray-500">自動每秒刷新 | 點擊放大</span>
     </div>
     
     {% if glass_nodes %}
@@ -33,12 +33,12 @@
                 
                 <!-- 離線遮罩 -->
                 <div id="offline-overlay-{{ node.node_id }}" class="offline-overlay absolute inset-0 flex items-center justify-center {% if node.status != 'OFFLINE' %}hidden{% endif %}">
-                    <span class="text-white font-bold text-lg">⚠️ 離線</span>
+                    <span class="text-white font-bold text-lg">離線</span>
                 </div>
                 
                 <!-- 快照停滯遮罩 -->
                 <div id="stale-overlay-{{ node.node_id }}" class="stale-overlay absolute inset-0 flex items-center justify-center {% if not node.is_stale %}hidden{% endif %}">
-                    <span class="text-white font-bold">⚠️ 快照停滯</span>
+                    <span class="text-white font-bold">快照停滯</span>
                 </div>
             </div>
             
@@ -53,8 +53,8 @@
                 </span>
             </div>
             
-            <!-- 點擊跳轉 -->
-            <a href="/?node={{ node.node_id }}" class="absolute inset-0 z-10" title="查看 {{ node.node_id }} 詳情"></a>
+            <!-- 點擊放大 -->
+            <div class="absolute inset-0 z-10 cursor-pointer" onclick="openLightbox('{{ node.node_id }}')" title="點擊放大"></div>
         </div>
         {% endfor %}
     </div>
@@ -68,10 +68,28 @@
     </div>
     {% endif %}
 </div>
+
+<!-- Lightbox 全螢幕檢視 -->
+<div id="lightbox" class="lightbox hidden" onclick="closeLightboxOnBg(event)">
+    <div class="lightbox-header">
+        <span id="lightbox-title" class="text-white font-mono text-lg"></span>
+        <div class="flex items-center gap-3">
+            <a id="lightbox-link" href="/" class="text-blue-300 hover:text-blue-100 text-sm">查看詳情</a>
+            <button onclick="resetZoom()" class="text-gray-300 hover:text-white text-sm px-2 py-1 border border-gray-500 rounded">重置縮放</button>
+            <button onclick="closeLightbox()" class="text-white text-3xl leading-none hover:text-red-400">&times;</button>
+        </div>
+    </div>
+    <div class="lightbox-body" id="lightbox-body">
+        <img id="lightbox-img" src="" alt="放大快照" draggable="false">
+    </div>
+    <div class="lightbox-footer">
+        <span class="text-gray-400 text-sm">滾輪/捏合縮放 | 拖曳平移 | ESC 關閉</span>
+        <span id="lightbox-zoom-level" class="text-gray-300 text-sm font-mono">100%</span>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 {{ super() }}
-<!-- Monitor-specific JS -->
 <script src="/static/js/monitor.js"></script>
 {% endblock %}
