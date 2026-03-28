@@ -265,8 +265,55 @@ sdprs/
 | 項目                     | 規格              | 數量 | 備註               |
 | ------------------------ | ----------------- | ---- | ------------------ |
 | Raspberry Pi 4           | **4GB RAM** | 1    | 環形緩衝需 ~415MB  |
-| USB 攝像頭 或 CSI 攝像頭 | 720p 以上         | 1    | 對準玻璃窗         |
+| USB 攝像頭 或 CSI 攝像頭 | 720p 以上         | 1    | 對準玻璃窗（見下方相容性表） |
 | USB 麥克風               | PyAudio 相容      | 1    | 收音偵測玻璃破裂聲 |
+
+#### 攝像頭相容性
+
+系統使用 `cv2.VideoCapture(source)` 開啟攝像頭，**不綁定任何特定型號**。只要被系統識別為 V4L2 裝置即可使用。
+
+| 攝像頭類型 | 支援狀態 | config 設定 | 備註 |
+|-----------|---------|------------|------|
+| USB Webcam（Logitech C920 等） | **開箱即用** | `source: 0` | 已驗證；音訊 sample_rate 需配合型號 |
+| 其他 USB Webcam | **開箱即用** | `source: 0` 或 `"/dev/videoN"` | 插入後用 `v4l2-ctl --list-devices` 確認路徑 |
+| Pi Camera Module v2/v3（CSI） | **需額外設定** | `source: 0` | 需先載入 V4L2 驅動，見下方說明 |
+| RTSP 網路攝像頭（IP Cam） | **支援** | `source: "rtsp://ip:port/stream"` | 需確保網路延遲 < 100ms |
+
+**Pi Camera Module 設定方法：**
+
+Pi Camera 走 CSI 介面，預設不是 V4L2 裝置。需要橋接：
+
+```bash
+# 方法 A：載入 V4L2 驅動（推薦，最簡單）
+sudo modprobe bcm2835-v4l2
+# 驗證
+v4l2-ctl --list-devices
+# 應顯示 /dev/video0
+
+# 開機自動載入
+echo "bcm2835-v4l2" | sudo tee -a /etc/modules
+```
+
+載入後 `source: 0` 即可使用，無需改程式碼。
+
+**多攝像頭選擇：**
+
+若同時插了多個 USB 攝像頭，需指定裝置路徑：
+
+```bash
+v4l2-ctl --list-devices
+# 範例輸出：
+#   HD Pro Webcam C920 (usb-...):
+#       /dev/video0
+#       /dev/video1
+#   USB Camera (usb-...):
+#       /dev/video2
+```
+
+```yaml
+camera:
+  source: "/dev/video2"   # 指定第二個攝像頭
+```
 | microSD 卡               | 32GB              | 1    | 事件暫存           |
 | USB-C 電源               | 5V/3A             | 1    |                    |
 | 乙太網路線               | Cat5e/Cat6        | 1    | 可用 WiFi 但不建議 |
@@ -1144,7 +1191,7 @@ node_id: "glass_node_01"                # 每台不同
 
 # 攝像頭設定
 camera:
-  source: 0                             # 0 = 預設攝像頭，或裝置路徑
+  source: 0                             # 0 = 預設攝像頭 | "/dev/videoN" | "rtsp://..." 
   resolution: [1280, 720]               # 720p（不要改成更高，記憶體限制）
   fps: 15                               # 幀率
 
@@ -1722,7 +1769,8 @@ sudo systemctl restart sdprs-edge-cloud
 **驗證攝影機裝置：**
 ```bash
 v4l2-ctl --list-devices
-# Logitech C920 應顯示於 /dev/video0
+# USB webcam 應顯示於 /dev/video0（或 /dev/video2 等）
+# Pi Camera Module 需先 sudo modprobe bcm2835-v4l2
 ```
 
 ---
