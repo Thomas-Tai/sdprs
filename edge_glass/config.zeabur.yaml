@@ -24,9 +24,9 @@ visual:
   canny_threshold2: 150
 
 audio:
-  device_index: 1
+  device_index: 0
   mode: "adaptive"
-  sample_rate: 44100
+  sample_rate: 16000
   channels: 1
   chunk_size: 512
   rolling_baseline_seconds: 30
@@ -49,19 +49,19 @@ thermal:
 # ── Zeabur 雲端伺服器連線設定 ──────────────────────────────────────────────────
 server:
   # Zeabur FastAPI 服務的 HTTPS URL（部署後填入實際網址）
-  api_url: "https://your-app.zeabur.app/api"
+  api_url: "https://sdprs.zeabur.app/api"
 
   # Zeabur EMQX TCP 轉發地址（部署後在 Zeabur 面板確認端口）
   # 若改用 WebSocket 模式：mqtt_broker: "your-app.zeabur.app"，mqtt_port: 443
-  mqtt_broker: "hkg1.clusters.zeabur.com"
-  mqtt_port: 34567        # TODO: 部署後替換為 Zeabur 實際分配端口
+  mqtt_broker: "hkg1.clusters.zeabur.com"  # TODO: 確認 EMQX 公開地址
+  mqtt_port: 34567                         # TODO: 替換為 EMQX 公開端口
 
   # EMQX 認證（與 Zeabur 環境變數 MQTT_USERNAME/PASSWORD 一致）
   mqtt_username: "sdprs"
-  mqtt_password: "changeme"   # TODO: 部署後替換為真實密碼
+  mqtt_password: "Sdprs@Mqtt2026"
   mqtt_use_tls: false         # Zeabur TCP 轉發為純 TCP；WebSocket 模式改 true
 
-  api_key: "changeme-random-secret-key"  # TODO: 與 Zeabur EDGE_API_KEY 一致
+  api_key: "sdprs-edge-key-a1b2c3d4e5f6"
 
 # ── 串流設定（雲端 MVP 停用 SSH 隧道）────────────────────────────────────────
 stream:
