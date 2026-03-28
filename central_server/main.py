@@ -285,6 +285,20 @@ async def monitor_page(request: Request):
         for nid, state in node_states.items()
         if state.get("type") == "glass"
     ]
+
+    # Also include nodes that have snapshots but no MQTT heartbeat yet
+    snapshots = getattr(request.app.state, "latest_snapshots", {})
+    mqtt_node_ids = {n["node_id"] for n in glass_nodes}
+    for nid, snap_data in snapshots.items():
+        if nid not in mqtt_node_ids:
+            glass_nodes.append({
+                "node_id": nid,
+                "status": "ONLINE",
+                "type": "glass",
+                "snapshot_timestamp": snap_data.get("timestamp", ""),
+                "is_stale": False,
+            })
+
     ctx["glass_nodes"] = glass_nodes
     ctx["now_ts"] = int(_time.time())
     return templates.TemplateResponse(request, "monitor.html", ctx)
