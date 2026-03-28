@@ -604,88 +604,113 @@ docker compose logs -f       # 查看所有容器日誌
 ## 八A、中央伺服器部署（Zeabur 雲端方案）
 
 > **適用場景：WiFi AP 隔離、不允許有線連接、無法修改路由器設定。**
-> 中央伺服器部署至 Zeabur 雲端（新加坡），Raspberry Pi 只需要出站網際網路連線。
+> 中央伺服器部署至 Zeabur 雲端，Raspberry Pi 只需要出站網際網路連線。
 
 ### 前提條件
 
 - GitHub 帳號（Zeabur 透過 GitHub 自動部署）
-- Zeabur 帳號 (https://zeabur.com) 或 Tencent Cloud 帳號
-- 已將 `sdprs` repo push 至 GitHub（含 `Dockerfile`）
+- Zeabur 帳號 (https://zeabur.com)
+- 已將 `sdprs` repo push 至 GitHub（含 `Dockerfile` 和 `zbpack.json`）
+
+### 關鍵檔案
+
+| 檔案 | 用途 |
+|------|------|
+| `Dockerfile` | 定義 Docker 映像（python:3.11-slim base） |
+| `zbpack.json` | 告訴 Zeabur 使用 Dockerfile build（**必須**，否則 zbpack 自動偵測會失敗） |
+| `.dockerignore` | 排除 edge_glass/、docs/ 等不需要的檔案 |
+| `config.zeabur.yaml` | Pi 端雲端模式配置 |
+| `systemd/sdprs-edge-cloud.service` | Pi 端雲端模式 systemd 服務 |
+
+### zbpack.json 內容
+
+```json
+{
+  "build_type": "dockerfile"
+}
+```
+
+> **重要：** 若此檔案不存在或包含 `build_command`/`start_command`，Zeabur 會使用 Python buildpack（alpine base），
+> 導致映像不正確（Pod 拉取 alpine:latest 而非 python:3.11-slim）。
 
 ### 步驟 1：建立 Zeabur 專案並部署伺服器
 
 1. 登入 Zeabur → **新建專案**
 2. 選擇 **Deploy from GitHub** → 選擇 `sdprs` repo
-3. Zeabur 自動偵測到 `Dockerfile` → 點擊部署
+3. Zeabur 偵測到 `zbpack.json` 中 `build_type: dockerfile` → 使用 `Dockerfile` 構建
 4. 進入服務設定 → **Variables** 頁面，添加以下環境變數：
 
-   | 變數名稱 | 値 | 說明 |
+   | 變數名稱 | 測試用值 | 說明 |
    |---|---|---|
-   | `SECRET_KEY` | 隨機 48 字元字串 | Session 加密金鑰（**必填**） |
-   | `EDGE_API_KEY` | 隨機字串 | Pi 端 API 金鑰 |
-   | `DASHBOARD_USER` | admin | 儀表板帳號 |
-   | `DASHBOARD_PASS` | 強密碼 | 儀表板密碼 |
-   | `MQTT_BROKER` | EMQX 部署後填入 | EMQX 服務地址 |
-   | `MQTT_PORT` | 1883 | MQTT TCP 端口 |
-   | `MQTT_USERNAME` | sdprs | EMQX 認證用戶名 |
-   | `MQTT_PASSWORD` | 強密碼 | EMQX 認證密碼 |
-   | `DATABASE_URL` | PostgreSQL 部署後自動注入 | PostgreSQL 連線串 |
+   | `DASHBOARD_USER` | `admin` | 儀表板帳號（**必填**） |
+   | `DASHBOARD_PASS` | `Sdprs@2026Test` | 儀表板密碼（**必填**） |
+   | `EDGE_API_KEY` | `sdprs-edge-key-a1b2c3d4e5f6` | Pi 端 API 金鑰（**必填**） |
+   | `SECRET_KEY` | `f8e2d1c4b7a6...` (64 字元 hex) | Session 加密金鑰（**必填**） |
+   | `MQTT_BROKER` | `emqx` 或 `broker.emqx.io` | MQTT broker 地址 |
+   | `MQTT_PORT` | `1883` | MQTT TCP 端口 |
+   | `MQTT_USERNAME` | `sdprs` | EMQX 認證用戶名 |
+   | `MQTT_PASSWORD` | `Sdprs@Mqtt2026` | EMQX 認證密碼 |
 
+   > **注意：** 缺少前 4 個必填變數會導致 `pydantic ValidationError` 並 crash。
+   >
    > **生成隨機密鑰：**
    > ```bash
-   > python3 -c "import secrets; print(secrets.token_hex(24))"
+   > python3 -c "import secrets; print(secrets.token_hex(32))"
    > ```
 
-### 步驟 2：部署 PostgreSQL 資料庫
+   > **MVP 簡化方案（選項 A — 跳過 MQTT）：**
+   > 只設 4 個必填變數即可啟動伺服器。MQTT 使用 `connect_async()` 非阻塞連線，
+   > 連不上不會 crash。Pi 透過 HTTP POST 上傳快照和告警，不依賴 MQTT。
+   > 監控牆會自動從快照數據顯示在線節點。
 
-1. 在同一個 Zeabur 專案中，點擊 **新增服務**
-2. 選擇 **Marketplace** → **PostgreSQL**
-3. 部署完成後，Zeabur 會自動將 `DATABASE_URL` 注入到同專案所有服務
-4. FastAPI 服務自動重新部署
+### 步驟 2：部署 PostgreSQL 資料庫（可選）
 
-### 步驟 3：部署 EMQX MQTT Broker
+MVP 階段可跳過。未設定 `DATABASE_URL` 時，系統自動使用 SQLite（WAL mode）。
 
+如需 PostgreSQL：
+1. 在同一個 Zeabur 專案中，點擊 **新增服務** → **Marketplace** → **PostgreSQL**
+2. 手動添加環境變數：
+   ```
+   DATABASE_URL=postgresql://${POSTGRESQL_USERNAME}:${POSTGRESQL_PASSWORD}@${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${POSTGRESQL_DATABASE}
+   ```
+   > Zeabur 不會自動注入 `DATABASE_URL`，需手動設定並使用 `${VAR}` 引用語法。
+
+### 步驟 3：部署 EMQX MQTT Broker（可選，MVP 可跳過）
+
+如需 MQTT 心跳和指令功能：
 1. 點擊 **新增服務** → **Marketplace** → **EMQX**
-   (或手動輸入 Docker image: `emqx/emqx:5`)
-2. EMQX 部署後，在 **Networking** 頁面查看 TCP 端口
-3. 記下外部 TCP 端口，填入 FastAPI 服務的 `MQTT_BROKER` 和 `MQTT_PORT`
-4. 登入 EMQX Dashboard（預設 http://your-emqx:18083，帳密 admin/public）建立 MQTT 用戶：
-   - 用戶名：`sdprs`
-   - 密碼：與 `MQTT_PASSWORD` 環境變數相同
+2. EMQX 部署後，在 **Networking** 頁面對 port 1883 啟用 **TCP Port Forwarding**
+3. 記下外部地址（如 `hkg1.clusters.zeabur.com:54321`）
+4. 更新 FastAPI 服務的 `MQTT_BROKER` 和 `MQTT_PORT` 環境變數
+
+> **注意：** Zeabur 內部服務間可用服務名 `emqx` 通訊。
+> 但 Pi（外部網路）必須使用 EMQX 的公開 TCP 轉發地址。
 
 ### 步驟 4：驗證雲端伺服器
 
-部署完成後，在瀏覽器打開 Zeabur 提供的 URL：
-
-```
-https://your-app.zeabur.app/api/health
-# 應回傳 {"status": "ok", "db_mode": "postgresql"}
-```
-
-登入儀表板：
-
-```
-https://your-app.zeabur.app/login
-```
-
-### 步驟 5：設定邀緣節點連接雲端
-
-**5.1 修改 config.zeabur.yaml：**
-
 ```bash
-sudo nano /opt/sdprs/edge_glass/config.zeabur.yaml
+# 健康檢查
+curl https://sdprs.zeabur.app/api/health
+# 應回傳 {"status": "healthy", "timestamp": "...", "service": "sdprs-central-server"}
+
+# 儀表板登入
+# 瀏覽器開啟 https://sdprs.zeabur.app/login
+# 帳號: admin  密碼: Sdprs@2026Test
 ```
 
-將 TODO 項目全部填入實際値：
+### 步驟 5：設定 Pi 邊緣節點連接雲端
+
+**5.1 修改 Pi 端 `config.zeabur.yaml`：**
 
 ```yaml
 server:
-  api_url: "https://your-app.zeabur.app/api"
-  mqtt_broker: "hkg1.clusters.zeabur.com"  # 實際地址
-  mqtt_port: 34567                          # 實際分配端口
+  api_url: "https://sdprs.zeabur.app/api"
+  mqtt_broker: "hkg1.clusters.zeabur.com"  # EMQX 公開地址（無 EMQX 則保留不影響）
+  mqtt_port: 34567                          # EMQX 公開端口
   mqtt_username: "sdprs"
-  mqtt_password: "你的MQTT密碼"
-  api_key: "你的EDGE_API_KEY"
+  mqtt_password: "Sdprs@Mqtt2026"
+  mqtt_use_tls: false
+  api_key: "sdprs-edge-key-a1b2c3d4e5f6"  # 與 Zeabur EDGE_API_KEY 一致
 ```
 
 **5.2 安裝雲端模式 systemd 服務：**
@@ -697,24 +722,52 @@ sudo systemctl enable sdprs-edge-cloud
 sudo systemctl start sdprs-edge-cloud
 
 # 驗證
-sudo systemctl status sdprs-edge-cloud
-journalctl -u sdprs-edge-cloud -f
-# 應看到 "Connected to MQTT" 連線日誌
+journalctl -u sdprs-edge-cloud -n 20 --no-pager
+# 應看到：
+#   Audio stream started
+#   MQTT client: Registered handler for command: stream_start
+#   HTTP Request: POST https://sdprs.zeabur.app/api/edge/glass_node_01/snapshot "HTTP/1.1 204 No Content"
 ```
 
-> **注意：** 雲端模式不需要啟動 `autossh-tunnel.service`。
+> **注意：** 雲端模式不需要 `autossh-tunnel.service`。
 > `config.zeabur.yaml` 中 `stream.cloud_mode: true` 會自動跳過 SSH 隧道。
 
-### 步驟 6：設定自動備份（可選，強烈建議）
+**5.3 Pi 硬體注意事項：**
+
+| 項目 | 設定 |
+|------|------|
+| USB 攝影機 | `camera.source: 0`（Logitech C920 在 PyAudio index 0） |
+| 音訊 sample rate | `audio.sample_rate: 16000`（C920 只支援 16000 或 32000 Hz，**不支援 44100**） |
+| 音訊 device index | `audio.device_index: 0`（PyAudio index，非 ALSA card 號碼） |
+| systemd user | `sdprs` 需加入 `video` 和 `audio` group |
+
+```bash
+# 必須執行（否則攝影機/麥克風無法存取）
+sudo usermod -aG video,audio sdprs
+```
+
+### 步驟 6：設定自動備份（可選）
 
 見 [二十、Zeabur 雲端備份管理](#二十zeabur-雲端備份管理)
 
+### Zeabur 常見部署問題速查
+
+| 症狀 | 原因 | 解法 |
+|------|------|------|
+| Build 日誌空白 / Pod 拉取 alpine | `zbpack.json` 缺少 `build_type: dockerfile` | 確認 `zbpack.json` 只有 `{"build_type": "dockerfile"}` |
+| `pydantic ValidationError: 4 errors` | 4 個必填環境變數未設定 | 在 Variables 添加 DASHBOARD_USER/PASS、EDGE_API_KEY、SECRET_KEY |
+| `EXPOSE $PORT` build 失敗 | Dockerfile EXPOSE 不支援變數 | 使用 `EXPOSE 8080`，CMD 中用 `${PORT:-8080}` |
+| 啟動後 502 但 logs 正常 | 舊 Pod 仍在路由 | 等待舊 Pod 終止，或在 Zeabur 面板強制重新部署 |
+| MQTT 連線 timeout（Pi 端） | `mqtt_broker` 用了 Zeabur 內部名 `emqx` | Pi 需使用 EMQX 的公開 TCP 轉發地址 |
+| 監控牆/節點數為 0 | 無 MQTT 心跳 | 正常（MVP 方案 A）；監控牆透過快照數據顯示節點 |
+
 ### 雲端部署驗證清單
 
-- [ ] `https://your-app.zeabur.app/api/health` 回傳 `{"status": "ok"}`
-- [ ] 儀表板可以成功登入
-- [ ] Pi 端 `journalctl -u sdprs-edge-cloud -f` 看到 MQTT 連線成功
-- [ ] 儀表板「系統狀態」頁顯示 Pi 節點為「在線」
+- [ ] `https://sdprs.zeabur.app/api/health` 回傳 `{"status": "healthy"}`
+- [ ] 儀表板（`/login`）可以成功登入
+- [ ] Pi 端 `journalctl` 看到 snapshot POST `204 No Content`
+- [ ] 監控牆（`/monitor`）顯示 Pi 攝影機即時快照
+- [ ] 主控台（`/`）顯示節點: 1/1
 
 ---
 
@@ -1519,6 +1572,115 @@ nc -zv hkg1.clusters.zeabur.com 34567
 - 確認已登入（WebSocket 需要 Session Cookie）
 - 檢查 `SECRET_KEY` 環境變數是否已設定
 - Zeabur 自動提供 HTTPS + wss://，确認 URL 使用 `https://`
+
+### 問題 11：Edge 服務啟動後攝影機顯示 "Camera index out of range"
+
+**原因：** `sdprs` 系統用戶沒有 `video` 群組權限，無法存取 `/dev/video0`（權限為 `crw-rw---- root video`）。
+
+**診斷：**
+```bash
+groups sdprs
+# 若輸出不含 video，即為此問題
+```
+
+**解法：**
+```bash
+sudo usermod -aG video sdprs
+sudo systemctl restart sdprs-edge-cloud
+```
+
+**驗證攝影機裝置：**
+```bash
+v4l2-ctl --list-devices
+# Logitech C920 應顯示於 /dev/video0
+```
+
+---
+
+### 問題 12：Edge 服務啟動後 PyAudio SEGV / "Invalid sample rate"
+
+**症狀：**
+- `systemd` 顯示 `Main process exited, code=killed, status=11/SEGV`
+- 或 `[Errno -9997] Invalid sample rate`
+
+**原因一：`sdprs` 沒有 `audio` 群組 → SEGV**
+```bash
+sudo usermod -aG audio sdprs
+sudo systemctl restart sdprs-edge-cloud
+```
+
+**原因二：`config.zeabur.yaml` 中 `device_index` 錯誤 → SEGV**
+
+PyAudio 嘗試開啟不存在的裝置導致 PortAudio crash。確認正確 index：
+```bash
+/opt/sdprs/edge_glass/venv/bin/python 2>/dev/null -c "
+import pyaudio
+pa = pyaudio.PyAudio()
+for i in range(pa.get_device_count()):
+    d = pa.get_device_info_by_index(i)
+    if d['maxInputChannels'] > 0:
+        print(f'index={i}, name={d[\"name\"]}')
+pa.terminate()
+"
+# 範例輸出：index=0, name=HD Pro Webcam C920: USB Audio (hw:2,0)
+```
+
+然後在 config 設定對應 index（通常為 `0`）。
+
+**原因三：`sample_rate` 不被攝影機支援 → Invalid sample rate**
+
+Logitech C920 麥克風只支援 `16000` 或 `32000` Hz（**不支援 44100 Hz**）：
+```bash
+arecord -D hw:2,0 --dump-hw-params /dev/null 2>&1 | grep RATE
+# RATE: [16000 32000]
+```
+
+在 `config.zeabur.yaml` 修改：
+```yaml
+audio:
+  device_index: 0       # PyAudio index（非 ALSA card 號碼）
+  sample_rate: 16000    # C920 支援 16000 或 32000
+```
+
+---
+
+### 問題 13：Edge 服務啟動後 `httpx.Timeout` ValueError / TypeError
+
+**症狀：**
+```
+ValueError: httpx.Timeout must either include a default, or set all four parameters explicitly.
+TypeError: Timeout.__init__() got an unexpected keyword argument 'default'
+```
+
+**原因：** 不同版本 httpx 的 `Timeout` API 不同。統一使用位置參數語法（所有版本相容）：
+
+```python
+# 錯誤（舊語法）：
+httpx.Timeout(connect=15, read=60)
+
+# 正確（相容所有版本）：
+httpx.Timeout(60, connect=15)  # 第一個位置參數為 default
+```
+
+若手動修 Pi 上的檔案：
+```bash
+python3 -c "
+import pathlib
+for path in [
+    '/opt/sdprs/edge_glass/comms/api_uploader.py',
+    '/opt/sdprs/edge_glass/utils/snapshot.py',
+]:
+    p = pathlib.Path(path)
+    c = p.read_text()
+    old = 'timeout=httpx.Timeout(\n                connect=self.CONNECT_TIMEOUT,\n                read=self.READ_TIMEOUT,\n            ),'
+    new = 'timeout=httpx.Timeout(self.READ_TIMEOUT, connect=self.CONNECT_TIMEOUT),'
+    if old in c:
+        p.write_text(c.replace(old, new))
+        print(f'Fixed: {path}')
+"
+```
+
+---
 
 ---
 
