@@ -7,17 +7,18 @@
  * - Stale detection (>10s without update)
  * - Offline detection
  * - WebSocket status updates
+ *
+ * NOTE: WebSocket connection is managed by base.html.
+ *       This script overrides handleWSMessage() to add monitor-specific logic.
  */
 
 // ===== Configuration =====
 const SNAPSHOT_REFRESH_INTERVAL = 1000;  // 1 second
 const STALE_CHECK_INTERVAL = 5000;       // 5 seconds
 const STALE_THRESHOLD = 10;              // 10 seconds
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 3000;
 
 // ===== State =====
-let ws = null;
 let nodeStates = {};
 
 // ===== Snapshot Refresh =====
@@ -104,37 +105,14 @@ function updateNodeCard(node) {
     }
 }
 
-// ===== WebSocket Connection =====
-function connectWebSocket() {
-    ws = new WebSocket(WS_URL);
+// ===== Override base.html handleWSMessage to add monitor-specific logic =====
+handleWSMessage = function(msg) {
+    // Status bar updates (from base.html logic)
+    updateStatusBar(msg);
     
-    ws.onopen = function() {
-        console.log('[Monitor WS] Connected');
-    };
-    
-    ws.onmessage = function(event) {
-        try {
-            const msg = JSON.parse(event.data);
-            handleWSMessage(msg);
-        } catch (e) {
-            console.error('[Monitor WS] Parse error:', e);
-        }
-    };
-    
-    ws.onclose = function() {
-        console.log('[Monitor WS] Disconnected');
-        setTimeout(connectWebSocket, RECONNECT_DELAY);
-    };
-    
-    ws.onerror = function(error) {
-        console.error('[Monitor WS] Error:', error);
-    };
-}
-
-function handleWSMessage(msg) {
+    // Monitor-specific updates
     switch (msg.type) {
         case 'node_status':
-            // Update specific node
             if (msg.data && msg.data.node_id) {
                 nodeStates[msg.data.node_id] = {
                     ...nodeStates[msg.data.node_id],
@@ -145,7 +123,6 @@ function handleWSMessage(msg) {
             break;
             
         case 'pump_status':
-            // Update pump node
             if (msg.data && msg.data.node_id) {
                 nodeStates[msg.data.node_id] = {
                     ...nodeStates[msg.data.node_id],
@@ -156,45 +133,15 @@ function handleWSMessage(msg) {
             }
             break;
     }
-}
+};
 
 // ===== Image Error Handling =====
 function setupImageErrorHandlers() {
     document.querySelectorAll('.snapshot-card img').forEach(img => {
         img.onerror = function() {
-            // On error, the server returns a placeholder image
-            // Just retry the same URL
             console.log(`[Monitor] Image load error for ${img.id}`);
         };
     });
-}
-
-// ===== Utility Functions =====
-function formatTimestamp(isoString) {
-    if (!isoString) return '-';
-    
-    try {
-        const date = new Date(isoString);
-        const now = new Date();
-        const diffMs = now - date;
-        const diffSec = Math.floor(diffMs / 1000);
-        
-        // Show relative time for recent updates
-        if (diffSec < 60) {
-            return `${diffSec}秒前`;
-        } else if (diffSec < 3600) {
-            return `${Math.floor(diffSec / 60)}分鐘前`;
-        } else {
-            return date.toLocaleString('zh-TW', {
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        }
-    } catch (e) {
-        return isoString;
-    }
 }
 
 // ===== Initialization =====
@@ -211,11 +158,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Setup image error handlers
     setupImageErrorHandlers();
     
-    // Connect WebSocket
-    connectWebSocket();
+    // WebSocket is already connected by base.html
+    // handleWSMessage has been overridden above
     
     console.log('[Monitor] Initialized');
 });
-
-// Export for global access
-window.formatTimestamp = formatTimestamp;
