@@ -174,8 +174,14 @@ def _get_dashboard_context(request: Request) -> dict:
     mqtt_svc = get_mqtt_service()
     node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
 
+    # Also count nodes that have snapshots but no MQTT heartbeat
+    snapshots = getattr(request.app.state, "latest_snapshots", {})
+    snapshot_only_nodes = {nid for nid in snapshots if nid not in node_states}
+
     online_count = sum(1 for s in node_states.values() if s.get("status") == "ONLINE")
+    online_count += len(snapshot_only_nodes)  # snapshot = online
     offline_count = sum(1 for s in node_states.values() if s.get("status") == "OFFLINE")
+    total_nodes = len(node_states) + len(snapshot_only_nodes)
     pump_active = sum(
         1 for s in node_states.values()
         if s.get("type") == "pump" and s.get("pump_state") == "ON"
@@ -189,7 +195,7 @@ def _get_dashboard_context(request: Request) -> dict:
         "resolved_count": counts.get("resolved", 0),
         "online_count": online_count,
         "offline_count": offline_count,
-        "total_nodes": len(node_states),
+        "total_nodes": total_nodes,
         "pump_active_count": pump_active,
     }
 
