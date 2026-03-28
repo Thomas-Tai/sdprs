@@ -53,8 +53,8 @@ server:
 
   # Zeabur EMQX TCP 轉發地址（部署後在 Zeabur 面板確認端口）
   # 若改用 WebSocket 模式：mqtt_broker: "your-app.zeabur.app"，mqtt_port: 443
-  mqtt_broker: "43.156.145.157"             # Zeabur EMQX 公開地址
-  mqtt_port: 32150                         # Zeabur EMQX 公開端口
+  mqtt_broker: "CHANGE_ME"                  # TODO: Zeabur EMQX Public TCP 公開地址
+  mqtt_port: 1883                          # TODO: Zeabur EMQX Public TCP 公開端口
 
   # EMQX 認證（與 Zeabur 環境變數 MQTT_USERNAME/PASSWORD 一致）
   mqtt_username: "sdprs"
