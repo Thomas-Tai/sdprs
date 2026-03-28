@@ -6,6 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends     libpq-dev g
 
 WORKDIR /app
 
+# Ensure crash tracebacks appear in Zeabur logs
+ENV PYTHONUNBUFFERED=1
+
 # Install Python dependencies first (layer cache)
 COPY central_server/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
@@ -13,8 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Storage directory for MP4 uploads
-RUN mkdir -p /app/storage
+# Storage + data directories
+RUN mkdir -p /app/storage /app/data
 
 # Zeabur injects PORT=8080 at runtime; EXPOSE must be a literal number
 EXPOSE 8080
