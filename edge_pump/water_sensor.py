@@ -38,7 +38,7 @@ def read_water_level(adc):
         adc: machine.ADC 物件（已初始化）
     
     Returns:
-        float: 水位百分比 0.0-100.0
+        float: 雨量百分比 0.0-100.0（0=乾燥, 100=完全濕潤）
     """
     # 連續讀取 3 次，每次間隔 10ms
     readings = []
@@ -51,7 +51,7 @@ def read_water_level(adc):
     median = sorted_readings[1]  # 中間值
     
     # 將 ADC 值 (0-4095) 映射到 0.0-100.0%
-    water_level = (median / 4095.0) * 100.0
+    water_level = 100.0 - (median / 4095.0) * 100.0  # 反相：乾燥=低電壓=低ADC=高水位(修正)
     
     # 夾住範圍
     water_level = max(0.0, min(100.0, water_level))

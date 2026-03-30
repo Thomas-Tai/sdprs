@@ -124,6 +124,71 @@ async def list_nodes(
     return result
 
 
+@router.get("/nodes/summary")
+async def get_nodes_summary(
+    request: Request,
+    user: str = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get a summary of all nodes.
+    
+    Returns counts of online/offline nodes by type.
+    """
+    mqtt_service = get_mqtt_service()
+    
+    if not mqtt_service:
+        raise HTTPException(
+            status_code=503,
+            detail="MQTT service not available"
+        )
+    
+    node_states = mqtt_service.get_node_states()
+    
+    glass_online = 0
+    glass_offline = 0
+    pump_online = 0
+    pump_offline = 0
+    
+    for node_id, state in node_states.items():
+        node_type = state.get("type", "glass")
+        status = state.get("status", "OFFLINE")
+        
+        if node_type == "glass":
+            if status == "ONLINE":
+                glass_online += 1
+            else:
+                glass_offline += 1
+        elif node_type == "pump":
+            if status == "ONLINE":
+                pump_online += 1
+            else:
+                pump_offline += 1
+    
+    # Count active pumps
+    pump_active = sum(
+        1 for state in node_states.values()
+        if state.get("type") == "pump" and state.get("pump_state") == "ON"
+    )
+    
+    return {
+        "glass_nodes": {
+            "online": glass_online,
+            "offline": glass_offline,
+            "total": glass_online + glass_offline
+        },
+        "pump_nodes": {
+            "online": pump_online,
+            "offline": pump_offline,
+            "total": pump_online + pump_offline,
+            "active": pump_active
+        },
+        "total_nodes": len(node_states),
+        "total_online": glass_online + pump_online,
+        "total_offline": glass_offline + pump_offline
+    }
+
+
+
 @router.get("/nodes/{node_id}", response_model=NodeStatus)
 async def get_node(
     node_id: str,
@@ -191,70 +256,6 @@ async def get_node(
         is_stale=is_stale,
         snapshot_timestamp=snapshot_timestamp
     )
-
-
-@router.get("/nodes/summary")
-async def get_nodes_summary(
-    request: Request,
-    user: str = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Get a summary of all nodes.
-    
-    Returns counts of online/offline nodes by type.
-    """
-    mqtt_service = get_mqtt_service()
-    
-    if not mqtt_service:
-        raise HTTPException(
-            status_code=503,
-            detail="MQTT service not available"
-        )
-    
-    node_states = mqtt_service.get_node_states()
-    
-    glass_online = 0
-    glass_offline = 0
-    pump_online = 0
-    pump_offline = 0
-    
-    for node_id, state in node_states.items():
-        node_type = state.get("type", "glass")
-        status = state.get("status", "OFFLINE")
-        
-        if node_type == "glass":
-            if status == "ONLINE":
-                glass_online += 1
-            else:
-                glass_offline += 1
-        elif node_type == "pump":
-            if status == "ONLINE":
-                pump_online += 1
-            else:
-                pump_offline += 1
-    
-    # Count active pumps
-    pump_active = sum(
-        1 for state in node_states.values()
-        if state.get("type") == "pump" and state.get("pump_state") == "ON"
-    )
-    
-    return {
-        "glass_nodes": {
-            "online": glass_online,
-            "offline": glass_offline,
-            "total": glass_online + glass_offline
-        },
-        "pump_nodes": {
-            "online": pump_online,
-            "offline": pump_offline,
-            "total": pump_online + pump_offline,
-            "active": pump_active
-        },
-        "total_nodes": len(node_states),
-        "total_online": glass_online + pump_online,
-        "total_offline": glass_offline + pump_offline
-    }
 
 
 # Export router

@@ -1015,52 +1015,185 @@ journalctl -u sdprs-edge -f
 
 ## 十、水泵節點部署（ESP32）
 
+> **重要提醒：**
+> - ESP32 WiFi 模組峰值電流約 300-400mA，**必須使用外接 5V/2A 電源**，不能僅靠 USB 電腦供電
+> - 使用短且粗的 USB 數據線（非充電線），直接插主機板 USB 埠（避免 Hub）
+> - Windows 環境需安裝 CP2102 或 CH340 USB 驅動程式
+
 ### 步驟 1：安裝工具（在你的電腦上）
 
-```bash
-pip install esptool mpremote
+**Windows (PowerShell)：**
+
+```powershell
+pip install esptool adafruit-ampy
+# 確認安裝
+python -m esptool version
 ```
 
-### 步驟 2：使用佈建腳本
+**Linux / macOS：**
 
 ```bash
-cd sdprs/scripts
-chmod +x setup_esp32.sh
-
-# 將 ESP32 用 USB 線連接到電腦
-./setup_esp32.sh /dev/ttyUSB0
-# Windows 用: ./setup_esp32.sh COM3
+pip install esptool adafruit-ampy
 ```
 
-腳本會自動：下載 MicroPython 韌體、清除 ESP32 Flash、燒錄 MicroPython、上傳所有程式碼。
+> **注意：** Windows 下 `esptool` 和 `ampy` 可能不在 PATH 中。使用 `python -m esptool` 代替 `esptool`，或手動加入 PATH：
+> ```powershell
+> set PATH=%PATH%;%APPDATA%\Python\Python3xx\Scripts
+> ```
 
-### 步驟 3：修改配置
+### 步驟 2：確認 ESP32 連線
 
-```bash
-mpremote connect /dev/ttyUSB0 edit config.py
+將 ESP32 用 USB 線連接到電腦，確認串口號：
+
+```powershell
+# Windows
+python -m serial.tools.list_ports
+# 找到 COMx（如 COM8）
+
+# Linux
+ls /dev/ttyUSB*
 ```
 
-**必須修改的值：**
+檢測晶片：
+
+```powershell
+python -m esptool --port COM8 chip_id
+# 應顯示 ESP32-D0WDQ6 或類似晶片資訊
+```
+
+> **連不上？** 按住 ESP32 板上的 **BOOT** 鍵再執行指令。若仍失敗，換一條 USB 線。
+
+### 步驟 3：燒錄 MicroPython 韌體
+
+到 [micropython.org/download/ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/) 下載最新穩定版 `.bin` 檔案。
+
+```powershell
+# 1. 擦除快閃記憶體
+python -m esptool --port COM8 erase_flash
+
+# 2. 燒錄韌體（注意：原版 ESP32 使用 DIO 模式 + 0x1000 位址）
+python -m esptool --chip esp32 --port COM8 --baud 460800 write_flash -z -fm dio 0x1000 ESP32_GENERIC-v1.24.1.bin
+
+# 3. 驗證 — 應看到 MicroPython REPL (>>>)
+python -m mpremote connect COM8 repl
+# 按 Ctrl+] 退出
+```
+
+> **關鍵參數說明：**
+> - `-fm dio`：某些 ESP32 開發板需要 DIO flash 模式，否則出現 `flash read err, 1000`
+> - `0x1000`：原版 ESP32 (非 S2/S3/C3) 的韌體起始位址
+
+### 步驟 4：上傳水泵控制程式
+
+使用 `ampy` 上傳（比 `mpremote cp` 在 Windows 上更穩定）：
+
+```powershell
+cd sdprs/edge_pump
+
+# 逐個上傳（每次間隔 2 秒確保穩定）
+ampy --port COM8 --delay 2 put config.py
+ampy --port COM8 --delay 2 put water_sensor.py
+ampy --port COM8 --delay 2 put pump_controller.py
+ampy --port COM8 --delay 2 put mqtt_client.py
+ampy --port COM8 --delay 2 put main.py
+ampy --port COM8 --delay 2 put boot.py    # boot.py 永遠最後上傳！
+
+# 驗證檔案列表
+ampy --port COM8 --delay 2 ls
+# 應顯示 6 個 .py 檔案
+```
+
+> **重要：`boot.py` 必須最後上傳！**
+> boot.py 上傳後會在每次啟動時自動執行（WiFi 連線），若其他檔案尚未就位會導致錯誤。
+
+### 步驟 5：修改 WiFi 和 MQTT 配置
+
+WiFi 帳密不應留在源碼中。直接在 ESP32 上修改：
+
+```powershell
+# 建立更新腳本（互動式輸入，密碼不會留在源碼中）
+python -c "ssid=input('WiFi SSID: '); pw=input('WiFi Password: '); open('set_wifi.py','w').write(f'f=open("config.py","r")\nc=f.read()\nf.close()\nc=c.replace("SDPRS_IoT","{ssid}")\nc=c.replace("changeme","{pw}")\nf=open("config.py","w")\nf.write(c)\nf.close()\nprint("WiFi updated!")\n')"
+
+# 推送到 ESP32 執行
+ampy --port COM8 --delay 2 run set_wifi.py
+```
+
+**MQTT Broker 設定（使用 Zeabur EMQX）：**
+
+config.py 中需確認以下值：
 
 ```python
-WIFI_SSID = "你的WiFi名稱"
-WIFI_PASS = "你的WiFi密碼"
-MQTT_BROKER = "192.168.1.100"    # 中央伺服器 IP
+MQTT_BROKER = "YOUR_BROKER_IP"        # EMQX Zeabur IP
+MQTT_PORT = 32150                   # EMQX TCP 端口
+MQTT_USERNAME = "pump_node_01"      # EMQX 認證用戶名
+MQTT_PASSWORD = "<your_password>"   # EMQX 認證密碼
 ```
 
-### 步驟 4：重啟 ESP32
+> **EMQX 端需新增用戶：**
+> EMQX Dashboard → Access Control → Authentication → Users → Add
+> - Username: `pump_node_01`
+> - Password: 與 config.py 中一致
 
-```bash
-mpremote connect /dev/ttyUSB0 reset
+### 步驟 6：重啟並驗證
+
+拔插 USB 或外接電源重啟 ESP32，等待約 40 秒（WiFi 連線 + MQTT 連線）。
+
+**驗證方式：**
+
+```powershell
+# 方式 1：串口日誌
+python -m mpremote connect COM8 repl
+# 按 Ctrl+D 軟重啟，應看到（v2 最小化 boot.py）：
+# [BOOT] SDPRS Pump Node booting (minimal mode)...
+# [BOOT] WiFi will be initialized lazily in main.py
+# [MAIN] SDPRS Pump Node starting...
+# [MAIN] Entering main loop...
+# （約 10 秒後首次 MQTT 連線）
+# [MQTT] Connecting to WiFi SSID: YOUR_WIFI_SSID
+# [MQTT] WiFi connected: 192.168.x.x
+# [MQTT] Connected to broker!
+# [MQTT] Published: {"node_id":"pump_node_01","pump_state":"OFF","water_level":0.0}
+# [MAIN] NTP synced via time.cloudflare.com: 2026-xx-xx xx:xx:xx UTC
 ```
 
-### 步驟 5：驗證
-
-```bash
-# 在中央伺服器上監聽 MQTT 水泵狀態
-mosquitto_sub -h localhost -t "sdprs/edge/pump_node_01/pump_status" -v
-# 應該每 10 秒看到一條 JSON 消息
 ```
+# 方式 2：EMQX Dashboard
+# 打開 https://emqx-dashboard.zeabur.app/#/clients
+# 應看到 pump_node_01 在線
+```
+
+### 開發模式 vs 生產模式
+
+config.py 中有以下開關：
+
+| 參數 | 開發 | 生產 | 說明 |
+|------|------|------|------|
+| `WDT_ENABLED` | `False` | `True` | 看門狗：生產時啟用防卡死，開發時關閉避免 REPL 被中斷 |
+
+### 故障排除
+
+| 問題 | 解決方案 |
+|------|----------|
+| `flash read err, 1000` | 加 `-fm dio` 參數重新燒錄 |
+| COM 埠閃現消失 / brownout 重啟 | USB 供電不足 → 外接 5V/2A 電源；或使用最小化 boot.py（不在開機時連 WiFi）|
+| `ampy: failed to access COMx` | 關閉所有串口工具、執行 `powershell Stop-Process -Name python,ampy -Force`、等 3 秒重試 |
+| `esptool` 連不上 | 按住 BOOT 鍵再執行指令 |
+| WiFi 錯誤 `sta is connecting, return error` | `wlan.disconnect()` 後才呼叫 `wlan.connect()`；確保只呼叫一次 connect() |
+| MQTT 連線失敗 | 確認 EMQX 已新增 `pump_node_01` 用戶 |
+| `umqtt` 找不到 | MicroPython 官方 ESP32 韌體已內建，無需額外安裝 |
+| WDT 導致反覆重啟 | config.py 中設 `WDT_ENABLED = False` |
+| `ampy put` 後仍用舊程式碼 | 遠端路徑不加 `:` 前綴，正確：`ampy put file.py file.py` |
+| NTP 顯示 `2000-01-01` | 確認 UDP 123 port 未被防火牆封鎖；NTP 在 WiFi 首次連線後自動嘗試（pool.ntp.org → time.cloudflare.com）|
+| 乾燥時雨量顯示 100% | 雨滴感測器 ADC 反相：需用 `100.0 - (median/4095.0)*100.0`（見 water_sensor.py）|
+
+### 監控牆整合（水泵節點）
+
+監控牆（`/monitor`）除攝像頭快照外，頁面下方會自動顯示水泵節點狀態卡片：
+
+- **雨量感測**：進度條顯示 0–100%（0% = 乾燥，100% = 完全濕潤）
+- **水泵狀態**：`運行中`（紅色）/ `待機`（綠色）
+- **即時更新**：由 WebSocket `pump_status` 訊息驅動，無需手動刷新
+- **初始數據**：頁面載入時從 `/api/nodes` 獲取既有數據（離線節點也顯示）
 
 ---
 
@@ -1086,8 +1219,11 @@ mosquitto_sub -h localhost -t "sdprs/edge/pump_node_01/pump_status" -v
 
 ### 水泵節點
 
+- [ ] ESP32 外接 5V/2A 電源（非僅 USB 供電）
 - [ ] ESP32 上綠色 LED 亮起（表示泵停止，正常待機）
-- [ ] `mosquitto_sub -h 192.168.1.100 -t "sdprs/edge/pump_node_01/pump_status"` 有資料
+- [ ] 串口日誌顯示 `[BOOT] WiFi connected!` 和 `[MQTT] Connected to broker`
+- [ ] EMQX Dashboard Clients 頁面顯示 `pump_node_01` 在線
+- [ ] EMQX Dashboard 可看到 `sdprs/edge/pump_node_01/pump_status` 主題有資料（每 10 秒）
 - [ ] 儀表板顯示水泵節點狀態
 
 ### Zeabur 雲端部署驗證

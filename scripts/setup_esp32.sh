@@ -44,7 +44,7 @@ PUMP_DIR="$PROJECT_ROOT/edge_pump"
 FIRMWARE_DIR="$PROJECT_ROOT/firmware"
 
 # MicroPython 韌體 URL (ESP32)
-MICROPYTHON_URL="https://micropython.org/resources/firmware/ESP32_GENERIC-20240105-v1.22.1.bin"
+MICROPYTHON_URL="https://micropython.org/resources/firmware/ESP32_GENERIC-20250415-v1.25.0.bin"
 FIRMWARE_FILE="$FIRMWARE_DIR/micropython_esp32.bin"
 
 # ===== 顯示標題 =====

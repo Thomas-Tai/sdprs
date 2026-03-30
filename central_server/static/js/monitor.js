@@ -127,13 +127,134 @@ handleWSMessage = function(msg) {
                 nodeStates[msg.data.node_id] = {
                     ...nodeStates[msg.data.node_id],
                     node_id: msg.data.node_id,
+                    type: 'pump',
+                    status: 'ONLINE',
                     pump_state: msg.data.pump_state,
-                    water_level: msg.data.water_level
+                    water_level: msg.data.water_level,
+                    timestamp: msg.data.timestamp
                 };
+                renderPumpCard(nodeStates[msg.data.node_id]);
             }
             break;
     }
 };
+
+
+// ===== Pump Node Cards =====
+function getPumpStateClass(state) {
+    if (state === 'ON') return 'bg-red-100 text-red-800';
+    if (state === 'OFF') return 'bg-green-100 text-green-800';
+    return 'bg-gray-100 text-gray-600';
+}
+
+function getPumpStateLabel(state) {
+    if (state === 'ON') return '運行中';
+    if (state === 'OFF') return '待機';
+    return state || '未知';
+}
+
+function getWaterBarColor(level) {
+    if (level >= 80) return 'bg-blue-600';
+    if (level >= 40) return 'bg-blue-400';
+    return 'bg-blue-200';
+}
+
+function renderPumpCard(data) {
+    const grid = document.getElementById('pump-nodes-grid');
+    if (!grid) return;
+
+    const nodeId = data.node_id;
+    const level = typeof data.water_level === 'number' ? data.water_level.toFixed(1) : '--';
+    const levelNum = typeof data.water_level === 'number' ? data.water_level : 0;
+    const state = data.pump_state || 'UNKNOWN';
+    const stateClass = getPumpStateClass(state);
+    const stateLabel = getPumpStateLabel(state);
+    const barColor = getWaterBarColor(levelNum);
+    const isOnline = data.status !== 'OFFLINE';
+    const dotClass = isOnline ? 'bg-green-500' : 'bg-red-500';
+
+    // Hide empty placeholder
+    const emptyEl = document.getElementById('pump-nodes-empty');
+    if (emptyEl) emptyEl.classList.add('hidden');
+
+    let card = document.getElementById('pump-card-' + nodeId);
+    if (!card) {
+        // Create new card
+        card = document.createElement('div');
+        card.className = 'bg-white rounded-lg shadow p-4';
+        card.id = 'pump-card-' + nodeId;
+        card.innerHTML = `
+            <div class="flex justify-between items-center mb-3">
+                <span class="font-mono text-sm font-bold">${nodeId}</span>
+                <span id="pump-dot-${nodeId}" class="status-dot ${dotClass}"></span>
+            </div>
+            <div class="mb-3">
+                <div class="flex justify-between text-sm text-gray-600 mb-1">
+                    <span>雨量感測</span>
+                    <span id="pump-water-pct-${nodeId}">${level}%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-3">
+                    <div id="pump-water-bar-${nodeId}"
+                         class="h-3 rounded-full transition-all duration-500 ${barColor}"
+                         style="width: ${Math.min(100, levelNum)}%"></div>
+                </div>
+            </div>
+            <div class="flex justify-between items-center">
+                <span class="text-sm text-gray-600">水泵狀態</span>
+                <span id="pump-state-badge-${nodeId}"
+                      class="px-2 py-1 rounded text-sm font-medium ${stateClass}">
+                    ${stateLabel}
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-400 text-right">
+                更新: <span id="pump-last-update-${nodeId}">--</span>
+            </div>
+        `;
+        grid.appendChild(card);
+    } else {
+        // Update existing card elements
+        const dotEl = document.getElementById('pump-dot-' + nodeId);
+        if (dotEl) dotEl.className = 'status-dot ' + dotClass;
+
+        const pctEl = document.getElementById('pump-water-pct-' + nodeId);
+        if (pctEl) pctEl.textContent = level + '%';
+
+        const barEl = document.getElementById('pump-water-bar-' + nodeId);
+        if (barEl) {
+            barEl.className = 'h-3 rounded-full transition-all duration-500 ' + barColor;
+            barEl.style.width = Math.min(100, levelNum) + '%';
+        }
+
+        const badgeEl = document.getElementById('pump-state-badge-' + nodeId);
+        if (badgeEl) {
+            badgeEl.className = 'px-2 py-1 rounded text-sm font-medium ' + stateClass;
+            badgeEl.textContent = stateLabel;
+        }
+    }
+
+    // Update timestamp
+    const tsEl = document.getElementById('pump-last-update-' + nodeId);
+    if (tsEl) {
+        const now = new Date();
+        tsEl.textContent = now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+}
+
+async function loadPumpNodes() {
+    try {
+        const response = await fetch('/api/nodes');
+        if (!response.ok) return;
+        const nodes = await response.json();
+        nodes.forEach(node => {
+            if (node.type === 'pump') {
+                nodeStates[node.node_id] = node;
+                renderPumpCard(node);
+            }
+        });
+    } catch (err) {
+        console.error('[Monitor] Failed to load pump nodes:', err);
+    }
+}
 
 // ===== Image Error Handling =====
 function setupImageErrorHandlers() {
@@ -296,6 +417,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // WebSocket is already connected by base.html
     // handleWSMessage has been overridden above
-    
+
+    // Load initial pump node data
+    loadPumpNodes();
+
     console.log('[Monitor] Initialized');
 });

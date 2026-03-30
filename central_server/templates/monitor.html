@@ -67,6 +67,19 @@
         <p class="mt-2">邊緣節點上線後將自動出現在此處</p>
     </div>
     {% endif %}
+    <!-- 水泵節點狀態 -->
+    <div class="space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-xl font-bold text-gray-800">水泵節點狀態</h2>
+            <span class="text-sm text-gray-500">由 WebSocket 即時更新</span>
+        </div>
+        <div id="pump-nodes-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div id="pump-nodes-empty" class="col-span-full text-center text-gray-400 py-8">
+                等待水泵節點資料...
+            </div>
+        </div>
+    </div>
+
 </div>
 
 <!-- Lightbox 全螢幕檢視 -->
