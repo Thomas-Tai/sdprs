@@ -171,6 +171,8 @@ function renderPumpCard(data) {
     const stateLabel = getPumpStateLabel(state);
     const barColor = getWaterBarColor(levelNum);
     const isOnline = data.status !== 'OFFLINE';
+    // API uses node_type; WebSocket messages use type — normalise
+    const nodeType = data.node_type || data.type;
     const dotClass = isOnline ? 'bg-green-500' : 'bg-red-500';
 
     // Hide empty placeholder
@@ -246,7 +248,7 @@ async function loadPumpNodes() {
         if (!response.ok) return;
         const nodes = await response.json();
         nodes.forEach(node => {
-            if (node.type === 'pump') {
+            if (node.node_type === 'pump') {
                 nodeStates[node.node_id] = node;
                 renderPumpCard(node);
             }
