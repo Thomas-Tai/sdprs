@@ -686,34 +686,31 @@ docker compose logs -f       # 查看所有容器日誌
 1. 登入 Zeabur → **新建專案**
 2. 選擇 **Deploy from GitHub** → 選擇 `sdprs` repo
 3. Zeabur 偵測到 `zbpack.json` 中 `build_type: dockerfile` → 使用 `Dockerfile` 構建
-4. 進入服務設定 → **Variables** 頁面，添加以下環境變數：
+4. 進入服務設定 → **Variables** → 依下表填入。完整範本見 [`central_server/.env.example`](central_server/.env.example)。
 
-   | 變數名稱           | 測試用值                          | 說明                               |
-   | ------------------ | --------------------------------- | ---------------------------------- |
-   | `DASHBOARD_USER` | `admin`                         | 儀表板帳號（**必填**）       |
-   | `DASHBOARD_PASS` | `<your-dashboard-password>`     | 儀表板密碼（**必填**）       |
-   | `EDGE_API_KEY`   | `<your-edge-api-key>`           | Pi 端 API 金鑰（**必填**）   |
-   | `SECRET_KEY`     | `f8e2d1c4b7a6...` (64 字元 hex) | Session 加密金鑰（**必填**） |
-   | `MQTT_BROKER`    | `emqx` 或 `broker.emqx.io`    | MQTT broker 地址                   |
-   | `MQTT_PORT`      | `1883`                          | MQTT TCP 端口                      |
-   | `MQTT_USERNAME`  | `sdprs`                         | EMQX 認證用戶名                    |
-   | `MQTT_PASSWORD`  | `<your-mqtt-password>`          | EMQX 認證密碼                      |
+   **必填（4 個）— 缺任一個會 `pydantic ValidationError` 並 crash**
 
+   | 變數名稱           | 範例值                            | 說明              |
+   | ------------------ | --------------------------------- | ----------------- |
+   | `DASHBOARD_USER` | `admin`                         | 儀表板帳號        |
+   | `DASHBOARD_PASS` | `<dashboard-password>`          | 儀表板密碼        |
+   | `EDGE_API_KEY`   | `<edge-api-key>`                | Pi 端 API 金鑰    |
+   | `SECRET_KEY`     | `f8e2d1c4b7a6...` (64 字元 hex) | Session 加密金鑰  |
 
-   > **注意：** 缺少前 4 個必填變數會導致 `pydantic ValidationError` 並 crash。
-   >
-   > **生成隨機密鑰：**
-   >
-   > ```bash
-   > python3 -c "import secrets; print(secrets.token_hex(32))"
-   > ```
-   >
+   > 生成隨機密鑰：`python3 -c "import secrets; print(secrets.token_hex(32))"`
 
-   > **MVP 簡化方案（選項 A — 跳過 MQTT）：**
-   > 只設 4 個必填變數即可啟動伺服器。MQTT 使用 `connect_async()` 非阻塞連線，
-   > 連不上不會 crash。Pi 透過 HTTP POST 上傳快照和告警，不依賴 MQTT。
-   > 監控牆會自動從快照數據顯示在線節點。
-   >
+   **進階（純玻璃偵測 MVP 可全部跳過 — Pi 透過 HTTP POST 即可運作）**
+
+   | 變數名稱           | 範例值                                     | 何時需要                                    |
+   | ------------------ | ------------------------------------------ | ------------------------------------------- |
+   | `MQTT_BROKER`    | `sdprs-xxx.zeabur.internal`              | 部署 EMQX 後填 **Private** hostname   |
+   | `MQTT_PORT`      | `1883`                                   | EMQX TCP 端口                               |
+   | `MQTT_USERNAME`  | `sdprs`                                  | EMQX 認證                                   |
+   | `MQTT_PASSWORD`  | `<mqtt-password>`                        | EMQX 認證                                   |
+   | `DATABASE_URL`   | `postgresql://...` (見步驟 2)            | 部署 PostgreSQL 後手動加；空值 = SQLite WAL |
+
+   > **MVP 結論：** 只設前 4 個必填即可。MQTT 用 `connect_async()` 非阻塞，
+   > 連不上不會 crash；ESP32 水泵或遠端控制才需要 MQTT。
 
 ### 步驟 2：部署 PostgreSQL 資料庫（可選）
 
@@ -784,61 +781,55 @@ curl https://sdprs.zeabur.app/api/health
 
 ### 步驟 5：設定 Pi 邊緣節點連接雲端
 
-**5.1 修改 Pi 端 `config.zeabur.yaml`：**
-
-sudo nano /opt/sdprs/edge_glass/config.zeabur.yaml
-
-```yaml
-server:
-  api_url: "https://sdprs.zeabur.app/api"
-  mqtt_broker: "<emqx-public-ip>"             # EMQX Public TCP 地址（無 EMQX 則保留不影響）/ Zeabur TCP 網域 43.X.X.X
-  mqtt_port: 32150                          # EMQX Public TCP 端口 / Zeabur TCP 連接埠 :3XXXX
-  mqtt_username: "sdprs"
-  mqtt_password: "<your-mqtt-password>"
-  mqtt_use_tls: false
-  api_key: "<your-edge-api-key>"  # 與 Zeabur EDGE_API_KEY 一致
-```
-
-**5.2 安裝雲端模式 systemd 服務：**
+新版 `setup_pi.sh` 直接支援雲端模式，**單一指令即完成所有設定**（git clone、venv、依賴、config.zeabur.yaml 寫入、systemd 啟用）。
 
 ```bash
-# 停用 LAN 模式服務（如果之前啟用過）
-sudo systemctl disable sdprs-edge autossh-tunnel 2>/dev/null
+# 在 Pi 上（首次部署）
+ssh pi@sdprs-glass-01.local
+sudo apt-get update && sudo apt-get install -y git
+sudo git clone https://github.com/Thomas-Tai/sdprs.git /opt/sdprs
 
-# 安裝並啟用雲端模式服務
-sudo cp /opt/sdprs/edge_glass/systemd/sdprs-edge-cloud.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable sdprs-edge-cloud
-sudo systemctl start sdprs-edge-cloud
+# 一鍵雲端部署（替換成你的 Zeabur URL 和 EDGE_API_KEY）
+cd /opt/sdprs/scripts && sudo chmod +x setup_pi.sh
+sudo ./setup_pi.sh glass_node_01 \
+    --mode cloud \
+    --cloud-url https://sdprs.zeabur.app/api \
+    --api-key <your-edge-api-key>
+```
 
-# 驗證
+**有部署 EMQX 時，再加上 MQTT 參數：**
+
+```bash
+sudo ./setup_pi.sh glass_node_01 \
+    --mode cloud \
+    --cloud-url https://sdprs.zeabur.app/api \
+    --api-key <your-edge-api-key> \
+    --mqtt-broker <emqx-public-ip> \
+    --mqtt-port 32150 \
+    --mqtt-username sdprs \
+    --mqtt-password <your-mqtt-password>
+```
+
+**驗證：**
+
+```bash
 journalctl -u sdprs-edge-cloud -n 20 --no-pager
-# 應看到：
+# 預期日誌：
 #   Audio stream started
-#   MQTT client: Connected to MQTT broker: <emqx-public-ip>:<port>
 #   HTTP Request: POST https://sdprs.zeabur.app/api/edge/glass_node_01/snapshot "HTTP/1.1 204 No Content"
+#   MQTT client: Connected to MQTT broker: <emqx-public-ip>:<port>   (有 EMQX 才會出現)
 ```
 
-> **開機自動啟動：** `systemctl enable` 已設定 `WantedBy=multi-user.target`，Pi 通電即自動啟動服務。
-> 服務包含 `ExecStartPre` 網路等待機制（最多 30 秒），確保 WiFi 就緒後才啟動偵測程式。
-> `SupplementaryGroups=video audio` 自動取得攝像頭/麥克風權限，無需手動 `usermod`。
+> **腳本自動完成：** 系統依賴 / venv / config.zeabur.yaml 改寫 / `usermod -aG video,audio sdprs` / `sdprs-edge-cloud.service` 啟用 + 開機自啟。
+> 雲端模式跳過 SSH 隧道（`stream.cloud_mode: true`），不需 autossh。
 
-> **注意：** 雲端模式不需要 `autossh-tunnel.service`。
-> `config.zeabur.yaml` 中 `stream.cloud_mode: true` 會自動跳過 SSH 隧道。
+**Pi 硬體相關預設值（由腳本寫入 `config.zeabur.yaml`，特殊型號才需手動覆寫）：**
 
-**5.3 Pi 硬體注意事項：**
-
-| 項目              | 設定                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------- |
-| USB 攝影機        | `camera.source: 0`（Logitech C920 在 PyAudio index 0）                              |
-| 音訊 sample rate  | `audio.sample_rate: 16000`（C920 只支援 16000 或 32000 Hz，**不支援 44100**） |
-| 音訊 device index | `audio.device_index: 0`（PyAudio index，非 ALSA card 號碼）                         |
-| systemd user      | `sdprs` 需加入 `video` 和 `audio` group                                         |
-
-```bash
-# 必須執行（否則攝影機/麥克風無法存取）
-sudo usermod -aG video,audio sdprs
-```
+| 項目              | 預設值                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| USB 攝影機        | `camera.source: 0`（Logitech C920 在 PyAudio index 0）                                |
+| 音訊 sample rate  | `audio.sample_rate: 16000`（C920 只支援 16000 / 32000 Hz，**不支援 44100**）   |
+| 音訊 device index | `audio.device_index: 0`（PyAudio index，非 ALSA card 號碼）                           |
 
 ### 步驟 6：設定自動備份（可選）
 
@@ -869,325 +860,177 @@ sudo usermod -aG video,audio sdprs
 
 ---
 
-## 九、玻璃偵測邊緣節點部署（Pi 4/Pi 5）
+## 九、玻璃偵測邊緣節點部署（Pi 4/Pi 5，LAN 模式）
 
-> **每個攝像頭對應一個邊緣節點。預計時間：20-25 分鐘**
+> **每個攝像頭對應一個邊緣節點。預計時間：10-15 分鐘**
+> Zeabur 雲端模式請改看 [八A 步驟 5](#步驟-5設定-pi-邊緣節點連接雲端)。
 
-### 步驟 1：燒錄 Pi OS 並開機
+### 步驟 1：燒錄 Pi OS、SSH 連線、下載程式碼
 
-參照 [六、部署前準備](#六部署前準備燒錄-pi-os)，主機名稱設為 sdprs-glass-01。
-
-### 步驟 2：SSH 連線到邊緣節點 Pi
+參照 [六、部署前準備](#六部署前準備燒錄-pi-os)（hostname `sdprs-glass-01`），開機後：
 
 ```bash
 ssh pi@sdprs-glass-01.local
-```
-
-### 步驟 3：下載專案程式碼
-
-**方法 A：使用 Git（推薦，雲端模式必用）**
-
-```bash
 sudo apt-get update && sudo apt-get install -y git
-sudo groupadd sdprs
-sudo useradd -g sdprs sdprs
-sudo mkdir -p /opt/sdprs && sudo chown sdprs:sdprs /opt/sdprs
-sudo -u sdprs git clone https://github.com/Thomas-Tai/sdprs.git /opt/sdprs
+sudo git clone https://github.com/Thomas-Tai/sdprs.git /opt/sdprs
 ```
 
-之後每次更新：
+> **替代：** 開發機上有 LAN 連線時可改用 `cd sdprs/scripts && SDPRS_GLASS_HOST=<pi-ip> ./deploy_sync.sh init-glass 01`，會用 rsync 同步並自動建環境，跳到步驟 4。
+
+### 步驟 2：執行一鍵佈建腳本
 
 ```bash
-cd /opt/sdprs && sudo -u sdprs git pull
-sudo systemctl restart sdprs-edge-cloud  # 或 sdprs-edge（LAN 模式）
+cd /opt/sdprs/scripts && sudo chmod +x setup_pi.sh
+sudo ./setup_pi.sh glass_node_01 192.168.1.100 --api-key <your-edge-api-key>
 ```
 
-> **注意：** venv 在 `.gitignore` 中，`git pull` 不會覆蓋 venv。
-> 首次 clone 後需手動建立 venv（見步驟 4 或直接 `python3 -m venv /opt/sdprs/edge_glass/venv`）。
+- `glass_node_01`：節點唯一 ID（第二台用 `glass_node_02`）
+- `192.168.1.100`：中央伺服器 IP
+- `--api-key`：與中央伺服器 `EDGE_API_KEY` 一致；省略則寫入預設 placeholder（事後 `sudo nano config.yaml` 改）
 
-**方法 B：使用 USB 隨身碟**（同中央伺服器步驟 2 方法 B）
+腳本會自動完成：hostname / 時區 / tmpfs / watchdog / 依賴 / venv / SSH 金鑰生成 / `config.yaml`（含 API key）/ `.env.tunnel` / systemd 服務啟用 + 啟動。
 
-**方法 C：使用 rsync 一鍵部署（LAN 開發調試用）**
+### 步驟 3：配置 SSH 金鑰（讓邊緣節點能反向打洞）
+
+腳本結尾會印出 SSH 公鑰。在**中央伺服器**用一條指令吃進去：
 
 ```bash
-# 在你的開發電腦上執行
-cd sdprs/scripts
-chmod +x deploy_sync.sh
-
-# 首次初始化（自動建 venv、裝依賴、設定 systemd）
-SDPRS_GLASS_HOST=192.168.1.101 ./deploy_sync.sh init-glass 01
+# 在中央伺服器上（推薦）
+ssh-copy-id -i ~/.ssh/id_ed25519.pub sdprs@sdprs-glass-01.local
+# 或反過來：在邊緣節點上推給伺服器
+sudo -u sdprs ssh-copy-id sdprs@192.168.1.100
 ```
 
-> **提示：** 使用此方法可跳過步驟 4-6，`init-glass` 會自動完成環境設定。
-> 初始化後直接跳到 [步驟 7：修改邊緣節點的 API Key](#步驟-7修改邊緣節點的-api-key)。
+如果還沒設密碼登入，第一次需在中央伺服器 `sudo passwd sdprs` 暫時開啟，配置完即可關閉（`sudo passwd -l sdprs`）。
 
-### 步驟 4：執行一鍵佈建腳本
-
-> **如果你使用了方法 C，請跳過此步驟，直接到步驟 7。**
-
-```bash
-cd /opt/sdprs/scripts
-sudo chmod +x setup_pi.sh
-sudo ./setup_pi.sh glass_node_01 192.168.1.100
-```
-
-**參數說明：**
-
-- `glass_node_01`：這個節點的唯一 ID（第二台用 glass_node_02，依此類推）
-- `192.168.1.100`：中央伺服器的 IP 位址（LAN 部署）
-
-> **Zeabur 雲端模式：** `setup_pi.sh` 產生的 `config.yaml` 適用於 LAN 部署。
-> 雲端模式請跳過此腳本，改用 `git clone` + 手動編輯 `config.zeabur.yaml`（見 [八A 步驟 5](#步驟-5設定-pi-邊緣節點連接雲端)）。
-
-佈建腳本會**自動**完成：
-
-- 設定 hostname、時區
-- 配置 tmpfs 保護 SD 卡
-- 啟用硬體 watchdog（異常自動重啟）
-- 安裝 Python 3、FFmpeg、AutoSSH、mediamtx
-- 安裝編譯依賴（python3-dev、portaudio19-dev，供 NumPy/PyAudio 編譯）
-- 建立 Python 虛擬環境和依賴
-- 生成 SSH 金鑰對
-- 建立 config.yaml 和 .env.tunnel
-- 安裝 systemd 服務
-
-### 步驟 5：配置 SSH 金鑰（關鍵步驟！）
-
-佈建腳本會顯示一個公鑰，類似：
-
-```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... sdprs@sdprs-glass-01
-```
-
-**你需要將這個公鑰加入中央伺服器：**
-
-```bash
-# 1. 在邊緣節點上複製公鑰（已經顯示在螢幕上，也可以重新查看）
-cat /home/sdprs/.ssh/id_ed25519.pub
-
-# 2. SSH 到中央伺服器（開一個新的終端視窗）
-ssh pi@192.168.1.100
-
-# 3. 在中央伺服器上執行（將公鑰貼上去）
-sudo mkdir -p /home/sdprs/.ssh
-echo "ssh-ed25519 AAAAC3N...這裡貼上完整的公鑰..." | sudo tee -a /home/sdprs/.ssh/authorized_keys
-sudo chown -R sdprs:sdprs /home/sdprs/.ssh
-sudo chmod 600 /home/sdprs/.ssh/authorized_keys
-
-# 4. 回到邊緣節點的終端
-```
-
-### 步驟 6：啟動 SSH 隧道
+### 步驟 4：啟動 SSH 隧道並驗證
 
 ```bash
 sudo systemctl start autossh-tunnel
+journalctl -u sdprs-edge -f         # 應看到偵測迴圈日誌；Ctrl+C 退出
 ```
 
-### 步驟 7：修改邊緣節點的 API Key
+**驗證清單：**
+
+- `systemctl is-active sdprs-edge autossh-tunnel watchdog` → 三個都 `active`
+- 中央儀表板「系統狀態」頁顯示此節點 **在線**（綠色）
+
+### 部署第二台
 
 ```bash
-sudo nano /opt/sdprs/edge_glass/config.yaml
+sudo ./setup_pi.sh glass_node_02 192.168.1.100 --api-key <same-key>
 ```
-
-找到 api_key 行，改成你在中央伺服器 .env 中設定的 EDGE_API_KEY 值：
-
-```yaml
-server:
-  api_key: "改成和中央伺服器 EDGE_API_KEY 相同的值"
-```
-
-### 步驟 8：重啟邊緣服務
-
-```bash
-sudo systemctl restart sdprs-edge
-```
-
-### 步驟 9：驗證
-
-```bash
-# 檢查服務狀態
-sudo systemctl status sdprs-edge        # 應顯示 active (running)
-sudo systemctl status autossh-tunnel    # 應顯示 active (running)
-
-# 查看即時日誌
-journalctl -u sdprs-edge -f
-# 應看到 "Connected to MQTT" 和偵測迴圈日誌
-```
-
-**在中央伺服器儀表板上確認：**
-
-- 系統狀態頁應顯示此節點為 **在線**（綠色）
-
-### 部署第二台邊緣節點
-
-重複步驟 1-9，但修改：
-
-- 主機名稱：sdprs-glass-02
-- 佈建命令：`sudo ./setup_pi.sh glass_node_02 192.168.1.100`
+hostname 燒錄時改成 `sdprs-glass-02`，其他完全相同。
 
 ---
 
 ## 十、水泵節點部署（ESP32）
 
-> **重要提醒：**
+> **硬體前提：**
 >
-> - ESP32 WiFi 模組峰值電流約 300-400mA，**必須使用外接 5V/2A 電源**，不能僅靠 USB 電腦供電
-> - 使用短且粗的 USB 數據線（非充電線），直接插主機板 USB 埠（避免 Hub）
-> - Windows 環境需安裝 CP2102 或 CH340 USB 驅動程式
+> - ESP32 WiFi 峰值電流 300-400mA，**必須外接 5V/2A 電源**，不可僅靠 USB 電腦供電
+> - 使用短而粗的 USB 數據線（非充電線），直插主機板 USB 埠（避免 Hub）
+> - Windows 需先裝 CP2102 或 CH340 USB 驅動
 
-### 步驟 1：安裝工具（在你的電腦上）
+### 步驟 1：在 EMQX Dashboard 新增認證用戶
 
-**Windows (PowerShell)：**
+EMQX Dashboard → **Access Control → Authentication → Users → Add**
 
-```powershell
-pip install esptool adafruit-ampy
-# 確認安裝
-python -m esptool version
-```
+- Username: `pump_node_01`
+- Password: 任選（步驟 3 會輸入給腳本）
 
-**Linux / macOS：**
+### 步驟 2：在電腦上安裝刷寫工具
 
 ```bash
-pip install esptool adafruit-ampy
+pip install esptool mpremote
 ```
 
-> **注意：** Windows 下 `esptool` 和 `ampy` 可能不在 PATH 中。使用 `python -m esptool` 代替 `esptool`，或手動加入 PATH：
->
-> ```powershell
-> set PATH=%PATH%;%APPDATA%\Python\Python3xx\Scripts
-> ```
+> **Windows 提示：** 若 PowerShell 認不到 `esptool`/`mpremote`，改打 `python -m esptool` / `python -m mpremote`，或把 `%APPDATA%\Python\Python3xx\Scripts` 加入 PATH。
 
-### 步驟 2：確認 ESP32 連線
+### 步驟 3：執行一鍵刷寫腳本
 
-將 ESP32 用 USB 線連接到電腦，確認串口號：
+連接 ESP32 → 確認串口（Windows 用 `python -m serial.tools.list_ports`，Linux `ls /dev/ttyUSB*`）→ 跑：
 
-```powershell
-# Windows
-python -m serial.tools.list_ports
-# 找到 COMx（如 COM8）
-
-# Linux
-ls /dev/ttyUSB*
+```bash
+cd sdprs/scripts
+chmod +x setup_esp32.sh
+./setup_esp32.sh /dev/ttyUSB0      # Linux
+# Windows (Git Bash): ./setup_esp32.sh COM8
 ```
 
-檢測晶片：
+腳本會**互動式**詢問 WiFi SSID/密碼、MQTT broker/密碼（密碼輸入不回顯），然後依序：
 
-```powershell
-python -m esptool --port COM8 chip_id
-# 應顯示 ESP32-D0WDQ6 或類似晶片資訊
+1. 下載 MicroPython 韌體（首次；之後快取在 `firmware/`）
+2. 擦除 + 刷寫韌體（DIO mode + 0x1000）
+3. 從 `edge_pump/config.py` 模板生成你的設定（**只在記憶體與裝置上**，不寫到磁碟）
+4. 上傳 6 個檔案（`config.py` 先，`boot.py` 最後）
+5. `mpremote reset` 軟重啟
+
+**全部用參數一次跑完（CI / 重複部署）：**
+
+```bash
+./setup_esp32.sh /dev/ttyUSB0 \
+    --wifi-ssid "MyWiFi" \
+    --wifi-pass "wifi-secret" \
+    --mqtt-broker "<emqx-public-ip>" \
+    --mqtt-port 32150 \
+    --mqtt-username pump_node_01 \
+    --mqtt-password "<emqx-password>" \
+    --node-id pump_node_01
 ```
 
-> **連不上？** 按住 ESP32 板上的 **BOOT** 鍵再執行指令。若仍失敗，換一條 USB 線。
+**只更新程式碼（不重刷韌體、不改 WiFi）：**
 
-### 步驟 3：燒錄 MicroPython 韌體
+```bash
+./setup_esp32.sh /dev/ttyUSB0 --skip-flash --skip-config
+```
 
-到 [micropython.org/download/ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/) 下載最新穩定版 `.bin` 檔案。
+> **連不上？** 按住 ESP32 板上的 **BOOT** 鍵再執行；仍失敗就換 USB 線。
+> **`flash read err, 1000`** 已在腳本內加 `-fm dio` 解決，不會再遇到。
 
-```powershell
-# 1. 擦除快閃記憶體
-python -m esptool --port COM8 erase_flash
+### 步驟 4：驗證
 
-# 2. 燒錄韌體（注意：原版 ESP32 使用 DIO 模式 + 0x1000 位址）
-python -m esptool --chip esp32 --port COM8 --baud 460800 write_flash -z -fm dio 0x1000 ESP32_GENERIC-v1.24.1.bin
-
-# 3. 驗證 — 應看到 MicroPython REPL (>>>)
-python -m mpremote connect COM8 repl
+```bash
+mpremote connect /dev/ttyUSB0 repl
+# 按 Ctrl+D 軟重啟，應看到：
+#   [BOOT] SDPRS Pump Node booting (minimal mode)...
+#   [MAIN] Entering main loop...
+#   [MQTT] WiFi connected: 192.168.x.x
+#   [MQTT] Connected to broker!
+#   [MQTT] Published: {"node_id":"pump_node_01","pump_state":"OFF","water_level":0.0}
 # 按 Ctrl+] 退出
 ```
 
-> **關鍵參數說明：**
->
-> - `-fm dio`：某些 ESP32 開發板需要 DIO flash 模式，否則出現 `flash read err, 1000`
-> - `0x1000`：原版 ESP32 (非 S2/S3/C3) 的韌體起始位址
+也可在 EMQX Dashboard `/#/clients` 頁面確認 `pump_node_01` 在線。
 
-### 步驟 4：上傳水泵控制程式
+### 附錄：手動刷寫流程（不使用腳本時）
 
-使用 `ampy` 上傳（比 `mpremote cp` 在 Windows 上更穩定）：
+<details>
+<summary>展開：純命令列版本（給特殊環境/教學）</summary>
 
 ```powershell
+# 1. 偵測串口
+python -m serial.tools.list_ports
+
+# 2. 下載 MicroPython 韌體
+# https://micropython.org/download/ESP32_GENERIC/
+
+# 3. 擦除 + 燒錄
+python -m esptool --port COM8 erase_flash
+python -m esptool --chip esp32 --port COM8 --baud 460800 write_flash -z -fm dio 0x1000 ESP32_GENERIC-v1.24.1.bin
+
+# 4. 上傳程式（boot.py 最後！）
 cd sdprs/edge_pump
+for %f in (config.py main.py water_sensor.py pump_controller.py mqtt_client.py boot.py) do mpremote connect COM8 cp %f :%f
 
-# 逐個上傳（每次間隔 2 秒確保穩定）
-ampy --port COM8 --delay 2 put config.py
-ampy --port COM8 --delay 2 put water_sensor.py
-ampy --port COM8 --delay 2 put pump_controller.py
-ampy --port COM8 --delay 2 put mqtt_client.py
-ampy --port COM8 --delay 2 put main.py
-ampy --port COM8 --delay 2 put boot.py    # boot.py 永遠最後上傳！
-
-# 驗證檔案列表
-ampy --port COM8 --delay 2 ls
-# 應顯示 6 個 .py 檔案
-```
-
-> **重要：`boot.py` 必須最後上傳！**
-> boot.py 上傳後會在每次啟動時自動執行（WiFi 連線），若其他檔案尚未就位會導致錯誤。
-
-### 步驟 5：修改 WiFi 和 MQTT 配置
-
-WiFi 帳密不應留在源碼/git 中。**推薦使用 Thonny 直接編輯 ESP32 上的 `config.py` 並軟重啟**（Ctrl+D），無需經過本機檔案。
-
-**Thonny 操作流程：**
-
-1. Thonny → **Tools → Options → Interpreter** → 選 `MicroPython (ESP32)` + 對應 COM 埠
-2. 左側 **Files** 面板 → 切到 **MicroPython 裝置** → 雙擊開啟 `config.py`
-3. 修改下列 4 個欄位，存檔後按 **Ctrl+D** 軟重啟：
-
-```python
-SSID = "<你的 WiFi SSID>"
-WIFI_PASS = "<你的 WiFi 密碼>"
-MQTT_BROKER = "<EMQX Public IP>"        # EMQX Zeabur IP
-MQTT_PORT = 32150                       # EMQX TCP 端口
-MQTT_USERNAME = "pump_node_01"          # EMQX 認證用戶名
-MQTT_PASSWORD = "<你的 MQTT 密碼>"      # EMQX 認證密碼
-```
-
-**替代方案（無 Thonny，使用 ampy）：**
-
-直接在裝置上跑一支互動腳本即可，避免敏感字串落到本機磁碟：
-
-```powershell
+# 5. 改 WiFi/MQTT — 推薦 Thonny GUI，或 ampy 取下/編輯/上傳
 ampy --port COM8 --delay 2 get config.py config.local.py
-# 用任意編輯器修改 config.local.py 的 SSID / WIFI_PASS / MQTT_* 後存檔
+# (編輯 config.local.py)
 ampy --port COM8 --delay 2 put config.local.py config.py
-del config.local.py    # 修改完成後立即刪除本機副本
+del config.local.py
 ```
 
-> **安全提醒：** `config.py` 內含明文密碼，請勿 commit。已在 `.gitignore` 中排除 `config.local.py`。
-
-> **EMQX 端需新增用戶：**
-> EMQX Dashboard → Access Control → Authentication → Users → Add
->
-> - Username: `pump_node_01`
-> - Password: 與 config.py 中一致
-
-### 步驟 6：重啟並驗證
-
-拔插 USB 或外接電源重啟 ESP32，等待約 40 秒（WiFi 連線 + MQTT 連線）。
-
-**驗證方式：**
-
-```powershell
-# 方式 1：串口日誌
-python -m mpremote connect COM8 repl
-# 按 Ctrl+D 軟重啟，應看到（v2 最小化 boot.py）：
-# [BOOT] SDPRS Pump Node booting (minimal mode)...
-# [BOOT] WiFi will be initialized lazily in main.py
-# [MAIN] SDPRS Pump Node starting...
-# [MAIN] Entering main loop...
-# （約 10 秒後首次 MQTT 連線）
-# [MQTT] Connecting to WiFi SSID: YOUR_WIFI_SSID
-# [MQTT] WiFi connected: 192.168.x.x
-# [MQTT] Connected to broker!
-# [MQTT] Published: {"node_id":"pump_node_01","pump_state":"OFF","water_level":0.0}
-# [MAIN] NTP synced via time.cloudflare.com: 2026-xx-xx xx:xx:xx UTC
-```
-
-```
-# 方式 2：EMQX Dashboard
-# 打開 https://emqx-dashboard.zeabur.app/#/clients
-# 應看到 pump_node_01 在線
-```
+</details>
 
 ### 開發模式 vs 生產模式
 
