@@ -155,6 +155,7 @@ dmypy.json
 # Local configuration overrides
 config.local.yaml
 config.local.json
+config.local.py
 
 # Backup files
 *.backup

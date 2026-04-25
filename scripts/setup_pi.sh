@@ -102,9 +102,10 @@ echo -e "${GREEN}[Step 2/6] 安裝依賴...${NC}"
 
 apt-get update
 apt-get install -y \
-    python3-pip python3-venv python3-pyaudio \
+    python3-pip python3-venv python3-dev \
+    portaudio19-dev libportaudio2 \
     ffmpeg autossh git avahi-daemon \
-    libopenjp2-7 libtiff5
+    libopenjp2-7 libtiff6
 
 # 建立 sdprs 用戶
 if ! id -u sdprs &>/dev/null; then
@@ -131,7 +132,7 @@ python3 -m venv /opt/sdprs/edge_glass/venv
 echo "安裝 Python 套件..."
 /opt/sdprs/edge_glass/venv/bin/pip install --upgrade pip
 /opt/sdprs/edge_glass/venv/bin/pip install \
-    opencv-python-headless paho-mqtt httpx pyyaml numpy psutil
+    opencv-python-headless paho-mqtt httpx pyyaml numpy psutil pyaudio
 
 # 下載 mediamtx
 echo "下載 MediaMTX..."
@@ -145,9 +146,10 @@ fi
 echo -e "${GREEN}[Step 3/6] SSH 金鑰配置...${NC}"
 
 # 生成 SSH 金鑰
+mkdir -p /home/sdprs/.ssh
+chmod 700 /home/sdprs/.ssh
+chown sdprs:sdprs /home/sdprs/.ssh
 if [[ ! -f /home/sdprs/.ssh/id_ed25519 ]]; then
-    mkdir -p /home/sdprs/.ssh
-    chmod 700 /home/sdprs/.ssh
     sudo -u sdprs ssh-keygen -t ed25519 -f /home/sdprs/.ssh/id_ed25519 -N ""
     echo "已生成 SSH 金鑰對"
 fi
@@ -156,7 +158,7 @@ fi
 cat > /home/sdprs/.ssh/config << EOF
 Host ${SERVER_IP}
     StrictHostKeyChecking no
-    UserKnownKnownHostsFile /dev/null
+    UserKnownHostsFile /dev/null
 EOF
 chown sdprs:sdprs /home/sdprs/.ssh/config
 chmod 600 /home/sdprs/.ssh/config
