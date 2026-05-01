@@ -30,7 +30,9 @@ try:
     _TOPICS_IMPORTED = True
 except ImportError:
     _TOPICS_IMPORTED = False
-from ..database import upsert_node, update_node_heartbeat, update_node_status
+from ..database import (
+    upsert_node, update_node_heartbeat, update_node_status, insert_pump_reading
+)
 
 # Configure logging
 logger = logging.getLogger("mqtt_service")
@@ -281,7 +283,14 @@ class MQTTService:
                 self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
             else:
                 upsert_node(node_id, "pump", "ONLINE", metadata)
-            
+
+            # Persist time-series sample for history charts
+            try:
+                ts = data.get("timestamp") or datetime.utcnow().isoformat()
+                insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"))
+            except Exception as ts_err:
+                logger.warning(f"Failed to persist pump reading for {node_id}: {ts_err}")
+
             logger.debug(f"Pump status from {node_id}: state={data.get('pump_state')}")
             
             # WebSocket broadcast to connected clients

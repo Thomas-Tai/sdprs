@@ -2,6 +2,11 @@
 
 {% block title %}監控牆 - SDPRS 防災監控{% endblock %}
 
+{% block head %}
+<!-- Chart.js CDN for pump history chart -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+{% endblock %}
+
 {% block content %}
 <div class="space-y-6">
     <!-- 頁面標題 -->
@@ -14,10 +19,16 @@
     <!-- 快照網格 -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {% for node in glass_nodes %}
-        <div class="snapshot-card bg-white rounded-lg shadow overflow-hidden relative" data-node-id="{{ node.node_id }}">
-            <!-- 頂部：節點資訊 -->
+        <div class="snapshot-card bg-white rounded-lg shadow overflow-hidden relative" data-node-id="{{ node.node_id }}" data-node-type="glass">
+            <!-- 頂部：節點資訊 + 地點 -->
             <div class="flex justify-between items-center p-2 bg-gray-800 text-white rounded-t-lg">
-                <span class="font-mono text-sm">{{ node.node_id }}</span>
+                <div class="flex items-center gap-2 min-w-0">
+                    <span class="font-mono text-sm">{{ node.node_id }}</span>
+                    {% if node.location %}
+                    <span class="location-label text-xs text-gray-300 bg-gray-700 px-1 rounded truncate max-w-[80px]" id="location-{{ node.node_id }}" title="{{ node.location }}">{{ node.location }}</span>
+                    {% endif %}
+                    <button class="edit-location-btn text-gray-400 hover:text-yellow-400 text-xs p-0.5" onclick="event.stopPropagation(); openLocationModal('{{ node.node_id }}', 'glass')" title="編輯地點">✏️</button>
+                </div>
                 <span id="status-dot-{{ node.node_id }}" class="status-dot {% if node.status == 'ONLINE' %}bg-green-500{% else %}bg-red-500{% endif %}"></span>
             </div>
             
@@ -98,6 +109,49 @@
     <div class="lightbox-footer">
         <span class="text-gray-400 text-sm">滾輪/捏合縮放 | 拖曳平移 | ESC 關閉</span>
         <span id="lightbox-zoom-level" class="text-gray-300 text-sm font-mono">100%</span>
+    </div>
+</div>
+
+<!-- 地點編輯 Modal -->
+<div id="location-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-96 max-w-full mx-4">
+        <h3 class="text-lg font-bold mb-4">編輯節點地點</h3>
+        <p class="text-sm text-gray-600 mb-2">節點 ID: <span id="location-modal-node-id" class="font-mono"></span></p>
+        <input type="text" id="location-input" class="w-full border border-gray-300 rounded px-3 py-2 mb-4" placeholder="例如: 1F 大門入口" maxlength="120">
+        <div class="flex justify-end gap-3">
+            <button onclick="closeLocationModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800">取消</button>
+            <button onclick="saveLocation()" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- 水泵歷史圖表 Modal -->
+<div id="pump-history-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold">雨量感測歷史圖表</h3>
+            <button onclick="closePumpHistoryModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+        </div>
+        <p class="text-sm text-gray-600 mb-3">節點 ID: <span id="pump-history-node-id" class="font-mono"></span></p>
+
+        <!-- 時間範圍選擇 -->
+        <div class="flex flex-wrap gap-2 mb-4">
+            <button onclick="setPumpTimeRange('1h')" class="time-range-btn px-3 py-1 border rounded text-sm hover:bg-gray-100" data-range="1h">1 小時</button>
+            <button onclick="setPumpTimeRange('6h')" class="time-range-btn px-3 py-1 border rounded text-sm hover:bg-gray-100" data-range="6h">6 小時</button>
+            <button onclick="setPumpTimeRange('24h')" class="time-range-btn px-3 py-1 border rounded text-sm hover:bg-gray-100" data-range="24h">24 小時</button>
+            <button onclick="setPumpTimeRange('7d')" class="time-range-btn px-3 py-1 border rounded text-sm hover:bg-gray-100" data-range="7d">7 天</button>
+            <span class="text-sm text-gray-400 mx-2">或自訂:</span>
+            <input type="datetime-local" id="pump-history-start" class="border rounded px-2 py-1 text-sm">
+            <span class="text-sm text-gray-400">至</span>
+            <input type="datetime-local" id="pump-history-end" class="border rounded px-2 py-1 text-sm">
+            <button onclick="loadPumpHistoryCustom()" class="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">查詢</button>
+        </div>
+
+        <!-- 圖表容器 -->
+        <div class="relative" style="height: 400px;">
+            <canvas id="pump-history-chart"></canvas>
+        </div>
+        <p id="pump-history-empty" class="text-center text-gray-400 py-8 hidden">此時間範圍內無資料</p>
     </div>
 </div>
 {% endblock %}

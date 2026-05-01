@@ -58,7 +58,7 @@ async function checkNodeStatus() {
 function updateNodeCard(node) {
     const card = document.querySelector(`.snapshot-card[data-node-id="${node.node_id}"]`);
     if (!card) return;
-    
+
     // Update status dot
     const statusDot = document.getElementById(`status-dot-${node.node_id}`);
     // Update overlays
@@ -66,11 +66,13 @@ function updateNodeCard(node) {
     const staleOverlay = document.getElementById(`stale-overlay-${node.node_id}`);
     // Update time
     const timeEl = document.getElementById(`snapshot-time-${node.node_id}`);
-    
+    // Update location
+    const locEl = document.getElementById(`location-${node.node_id}`);
+
     // Determine status
     const isOffline = node.status === 'OFFLINE';
     const isStale = node.is_stale || false;
-    
+
     // Update status dot color
     if (statusDot) {
         if (isOffline) {
@@ -81,7 +83,7 @@ function updateNodeCard(node) {
             statusDot.className = 'status-dot bg-green-500';
         }
     }
-    
+
     // Update overlays
     if (offlineOverlay) {
         if (isOffline) {
@@ -90,7 +92,7 @@ function updateNodeCard(node) {
             offlineOverlay.classList.add('hidden');
         }
     }
-    
+
     if (staleOverlay) {
         if (!isOffline && isStale) {
             staleOverlay.classList.remove('hidden');
@@ -98,10 +100,17 @@ function updateNodeCard(node) {
             staleOverlay.classList.add('hidden');
         }
     }
-    
+
     // Update snapshot timestamp
     if (timeEl && node.snapshot_timestamp) {
         timeEl.textContent = formatTimestamp(node.snapshot_timestamp);
+    }
+
+    // Update location display
+    if (locEl && node.location) {
+        locEl.textContent = node.location;
+        locEl.title = node.location;
+        locEl.style.display = '';
     }
 }
 
@@ -174,6 +183,8 @@ function renderPumpCard(data) {
     // API uses node_type; WebSocket messages use type — normalise
     const nodeType = data.node_type || data.type;
     const dotClass = isOnline ? 'bg-green-500' : 'bg-red-500';
+    // Location from nodeStates (enriched by /api/nodes fetch)
+    const location = data.location || '';
 
     // Hide empty placeholder
     const emptyEl = document.getElementById('pump-nodes-empty');
@@ -185,9 +196,14 @@ function renderPumpCard(data) {
         card = document.createElement('div');
         card.className = 'bg-white rounded-lg shadow p-4';
         card.id = 'pump-card-' + nodeId;
+        card.dataset.nodeType = 'pump';
         card.innerHTML = `
-            <div class="flex justify-between items-center mb-3">
-                <span class="font-mono text-sm font-bold">${nodeId}</span>
+            <div class="flex justify-between items-center mb-1">
+                <div class="flex items-center gap-2 min-w-0">
+                    <span class="font-mono text-sm font-bold">${nodeId}</span>
+                    <span class="location-label text-xs text-gray-500 truncate max-w-[100px]" id="pump-location-${nodeId}" title="${location}">${location}</span>
+                    <button class="edit-location-btn text-gray-400 hover:text-yellow-400 text-xs p-0.5" onclick="openLocationModal('${nodeId}', 'pump')" title="編輯地點">✏️</button>
+                </div>
                 <span id="pump-dot-${nodeId}" class="status-dot ${dotClass}"></span>
             </div>
             <div class="mb-3">
@@ -208,8 +224,10 @@ function renderPumpCard(data) {
                     ${stateLabel}
                 </span>
             </div>
-            <div class="mt-2 text-xs text-gray-400 text-right">
-                更新: <span id="pump-last-update-${nodeId}">--</span>
+            <div class="flex justify-between items-center mt-2">
+                <span class="text-xs text-gray-400">更新: <span id="pump-last-update-${nodeId}">--</span></span>
+                <button onclick="openPumpHistoryModal('${nodeId}')"
+                        class="text-xs text-blue-600 hover:text-blue-800 underline">查看歷史</button>
             </div>
         `;
         grid.appendChild(card);
@@ -231,6 +249,12 @@ function renderPumpCard(data) {
         if (badgeEl) {
             badgeEl.className = 'px-2 py-1 rounded text-sm font-medium ' + stateClass;
             badgeEl.textContent = stateLabel;
+        }
+
+        const locEl = document.getElementById('pump-location-' + nodeId);
+        if (locEl && location) {
+            locEl.textContent = location;
+            locEl.title = location;
         }
     }
 
@@ -401,7 +425,256 @@ document.addEventListener('touchmove', function(e) {
 document.addEventListener('touchend', function() { lbDragging = false; });
 
 // ESC to close
-document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeLightbox();
+        closeLocationModal();
+        closePumpHistoryModal();
+    }
+});
+
+// ===== Location Edit Modal =====
+let locationModalNodeId = null;
+let locationModalNodeType = null;
+
+function openLocationModal(nodeId, nodeType) {
+    locationModalNodeId = nodeId;
+    locationModalNodeType = nodeType;
+    document.getElementById('location-modal-node-id').textContent = nodeId;
+
+    // Get current location from nodeStates or DOM
+    let currentLocation = '';
+    if (nodeType === 'pump') {
+        const locEl = document.getElementById('pump-location-' + nodeId);
+        currentLocation = locEl ? locEl.textContent.trim() : '';
+    } else {
+        const locEl = document.getElementById('location-' + nodeId);
+        currentLocation = locEl ? locEl.textContent.trim() : '';
+    }
+    // If it's italic placeholder text, clear it
+    if (currentLocation && !nodeStates[nodeId]?.location) {
+        currentLocation = '';
+    }
+    document.getElementById('location-input').value = nodeStates[nodeId]?.location || currentLocation;
+
+    document.getElementById('location-modal').classList.remove('hidden');
+    document.getElementById('location-input').focus();
+}
+
+function closeLocationModal() {
+    document.getElementById('location-modal').classList.add('hidden');
+    locationModalNodeId = null;
+    locationModalNodeType = null;
+}
+
+function saveLocation() {
+    if (!locationModalNodeId) return;
+
+    const newLocation = document.getElementById('location-input').value.trim();
+
+    fetch('/api/nodes/' + locationModalNodeId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location: newLocation })
+    })
+    .then(r => r.json())
+    .then(data => {
+        // Update nodeStates
+        if (nodeStates[locationModalNodeId]) {
+            nodeStates[locationModalNodeId].location = newLocation;
+        }
+
+        // Update DOM
+        if (locationModalNodeType === 'pump') {
+            const locEl = document.getElementById('pump-location-' + locationModalNodeId);
+            if (locEl) {
+                locEl.textContent = newLocation;
+                locEl.title = newLocation;
+            }
+        } else {
+            const locEl = document.getElementById('location-' + locationModalNodeId);
+            if (locEl) {
+                locEl.textContent = newLocation;
+                locEl.title = newLocation;
+                locEl.style.display = newLocation ? '' : 'none';
+            }
+        }
+
+        closeLocationModal();
+    })
+    .catch(err => {
+        console.error('[Monitor] Failed to save location:', err);
+        alert('保存失敗，請稍後重試');
+    });
+}
+
+// ===== Pump History Chart Modal =====
+let pumpHistoryNodeId = null;
+let pumpHistoryChart = null;
+
+function openPumpHistoryModal(nodeId) {
+    pumpHistoryNodeId = nodeId;
+    document.getElementById('pump-history-node-id').textContent = nodeId;
+
+    // Reset time range buttons
+    document.querySelectorAll('.time-range-btn').forEach(btn => btn.classList.remove('bg-blue-600', 'text-white'));
+    document.getElementById('pump-history-start').value = '';
+    document.getElementById('pump-history-end').value = '';
+    document.getElementById('pump-history-empty').classList.add('hidden');
+
+    // Show modal
+    document.getElementById('pump-history-modal').classList.remove('hidden');
+
+    // Load default 1 hour
+    setPumpTimeRange('1h');
+}
+
+function closePumpHistoryModal() {
+    document.getElementById('pump-history-modal').classList.add('hidden');
+    if (pumpHistoryChart) {
+        pumpHistoryChart.destroy();
+        pumpHistoryChart = null;
+    }
+    pumpHistoryNodeId = null;
+}
+
+function setPumpTimeRange(range) {
+    const now = new Date();
+    let start = new Date();
+
+    switch (range) {
+        case '1h': start.setHours(now.getHours() - 1); break;
+        case '6h': start.setHours(now.getHours() - 6); break;
+        case '24h': start.setDate(now.getDate() - 1); break;
+        case '7d': start.setDate(now.getDate() - 7); break;
+    }
+
+    // Highlight button
+    document.querySelectorAll('.time-range-btn').forEach(btn => {
+        if (btn.dataset.range === range) {
+            btn.classList.add('bg-blue-600', 'text-white');
+        } else {
+            btn.classList.remove('bg-blue-600', 'text-white');
+        }
+    });
+
+    loadPumpHistory(start, now);
+}
+
+function loadPumpHistoryCustom() {
+    const startStr = document.getElementById('pump-history-start').value;
+    const endStr = document.getElementById('pump-history-end').value;
+
+    if (!startStr || !endStr) {
+        alert('請選擇開始與結束時間');
+        return;
+    }
+
+    const start = new Date(startStr);
+    const end = new Date(endStr);
+
+    if (start >= end) {
+        alert('開始時間需早於結束時間');
+        return;
+    }
+
+    // Clear button highlights
+    document.querySelectorAll('.time-range-btn').forEach(btn => btn.classList.remove('bg-blue-600', 'text-white'));
+
+    loadPumpHistory(start, end);
+}
+
+function loadPumpHistory(start, end) {
+    if (!pumpHistoryNodeId) return;
+
+    const startIso = start.toISOString();
+    const endIso = end.toISOString();
+
+    fetch('/api/pump/' + pumpHistoryNodeId + '/history?start=' + encodeURIComponent(startIso) + '&end=' + encodeURIComponent(endIso))
+    .then(r => r.json())
+    .then(data => {
+        renderPumpHistoryChart(data);
+    })
+    .catch(err => {
+        console.error('[Monitor] Failed to load pump history:', err);
+        document.getElementById('pump-history-empty').classList.remove('hidden');
+        if (pumpHistoryChart) {
+            pumpHistoryChart.destroy();
+            pumpHistoryChart = null;
+        }
+    });
+}
+
+function renderPumpHistoryChart(data) {
+    const canvas = document.getElementById('pump-history-chart');
+    const emptyEl = document.getElementById('pump-history-empty');
+
+    if (!data || data.length === 0) {
+        emptyEl.classList.remove('hidden');
+        if (pumpHistoryChart) {
+            pumpHistoryChart.destroy();
+            pumpHistoryChart = null;
+        }
+        return;
+    }
+
+    emptyEl.classList.add('hidden');
+
+    // Prepare data
+    const labels = data.map(row => {
+        const d = new Date(row.timestamp);
+        return d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    });
+    const waterLevels = data.map(row => row.water_level);
+
+    // Destroy old chart if exists
+    if (pumpHistoryChart) {
+        pumpHistoryChart.destroy();
+    }
+
+    // Create new chart
+    pumpHistoryChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: '雨量感測 (%)',
+                data: waterLevels,
+                borderColor: 'rgb(59, 130, 246)',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, position: 'top' },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) {
+                            return '水位: ' + (ctx.raw !== null ? ctx.raw.toFixed(1) + '%' : '--');
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    display: true,
+                    title: { display: false }
+                },
+                y: {
+                    display: true,
+                    min: 0,
+                    max: 100,
+                    title: { display: true, text: '水位 (%)' }
+                }
+            }
+        }
+    });
+}
 
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', function() {

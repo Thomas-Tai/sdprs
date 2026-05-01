@@ -126,11 +126,28 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             node_type      TEXT NOT NULL,
             last_heartbeat DATETIME,
             status         TEXT DEFAULT 'OFFLINE',
-            metadata       TEXT
+            metadata       TEXT,
+            location       TEXT
+        );
+    """)
+    # Migration: add location column to existing nodes tables
+    cursor.execute("PRAGMA table_info(nodes);")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    if "location" not in existing_cols:
+        cursor.execute("ALTER TABLE nodes ADD COLUMN location TEXT;")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pump_readings (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id     TEXT NOT NULL,
+            timestamp   DATETIME NOT NULL,
+            water_level REAL,
+            pump_state  TEXT
         );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);")
 
 
 def _create_tables_postgresql(conn):
@@ -157,11 +174,24 @@ def _create_tables_postgresql(conn):
             node_type      TEXT NOT NULL,
             last_heartbeat TIMESTAMP,
             status         TEXT DEFAULT 'OFFLINE',
-            metadata       TEXT
+            metadata       TEXT,
+            location       TEXT
+        );
+    """))
+    # PG supports IF NOT EXISTS on ADD COLUMN since 9.6 — safe migration
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS location TEXT;"))
+    conn.execute(sqlalchemy.text("""
+        CREATE TABLE IF NOT EXISTS pump_readings (
+            id          SERIAL PRIMARY KEY,
+            node_id     TEXT NOT NULL,
+            timestamp   TIMESTAMP NOT NULL,
+            water_level REAL,
+            pump_state  TEXT
         );
     """))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);"))
 
 
 # =============================================================================
@@ -388,7 +418,7 @@ def upsert_node(
     status: str = "ONLINE",
     metadata: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Insert or update a node record."""
+    """Insert or update a node record. Preserves existing location field."""
     metadata_json = json.dumps(metadata) if metadata else None
     now = datetime.utcnow().isoformat()
 
@@ -424,6 +454,74 @@ def upsert_node(
         """, (node_id, node_type, now, status, metadata_json))
         logger.debug(f"Upserted node {node_id} ({node_type})")
         return True
+
+
+def set_node_location(node_id: str, location: Optional[str]) -> bool:
+    """Set the user-defined deployment location for a node. Pass None or '' to clear."""
+    loc = (location or "").strip() or None
+
+    if _backend == "postgresql":
+        import sqlalchemy
+        database_url = os.environ.get("DATABASE_URL", "")
+        engine = sqlalchemy.create_engine(database_url)
+        with engine.connect() as conn:
+            result = conn.execute(
+                sqlalchemy.text("UPDATE nodes SET location = :loc WHERE node_id = :id"),
+                {"loc": loc, "id": node_id},
+            )
+            conn.commit()
+            return result.rowcount > 0
+
+    with get_db_cursor() as cursor:
+        cursor.execute("UPDATE nodes SET location = ? WHERE node_id = ?", (loc, node_id))
+        return cursor.rowcount > 0
+
+
+def insert_pump_reading(node_id: str, timestamp: str, water_level: Optional[float],
+                        pump_state: Optional[str]) -> None:
+    """Append one water-level / pump-state sample for time-series history."""
+    if _backend == "postgresql":
+        import sqlalchemy
+        database_url = os.environ.get("DATABASE_URL", "")
+        engine = sqlalchemy.create_engine(database_url)
+        with engine.connect() as conn:
+            conn.execute(
+                sqlalchemy.text("""
+                    INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state)
+                    VALUES (:id, :ts, :wl, :ps)
+                """),
+                {"id": node_id, "ts": timestamp, "wl": water_level, "ps": pump_state},
+            )
+            conn.commit()
+        return
+
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state) VALUES (?, ?, ?, ?)",
+            (node_id, timestamp, water_level, pump_state),
+        )
+
+
+def get_pump_readings(node_id: str, start: str, end: str,
+                      limit: int = 5000) -> List[Dict[str, Any]]:
+    """Return rows in [start, end] ordered by timestamp ASC. ISO-8601 strings."""
+    if _backend == "postgresql":
+        return _pg_fetch_many_sync(
+            """SELECT timestamp, water_level, pump_state FROM pump_readings
+               WHERE node_id = :id AND timestamp BETWEEN :s AND :e
+               ORDER BY timestamp ASC LIMIT :lim""",
+            {"id": node_id, "s": start, "e": end, "lim": limit},
+        )
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        """SELECT timestamp, water_level, pump_state FROM pump_readings
+           WHERE node_id = ? AND timestamp BETWEEN ? AND ?
+           ORDER BY timestamp ASC LIMIT ?""",
+        (node_id, start, end, limit),
+    )
+    return [dict(row) for row in cursor.fetchall()]
 
 
 def update_node_heartbeat(node_id: str, metadata: Optional[Dict[str, Any]] = None):
