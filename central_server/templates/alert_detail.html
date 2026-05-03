@@ -79,6 +79,8 @@
                             <span class="status-badge pending-video">⏳ 等待影片</span>
                             {% elif event.status == 'PENDING' %}
                             <span class="status-badge pending">🔴 待處理</span>
+                            {% elif event.status == 'ACKNOWLEDGED' %}
+                            <span class="status-badge acknowledged">🔵 已認領</span>
                             {% elif event.status == 'RESOLVED' %}
                             <span class="status-badge resolved">🟢 已處理</span>
                             {% endif %}
@@ -96,6 +98,12 @@
                         <span class="info-label">音訊頻率峰值</span>
                         <span class="info-value">{{ "%.0f Hz"|format(event.audio_freq_peak_hz) if event.audio_freq_peak_hz else '-' }}</span>
                     </div>
+                    {% if event.acknowledged_by %}
+                    <div class="info-row">
+                        <span class="info-label">認領人員</span>
+                        <span class="info-value">{{ event.acknowledged_by }} ({{ event.acknowledged_at }})</span>
+                    </div>
+                    {% endif %}
                     <div class="info-row">
                         <span class="info-label">建立時間</span>
                         <span class="info-value">{{ event.created_at or '-' }}</span>
@@ -114,13 +122,30 @@
                 </button>
                 {% endif %}
                 
-                <!-- 標記已處理區域 -->
+                <!-- 認領按鈕 — 防止多人重複派遣 (Sprint A item 2) -->
                 {% if event.status == "PENDING" %}
+                <button id="acknowledge-btn"
+                        class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded mb-3"
+                        title="標示我正在處理此警報，停止重複告警音">
+                    🔵 認領處理（我正在處理）
+                </button>
+                {% endif %}
+
+                <!-- 已認領狀態下顯示誰正在處理 -->
+                {% if event.status == "ACKNOWLEDGED" %}
+                <div class="bg-blue-50 border border-blue-200 rounded p-3 mb-3 text-sm">
+                    🔵 由 <strong>{{ event.acknowledged_by }}</strong> 認領處理中
+                    <span class="text-gray-500 block text-xs mt-1">{{ event.acknowledged_at }}</span>
+                </div>
+                {% endif %}
+
+                <!-- 標記已處理區域 (PENDING 或 ACKNOWLEDGED 都可標記已處理) -->
+                {% if event.status in ("PENDING", "ACKNOWLEDGED") %}
                 <div id="resolve-section" class="resolve-section">
                     <h4 class="font-medium mb-2">標記已處理</h4>
-                    <textarea id="resolve-notes" 
-                              class="w-full border border-gray-300 rounded p-2 mb-3" 
-                              rows="3" 
+                    <textarea id="resolve-notes"
+                              class="w-full border border-gray-300 rounded p-2 mb-3"
+                              rows="3"
                               placeholder="輸入處理備註（可選）"></textarea>
                     <button id="resolve-btn" class="w-full bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">
                         ✓ 標記已處理
@@ -247,6 +272,31 @@ if (stopStreamBtn) {
     });
 }
 
+// ===== 認領處理 (Sprint A item 2) =====
+const acknowledgeBtn = document.getElementById('acknowledge-btn');
+
+if (acknowledgeBtn) {
+    acknowledgeBtn.addEventListener('click', async () => {
+        acknowledgeBtn.disabled = true;
+        acknowledgeBtn.textContent = '🔄 認領中…';
+        try {
+            const response = await fetch(`/api/alerts/${eventId}/acknowledge`, { method: 'PATCH' });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${response.status}`);
+            }
+            // WebSocket broadcast will arrive shortly and reload the page;
+            // optimistic UI: hide the button immediately.
+            acknowledgeBtn.classList.add('hidden');
+        } catch (error) {
+            console.error('Failed to acknowledge:', error);
+            alert('認領失敗: ' + error.message);
+            acknowledgeBtn.disabled = false;
+            acknowledgeBtn.textContent = '🔵 認領處理（我正在處理）';
+        }
+    });
+}
+
 // ===== 標記已處理 =====
 const resolveBtn = document.getElementById('resolve-btn');
 
@@ -294,6 +344,11 @@ function handleWSMessage(msg) {
     
     if (msg.type === 'alert_resolved' && msg.data.alert_id === eventId) {
         // 已處理，刷新頁面
+        location.reload();
+    }
+
+    if (msg.type === 'alert_acknowledged' && msg.data.alert_id === eventId) {
+        // 已被認領（可能是別的操作員），刷新顯示
         location.reload();
     }
 }

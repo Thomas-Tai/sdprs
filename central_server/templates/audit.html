@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}操作審計紀錄 - SDPRS{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-gray-800">操作審計紀錄</h1>
+        <span class="text-sm text-gray-500">最近 {{ rows|length }} 筆 (僅管理員可見)</span>
+    </div>
+
+    <!-- 篩選 -->
+    <form method="GET" class="bg-white rounded-lg shadow p-4 flex flex-wrap gap-4 text-sm">
+        <label class="flex items-center gap-2">
+            操作者：
+            <input type="text" name="operator" value="{{ operator or '' }}" class="border border-gray-300 rounded px-2 py-1" placeholder="使用者名稱">
+        </label>
+        <label class="flex items-center gap-2">
+            動作類型：
+            <select name="action_type" class="border border-gray-300 rounded px-2 py-1">
+                <option value="">全部</option>
+                {% for a in action_types %}
+                <option value="{{ a }}" {% if action_type == a %}selected{% endif %}>{{ a }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded">篩選</button>
+        <a href="/audit" class="text-gray-600 hover:text-gray-800 self-center">清除</a>
+    </form>
+
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">時間</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">操作者</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">動作</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">對象</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">詳情</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200">
+                {% for r in rows %}
+                <tr>
+                    <td class="px-4 py-2 text-sm text-gray-700 whitespace-nowrap">{{ r.timestamp }}</td>
+                    <td class="px-4 py-2 text-sm font-medium text-gray-800">{{ r.operator }}</td>
+                    <td class="px-4 py-2 text-sm">
+                        <span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-xs font-mono">{{ r.action_type }}</span>
+                    </td>
+                    <td class="px-4 py-2 text-sm font-mono text-gray-600">{{ r.target_id or '-' }}</td>
+                    <td class="px-4 py-2 text-xs text-gray-500">
+                        {% if r.details %}
+                            <code class="bg-gray-50 px-1">{{ r.details | tojson }}</code>
+                        {% else %}-{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not rows %}
+                <tr><td colspan="5" class="text-center text-gray-400 py-8">無紀錄</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

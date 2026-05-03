@@ -311,6 +311,9 @@ async def update_node(
     if patch.location is not None:
         set_node_location(node_id, patch.location)
         logger.info(f"Node {node_id} location set to {patch.location!r} by {user}")
+        # Audit log (item 15)
+        from ..services.audit_service import log_action, ACTION_LOCATION_EDIT
+        log_action(user, ACTION_LOCATION_EDIT, target_id=node_id, details={"location": patch.location})
 
     db_node = get_node(node_id) or {}
     return {"node_id": node_id, "location": db_node.get("location")}
@@ -349,6 +352,94 @@ async def pump_history(
     rows = get_pump_readings(node_id, start, end, limit)
     logger.debug(f"Pump history for {node_id}: {len(rows)} rows between {start} and {end}")
     return rows
+
+
+class SnoozeRequest(BaseModel):
+    """Item 17: snooze a node's audio-only triggers for N minutes.
+
+    Visual+audio AND-gate is still allowed to fire — only pure-audio
+    triggers (which generate typhoon false-positives) are suppressed.
+    """
+    minutes: int = Field(..., ge=1, le=480, description="Snooze duration in minutes (1-480)")
+    reason: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/nodes/{node_id}/snooze")
+async def snooze_node(
+    node_id: str,
+    body: SnoozeRequest,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Item 17 (server-side). Stores snooze on the node row.
+
+    NOTE: this only writes the server-side flag. Pushing the snooze config
+    down to the edge (so the edge actually suppresses audio triggers)
+    requires MQTT cross-module work — that's the deferred half of item 17,
+    gated by the prompt's ESP32 stop-condition. Until then, the server
+    must check this flag when it processes incoming audio-only alerts.
+    """
+    from datetime import timedelta as _td
+    from ..database import set_node_snooze
+
+    if get_node(node_id) is None:
+        from ..database import upsert_node as _upsert
+        _upsert(node_id, "glass", "OFFLINE", None)
+
+    until = (datetime.utcnow() + _td(minutes=body.minutes)).isoformat()
+    ok = set_node_snooze(node_id, until, body.reason)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to set snooze")
+
+    from ..services.audit_service import log_action, ACTION_SNOOZE
+    log_action(user, ACTION_SNOOZE, target_id=node_id, details={"minutes": body.minutes, "reason": body.reason})
+    return {"node_id": node_id, "snoozed_until": until, "snooze_reason": body.reason}
+
+
+@router.delete("/nodes/{node_id}/snooze")
+async def unsnooze_node(
+    node_id: str,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Clear an active snooze."""
+    from ..database import set_node_snooze
+    set_node_snooze(node_id, None, None)
+    from ..services.audit_service import log_action, ACTION_UNSNOOZE
+    log_action(user, ACTION_UNSNOOZE, target_id=node_id)
+    return {"node_id": node_id, "snoozed_until": None}
+
+
+@router.get("/pump/{node_id}/cycles")
+async def pump_cycles(
+    node_id: str,
+    window: str = "1h",
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Item 12: count ON->OFF transitions in `window` (e.g. 1h).
+
+    A high cycle count under heavy rain is a useful operator signal — it
+    can indicate a near-saturated sump, debris causing chatter, or a
+    failing float switch.
+    """
+    from datetime import timedelta as _td
+    seconds = {"15m": 900, "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600}.get(window, 3600)
+    end_dt = datetime.utcnow()
+    start_dt = end_dt - _td(seconds=seconds)
+    rows = get_pump_readings(node_id, start_dt.isoformat(), end_dt.isoformat(), 50000)
+
+    transitions = 0
+    prev_state = None
+    for r in rows:
+        st = r.get("pump_state")
+        if prev_state == "ON" and st == "OFF":
+            transitions += 1
+        if st in ("ON", "OFF"):
+            prev_state = st
+    return {
+        "node_id": node_id,
+        "window": window,
+        "count": transitions,
+        "alert": transitions > 20,  # threshold from item 12 spec
+    }
 
 
 # Export router

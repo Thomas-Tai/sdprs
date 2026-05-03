@@ -48,14 +48,35 @@
                 <div class="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-500">
                     最後心跳: <span id="node-heartbeat-{{ node.node_id }}">{{ node.last_heartbeat or '-' }}</span>
                 </div>
-                
+                <!-- Item 13: surface upload-channel health separately. A heartbeat <1min
+                     but upload >10min usually means WiFi degraded enough to drop big
+                     payloads while ICMP-sized MQTT keepalives still squeak through. -->
+                <div class="mt-1 text-xs text-gray-500"
+                     data-node-upload="{{ node.node_id }}"
+                     data-heartbeat="{{ node.last_heartbeat or '' }}"
+                     data-upload="{{ node.last_upload_at or '' }}">
+                    最後上傳: <span class="font-mono">{{ node.last_upload_at or '-' }}</span>
+                    <span class="upload-warn-badge ml-1 hidden px-1 rounded bg-red-100 text-red-700">⚠ 上傳延遲</span>
+                </div>
+
+                {% if node.snoozed_until %}
+                <div class="mt-1 text-xs">
+                    <span class="px-1.5 py-0.5 rounded bg-gray-200 text-gray-700">😴 靜音至 {{ node.snoozed_until }}</span>
+                    {% if node.snooze_reason %}<span class="text-gray-500 ml-1">({{ node.snooze_reason }})</span>{% endif %}
+                </div>
+                {% endif %}
+
                 <div class="mt-2 text-xs text-gray-500">
-                    串流狀態: 
+                    串流狀態:
                     {% if node.stream_status and node.stream_status.status == 'active' %}
                     <span class="text-blue-600">▶ 運行中 (端口: {{ node.stream_status.tunnel_port }})</span>
                     {% else %}
                     <span class="text-gray-400">未啟動</span>
                     {% endif %}
+                    <!-- Item 14: stream health (mediamtx Prometheus). Hidden by default;
+                         surfaces values when /api/stream/health responds. -->
+                    <span class="stream-health hidden ml-2"
+                          data-node="{{ node.node_id }}"></span>
                 </div>
             </div>
             {% endfor %}
@@ -109,6 +130,22 @@
                 
                 <div class="text-xs text-gray-500">
                     最後心跳: <span id="pump-heartbeat-{{ node.node_id }}">{{ node.last_heartbeat or '-' }}</span>
+                </div>
+                <!-- Item 12: battery + power source (server-side surface; ESP32
+                     firmware change to populate is deferred — see prompt stop-condition). -->
+                {% if node.battery_voltage is not none or node.power_source %}
+                <div class="text-xs text-gray-500 mt-1">
+                    {% if node.power_source %}🔌 {{ node.power_source }}{% endif %}
+                    {% if node.battery_voltage is not none %}
+                    <span class="ml-2 {% if node.battery_voltage < 3.3 %}text-red-600 font-semibold{% elif node.battery_voltage < 3.5 %}text-yellow-600{% endif %}">
+                        🔋 {{ "%.2fV"|format(node.battery_voltage) }}
+                    </span>
+                    {% endif %}
+                </div>
+                {% endif %}
+                <!-- Item 12: pump cycle counter (last 1hr). Populated by JS from /api/pump/{id}/cycles. -->
+                <div class="text-xs text-gray-500 mt-1" data-pump-cycles="{{ node.node_id }}">
+                    本小時運行: <span class="font-medium">--</span> 次
                 </div>
             </div>
             {% endfor %}
@@ -204,6 +241,73 @@ function updatePumpState(nodeId, state) {
         el.className = 'font-medium text-green-600';
     }
 }
+
+// ===== Item 13: upload-vs-heartbeat warn badge =====
+function refreshUploadWarnBadges() {
+    const now = Date.now();
+    document.querySelectorAll('[data-node-upload]').forEach(el => {
+        const hb = el.dataset.heartbeat;
+        const up = el.dataset.upload;
+        const badge = el.querySelector('.upload-warn-badge');
+        if (!badge || !hb || !up) return;
+        const hbMs = Date.parse(hb.endsWith('Z') ? hb : hb + 'Z');
+        const upMs = Date.parse(up.endsWith('Z') ? up : up + 'Z');
+        if (isNaN(hbMs) || isNaN(upMs)) return;
+        // Heartbeat fresh (<1min) but upload stale (>10min) = silent upload failure.
+        if ((now - hbMs) < 60_000 && (now - upMs) > 10 * 60_000) {
+            badge.classList.remove('hidden');
+        } else {
+            badge.classList.add('hidden');
+        }
+    });
+}
+setInterval(refreshUploadWarnBadges, 30_000);
+refreshUploadWarnBadges();
+
+// ===== Item 12: pump cycle count (last 1hr) =====
+async function refreshPumpCycles() {
+    const els = document.querySelectorAll('[data-pump-cycles]');
+    for (const el of els) {
+        const nodeId = el.dataset.pumpCycles;
+        try {
+            const r = await fetch('/api/pump/' + nodeId + '/cycles?window=1h');
+            if (!r.ok) continue;
+            const data = await r.json();
+            const span = el.querySelector('span');
+            if (span) {
+                span.textContent = data.count;
+                if (data.count > 20) span.classList.add('text-red-600', 'font-semibold');
+            }
+        } catch (e) { /* ignore — cycle count is informational */ }
+    }
+}
+setInterval(refreshPumpCycles, 60_000);
+refreshPumpCycles();
+
+// ===== Item 14: stream health from mediamtx Prometheus scrape =====
+async function refreshStreamHealth() {
+    try {
+        const r = await fetch('/api/stream/health');
+        if (!r.ok) return;
+        const data = await r.json();
+        if (!data.enabled) return;
+        document.querySelectorAll('.stream-health').forEach(el => {
+            const node = el.dataset.node;
+            const m = (data.nodes || {})[node];
+            if (!m) return;
+            el.classList.remove('hidden');
+            const kbps = m.bitrate_kbps || 0;
+            let cls = 'text-gray-500';
+            if (kbps > 0 && kbps < 500) cls = 'text-red-600 font-semibold';
+            else if (kbps < 1000)        cls = 'text-yellow-600';
+            else                         cls = 'text-green-600';
+            el.className = 'stream-health ml-2 ' + cls;
+            el.textContent = `· ${kbps} kbps · 觀看 ${m.viewers || 0} · 丟幀 ${m.dropped || 0}`;
+        });
+    } catch (e) { /* mediamtx may not be reachable */ }
+}
+setInterval(refreshStreamHealth, 15_000);
+refreshStreamHealth();
 
 function updateWaterLevel(nodeId, level) {
     const textEl = document.getElementById(`pump-level-${nodeId}`);

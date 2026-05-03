@@ -36,15 +36,24 @@ def list_events(
         Dict with items, total, page, page_size
     """
     cursor = db.cursor()
-    
+
     # Build query
     conditions = []
     params = []
-    
+
     if status_filter:
-        conditions.append("status = ?")
-        params.append(status_filter)
-    
+        # Support comma-separated multi-status filter (Sprint A item 5):
+        #   ?status=PENDING_VIDEO,PENDING,ACKNOWLEDGED  -> active-only view
+        #   ?status=PENDING                              -> single status (legacy form)
+        statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
+        if len(statuses) == 1:
+            conditions.append("status = ?")
+            params.append(statuses[0])
+        elif len(statuses) > 1:
+            placeholders = ",".join("?" for _ in statuses)
+            conditions.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+
     if node_filter:
         conditions.append("node_id = ?")
         params.append(node_filter)
@@ -172,6 +181,49 @@ def update_event_video(db: sqlite3.Connection, alert_id: int, mp4_path: str) -> 
     return True
 
 
+def acknowledge_event(
+    db: sqlite3.Connection,
+    alert_id: int,
+    acknowledged_by: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Mark an event as ACKNOWLEDGED — operator is on it but hasn't completed handling yet.
+    Distinct from RESOLVED. Suppresses repeating audio (item 3) but keeps the event
+    visible in the active list. Idempotent: re-ack by same operator is a no-op.
+
+    Returns the updated event dict on success, or None if not found / wrong status.
+    """
+    cursor = db.cursor()
+    cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
+    row = cursor.fetchone()
+    if not row:
+        logger.warning(f"Event {alert_id} not found")
+        return None
+
+    # Acknowledge is only meaningful for PENDING. PENDING_VIDEO is too early
+    # (no payload to triage); RESOLVED is already past acknowledgement.
+    if row["status"] != "PENDING":
+        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
+        return None
+
+    acked_at = datetime.utcnow().isoformat()
+    cursor.execute("""
+        UPDATE events SET
+            status = 'ACKNOWLEDGED',
+            acknowledged_by = ?,
+            acknowledged_at = ?
+        WHERE id = ?
+    """, (acknowledged_by, acked_at, alert_id))
+    db.commit()
+    logger.info(f"Event {alert_id} acknowledged by {acknowledged_by}")
+
+    return {
+        "alert_id": alert_id,
+        "acknowledged_by": acknowledged_by,
+        "acknowledged_at": acked_at,
+    }
+
+
 def resolve_event(
     db: sqlite3.Connection,
     alert_id: int,
@@ -199,11 +251,12 @@ def resolve_event(
     if not row:
         logger.warning(f"Event {alert_id} not found")
         return False
-    
-    if row["status"] != "PENDING":
-        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
+
+    # Both PENDING (direct resolve) and ACKNOWLEDGED (resolve after triage) are valid.
+    if row["status"] not in ("PENDING", "ACKNOWLEDGED"):
+        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING or ACKNOWLEDGED")
         return False
-    
+
     # Update
     resolved_at = datetime.utcnow().isoformat()
     cursor.execute("""
@@ -244,25 +297,29 @@ def get_event_counts(db: sqlite3.Connection) -> Dict[str, int]:
     counts = {
         "pending_video": 0,
         "pending": 0,
+        "acknowledged": 0,
         "resolved": 0,
         "total": 0
     }
-    
+
     for row in cursor.fetchall():
         status = row["status"].lower()
         if status == "pending_video":
             counts["pending_video"] = row["count"]
         elif status == "pending":
             counts["pending"] = row["count"]
+        elif status == "acknowledged":
+            counts["acknowledged"] = row["count"]
         elif status == "resolved":
             counts["resolved"] = row["count"]
-    
+
     counts["total"] = sum([
         counts["pending_video"],
         counts["pending"],
+        counts["acknowledged"],
         counts["resolved"]
     ])
-    
+
     return counts
 
 
@@ -343,6 +400,7 @@ __all__ = [
     "get_event",
     "create_event",
     "update_event_video",
+    "acknowledge_event",
     "resolve_event",
     "get_event_counts",
     "delete_event",

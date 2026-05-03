@@ -18,16 +18,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from .api import alerts, snapshots, stream, nodes
+from .api import alerts, snapshots, stream, nodes, weather, audit as audit_api, handover
 from .services.websocket_service import router as ws_router
 from .services.mqtt_service import init_mqtt_service, get_mqtt_service
 from .services.retention_service import setup_retention_scheduler
+from .services.weather_service import init_weather_service, get_weather_service
 from .database import (
     init_db as db_init_db, close_db as db_close_db,
     get_db, get_all_events, get_events_by_status, get_event,
@@ -91,12 +92,30 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to start retention scheduler: {e}")
         app.state.scheduler = None
 
+    # Weather service (item 9). Hard-gated by CWA_API_KEY; if empty,
+    # init_weather_service registers but start() is a no-op.
+    try:
+        weather_svc = init_weather_service(settings)
+        await weather_svc.start()
+        app.state.weather_service = weather_svc
+    except Exception as e:
+        logger.warning(f"Failed to start weather service: {e}")
+        app.state.weather_service = None
+
     logger.info("SDPRS Central Server started successfully")
 
     yield
 
     # ===== Shutdown =====
     logger.info("Shutting down SDPRS Central Server...")
+
+    # Stop weather service
+    weather_svc = get_weather_service()
+    if weather_svc is not None:
+        try:
+            await weather_svc.stop()
+        except Exception as e:
+            logger.warning(f"Weather service shutdown error: {e}")
 
     # Stop retention scheduler
     if getattr(app.state, "scheduler", None):
@@ -164,6 +183,9 @@ app.include_router(alerts.router, prefix="/api")
 app.include_router(snapshots.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(nodes.router, prefix="/api")
+app.include_router(weather.router, prefix="/api")
+app.include_router(audit_api.router, prefix="/api")
+app.include_router(handover.router, prefix="/api")
 app.include_router(ws_router)
 
 
@@ -190,13 +212,54 @@ def _get_dashboard_context(request: Request) -> dict:
     db = get_db()
     counts = get_event_counts(db)
 
+    # IDs of alerts currently demanding operator action (PENDING with no ack yet).
+    # Used by item-3 audio loop to seed initial state — without this, an operator
+    # opening the dashboard mid-storm would hear no audio for already-queued alerts.
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM events WHERE status = 'PENDING'")
+    unacked_alert_ids = [r[0] for r in cursor.fetchall()]
+
+    # Item 16: handover note. Cheap to read on every page (single row).
+    handover_note = {"note": "", "author": None, "updated_at": None}
+    try:
+        from datetime import timedelta as _td
+        cursor.execute("SELECT note, author, updated_at FROM handover_note WHERE id = 1;")
+        row = cursor.fetchone()
+        if row:
+            note = row[0] or ""
+            updated_at = row[2]
+            # Auto-clear after 24hr (read-time check; no background job).
+            expired = False
+            if updated_at:
+                try:
+                    ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00").replace(" ", "T"))
+                    if ts.tzinfo is not None:
+                        ts = ts.replace(tzinfo=None)
+                    expired = (datetime.utcnow() - ts) > _td(hours=24)
+                except ValueError:
+                    expired = False
+            if not expired:
+                handover_note = {"note": note, "author": row[1], "updated_at": updated_at}
+    except Exception as e:
+        logger.debug(f"Handover note read failed (non-fatal): {e}")
+
+    # Item 18: surface session expiry to the client so it can warn at T-5min.
+    settings = get_settings()
+    session_max_age_s = 24 * 3600
+    login_at_iso = (request.session.get("login_at") if hasattr(request, "session") else None) or ""
+
     return {
         "pending_count": counts.get("pending", 0) + counts.get("pending_video", 0),
         "resolved_count": counts.get("resolved", 0),
+        "acknowledged_count": counts.get("acknowledged", 0),
         "online_count": online_count,
         "offline_count": offline_count,
         "total_nodes": total_nodes,
         "pump_active_count": pump_active,
+        "unacked_alert_ids": unacked_alert_ids,
+        "handover_note": handover_note,
+        "session_login_at": login_at_iso,
+        "session_max_age_s": session_max_age_s,
     }
 
 
@@ -216,14 +279,35 @@ async def login(request: Request):
     settings = get_settings()
     if username == settings.DASHBOARD_USER and password == settings.DASHBOARD_PASS:
         request.session["user"] = username
+        request.session["login_at"] = datetime.utcnow().isoformat()  # item 18
+        from .services.audit_service import log_action, ACTION_LOGIN
+        log_action(username, ACTION_LOGIN)
         return RedirectResponse(url="/", status_code=303)
 
     return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤"})
 
 
+@app.post("/api/session/extend")
+async def extend_session(request: Request):
+    """Item 18: refresh the session timer by re-stamping login_at.
+
+    Starlette's SessionMiddleware re-emits the cookie on every response when
+    the session contents change, so just touching the dict resets max_age.
+    """
+    user = request.session.get("user")
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    request.session["login_at"] = datetime.utcnow().isoformat()
+    return {"ok": True, "login_at": request.session["login_at"]}
+
+
 @app.post("/logout")
 async def logout(request: Request):
     """Handle logout."""
+    user = request.session.get("user", "")
+    if user:
+        from .services.audit_service import log_action, ACTION_LOGOUT
+        log_action(user, ACTION_LOGOUT)
     request.session.clear()
     return RedirectResponse(url="/login", status_code=303)
 
@@ -237,15 +321,28 @@ async def dashboard_page(request: Request, status: str = None, node: str = None,
 
     ctx = _get_dashboard_context(request)
 
+    # Sprint A item 5: default to active-only filter when no ?status given.
+    # Sentinel "all" means user explicitly opted out of the default.
+    DEFAULT_ACTIVE_FILTER = "PENDING_VIDEO,PENDING,ACKNOWLEDGED"
+    if status is None:
+        effective_status = DEFAULT_ACTIVE_FILTER
+        display_status = DEFAULT_ACTIVE_FILTER
+    elif status == "all":
+        effective_status = None  # no filter -> all rows
+        display_status = "all"
+    else:
+        effective_status = status
+        display_status = status
+
     # Use list_events for pagination and filtering
     db = get_db()
-    result = list_events(db, status_filter=status, node_filter=node, page=page, page_size=20)
+    result = list_events(db, status_filter=effective_status, node_filter=node, page=page, page_size=20)
 
     ctx["events"] = result["items"]
     ctx["total"] = result["total"]
     ctx["total_pages"] = result["total_pages"]
     ctx["current_page"] = result["page"]
-    ctx["current_status_filter"] = status or ""
+    ctx["current_status_filter"] = display_status
     ctx["current_node_filter"] = node or ""
 
     # Get available node IDs for filter dropdown
@@ -322,20 +419,50 @@ async def system_status_page(request: Request):
     mqtt_svc = get_mqtt_service()
     node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
 
-    glass_nodes = [
-        {"node_id": nid, **state}
-        for nid, state in node_states.items()
-        if state.get("type") == "glass"
-    ]
-    pump_nodes = [
-        {"node_id": nid, **state}
-        for nid, state in node_states.items()
-        if state.get("type") == "pump"
-    ]
+    # Item 13/17/12: enrich with DB-backed columns (last_upload_at, snooze, battery)
+    db_nodes_by_id = {n["node_id"]: n for n in (get_all_nodes() or [])}
+
+    def _merge(nid: str, state: dict) -> dict:
+        merged = {"node_id": nid, **state}
+        db_row = db_nodes_by_id.get(nid) or {}
+        merged["last_upload_at"] = db_row.get("last_upload_at")
+        merged["snoozed_until"] = db_row.get("snoozed_until")
+        merged["snooze_reason"] = db_row.get("snooze_reason")
+        merged["battery_voltage"] = db_row.get("battery_voltage")
+        merged["power_source"] = db_row.get("power_source")
+        merged["location"] = db_row.get("location")
+        return merged
+
+    glass_nodes = [_merge(nid, state) for nid, state in node_states.items() if state.get("type") == "glass"]
+    pump_nodes = [_merge(nid, state) for nid, state in node_states.items() if state.get("type") == "pump"]
 
     ctx["glass_nodes"] = glass_nodes
     ctx["pump_nodes"] = pump_nodes
     return templates.TemplateResponse(request, "system_status.html", ctx)
+
+
+@app.get("/audit", response_class=HTMLResponse)
+async def audit_page(request: Request, operator: str = None, action_type: str = None):
+    """Operator-action audit log (admin-only). Item 15."""
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login")
+    settings = get_settings()
+    if user != settings.DASHBOARD_USER:
+        # Non-admin sees a friendly 403 page rather than a raw error.
+        return HTMLResponse("<h1>403 Forbidden</h1><p>Admin only.</p>", status_code=403)
+
+    from .services.audit_service import list_actions
+    rows = list_actions(limit=200, operator=operator or None, action_type=action_type or None)
+    ctx = _get_dashboard_context(request)
+    ctx["rows"] = rows
+    ctx["operator"] = operator or ""
+    ctx["action_type"] = action_type or ""
+    ctx["action_types"] = [
+        "LOGIN", "LOGOUT", "ACKNOWLEDGE", "RESOLVE", "BULK_RESOLVE",
+        "SNOOZE", "UNSNOOZE", "LOCATION_EDIT", "HANDOVER_EDIT",
+    ]
+    return templates.TemplateResponse(request, "audit.html", ctx)
 
 
 # ===== Exception Handlers =====

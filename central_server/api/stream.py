@@ -219,5 +219,85 @@ async def list_stream_statuses(
     }
 
 
+@router.get("/health")
+async def stream_health(user: str = Depends(get_current_user)):
+    """Item 14: scrape mediamtx Prometheus endpoint and surface per-node metrics.
+
+    mediamtx exposes a `/metrics` endpoint with a small set of counters/gauges:
+        rtsp_session_bytes_received{path="..."}
+        frames_dropped_total{path="..."}
+        num_viewers{path="..."}  (newer versions: rtsp_sessions{state="read"})
+
+    We compute kbps as a first-derivative on the bytes counter between scrapes
+    and cache the previous reading per-path. mediamtx labels the path with
+    the stream name (e.g. glass_node_01) — that becomes our node_id.
+    """
+    from ..config import get_settings
+    settings = get_settings()
+    url = getattr(settings, "MEDIAMTX_METRICS_URL", "")
+    if not url:
+        return {"enabled": False}
+
+    import httpx, time, re
+    cache = getattr(stream_health, "_cache", {})
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return {"enabled": True, "reachable": False, "status_code": resp.status_code, "nodes": {}}
+            text = resp.text
+    except Exception as e:
+        return {"enabled": True, "reachable": False, "error": str(e), "nodes": {}}
+
+    # Parse Prometheus text format. Lines look like:
+    #   metric_name{label="value",...} number
+    #   metric_name 42
+    # We only care about a handful of metric names.
+    pattern = re.compile(r'^(\w+)(?:\{([^}]*)\})?\s+([0-9eE+\-.]+)\s*$')
+    nodes: dict[str, dict] = {}
+    bytes_now: dict[str, float] = {}
+    now_ts = time.time()
+    for line in text.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        m = pattern.match(line)
+        if not m:
+            continue
+        name, labels_raw, value_raw = m.group(1), (m.group(2) or ""), m.group(3)
+        try:
+            value = float(value_raw)
+        except ValueError:
+            continue
+        # Extract path label if present.
+        path = ""
+        if labels_raw:
+            lm = re.search(r'(?:path|name)="([^"]+)"', labels_raw)
+            if lm:
+                path = lm.group(1)
+        if not path:
+            continue
+        node = nodes.setdefault(path, {"viewers": 0, "dropped": 0, "bitrate_kbps": 0})
+        if name in ("rtsp_session_bytes_received", "rtsp_bytes_received_total"):
+            bytes_now[path] = value
+        elif name in ("frames_dropped_total", "rtsp_session_frames_dropped"):
+            node["dropped"] = int(value)
+        elif name in ("num_viewers", "rtsp_sessions", "hls_muxer_readers"):
+            # rtsp_sessions has a state="read" label we ignore for the count.
+            node["viewers"] += int(value)
+
+    # Compute kbps via first derivative.
+    prev = cache.get("bytes", {})
+    prev_ts = cache.get("ts", now_ts)
+    dt = max(0.001, now_ts - prev_ts)
+    for path, b in bytes_now.items():
+        prev_b = prev.get(path, b)
+        delta_bits = max(0.0, (b - prev_b) * 8.0)
+        nodes[path]["bitrate_kbps"] = int(delta_bits / dt / 1000)
+    stream_health._cache = {"bytes": bytes_now, "ts": now_ts}
+
+    return {"enabled": True, "reachable": True, "nodes": nodes}
+
+
 # Export router
 __all__ = ["router"]

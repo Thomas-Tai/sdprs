@@ -146,9 +146,17 @@ async def receive_snapshot(
         "jpeg": jpeg_bytes,
         "timestamp": datetime.utcnow()
     }
-    
+
+    # Item 13: track last successful upload (separate from heartbeat). A node
+    # can heartbeat fine over MQTT while WiFi is too weak to push snapshots.
+    try:
+        from ..database import touch_node_upload
+        touch_node_upload(node_id)
+    except Exception as e:
+        logger.debug(f"touch_node_upload failed: {e}")
+
     logger.debug(f"Snapshot received from {node_id}, size={len(jpeg_bytes)} bytes")
-    
+
     return None  # 204 No Content
 
 

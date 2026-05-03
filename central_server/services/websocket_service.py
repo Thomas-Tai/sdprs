@@ -9,7 +9,7 @@ to all connected dashboard clients.
 
 import asyncio
 import logging
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -33,6 +33,8 @@ class WebSocketManager:
         """Initialize the WebSocket manager."""
         self._connections: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
+        self._ping_task: Optional[asyncio.Task] = None
+        self._ping_interval_seconds: float = 5.0
     
     @property
     def connection_count(self) -> int:
@@ -42,14 +44,39 @@ class WebSocketManager:
     async def add(self, websocket: WebSocket) -> None:
         """
         Accept a new WebSocket connection and add it to the pool.
-        
+
         Args:
             websocket: The WebSocket connection to add
         """
         await websocket.accept()
         async with self._lock:
             self._connections.add(websocket)
+            should_start_pings = self._ping_task is None or self._ping_task.done()
+        if should_start_pings:
+            self._ping_task = asyncio.create_task(self._ping_loop())
         logger.info(f"WebSocket connected. Total connections: {self.connection_count}")
+
+    async def _ping_loop(self) -> None:
+        """
+        Periodically broadcast a ping frame so clients can detect a dead connection.
+
+        The browser already handles RFC-6455 ping/pong at the protocol level, but
+        application-level ping lets the dashboard JS show a connection-status pill
+        ('Live' / 'Reconnecting' / 'Disconnected') based on observed liveness.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._ping_interval_seconds)
+                if not self._connections:
+                    return
+                await self.broadcast({
+                    "type": "ping",
+                    "data": {"server_time": asyncio.get_event_loop().time()},
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Ping loop error (will restart on next connection): {e}")
     
     async def remove(self, websocket: WebSocket) -> None:
         """
@@ -132,6 +159,28 @@ class WebSocketManager:
         })
         logger.debug(f"Broadcast alert_updated: alert_id={alert_id}")
     
+    async def broadcast_alert_acknowledged(
+        self,
+        alert_id: int,
+        acknowledged_by: str,
+        acknowledged_at: str,
+    ) -> None:
+        """
+        Broadcast that an operator has taken ownership of an alert.
+
+        Other operators' dashboards use this to: (a) stop the repeating audio
+        alert, (b) show "認領 by alice 14:32" so duplicate dispatch is avoided.
+        """
+        await self.broadcast({
+            "type": "alert_acknowledged",
+            "data": {
+                "alert_id": alert_id,
+                "acknowledged_by": acknowledged_by,
+                "acknowledged_at": acknowledged_at,
+            }
+        })
+        logger.debug(f"Broadcast alert_acknowledged: alert_id={alert_id} by {acknowledged_by}")
+
     async def broadcast_alert_resolved(self, alert_id: int, resolved_by: str) -> None:
         """
         Broadcast an alert resolved notification.
