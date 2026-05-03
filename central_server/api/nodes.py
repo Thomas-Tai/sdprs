@@ -111,7 +111,8 @@ async def list_nodes(
             if snapshot_data:
                 snapshot_ts = snapshot_data.get("timestamp")
                 if snapshot_ts:
-                    snapshot_timestamp = snapshot_ts.isoformat() if isinstance(snapshot_ts, datetime) else snapshot_ts
+                    # Append 'Z' to indicate UTC time for proper timezone conversion in JS
+                    snapshot_timestamp = snapshot_ts.isoformat() + 'Z' if isinstance(snapshot_ts, datetime) else snapshot_ts
                     elapsed = (now - snapshot_ts).total_seconds() if isinstance(snapshot_ts, datetime) else 0
                     if elapsed > STALE_THRESHOLD_SECONDS:
                         is_stale = True
@@ -266,7 +267,8 @@ async def get_node(
         if snapshot_data:
             snapshot_ts = snapshot_data.get("timestamp")
             if snapshot_ts:
-                snapshot_timestamp = snapshot_ts.isoformat() if isinstance(snapshot_ts, datetime) else snapshot_ts
+                # Append 'Z' to indicate UTC time for proper timezone conversion in JS
+                snapshot_timestamp = snapshot_ts.isoformat() + 'Z' if isinstance(snapshot_ts, datetime) else snapshot_ts
                 elapsed = (now - snapshot_ts).total_seconds() if isinstance(snapshot_ts, datetime) else 0
                 if elapsed > STALE_THRESHOLD_SECONDS:
                     is_stale = True

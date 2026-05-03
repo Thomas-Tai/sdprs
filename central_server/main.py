@@ -395,7 +395,8 @@ async def monitor_page(request: Request):
         if snap_data:
             ts = snap_data.get("timestamp")
             if ts:
-                node_dict["snapshot_timestamp"] = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                # Append 'Z' to indicate UTC time for proper timezone conversion in JS
+                node_dict["snapshot_timestamp"] = ts.isoformat() + 'Z' if hasattr(ts, 'isoformat') else str(ts)
         glass_nodes.append(node_dict)
 
     # Also include nodes that have snapshots but no MQTT heartbeat yet
