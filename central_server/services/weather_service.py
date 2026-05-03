@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
-# SDPRS Central Server - Weather Service (CWA Open Data)
+# SDPRS Central Server - Weather Service (CWA Open Data + Open-Meteo fallback)
 # See Plan/weather_integration.md for the full spec.
+#
+# Primary: Open-Meteo (free, no API key required)
+# Optional: CWA (Taiwan-specific, requires CWA_API_KEY)
 #
 # Critical invariant: any failure here MUST NOT propagate. Weather is a
 # decoration on the dashboard; the alert pipeline does not depend on it.
@@ -19,6 +22,7 @@ import httpx
 logger = logging.getLogger("weather_service")
 
 CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
+OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 HTTP_TIMEOUT_S = 8.0
 
 
@@ -243,6 +247,116 @@ def _parse_typhoon_warning(payload: Dict[str, Any], site_lat: float, site_lon: f
         return None
 
 
+# ===== Open-Meteo (free, no API key) =====
+# Open-Meteo provides global weather data without registration.
+# Endpoint: https://api.open-meteo.com/v1/forecast
+# Parameters: latitude, longitude, hourly/daily variables, timezone
+
+OPEN_METEO_WEATHER_CODES = {
+    0: "晴", 1: "晴", 2: "多雲", 3: "陰",
+    45: "霧", 48: "霧",
+    51: "小雨", 53: "小雨", 55: "中雨",
+    56: "凍雨", 57: "凍雨",
+    61: "小雨", 63: "中雨", 65: "大雨",
+    66: "凍雨", 67: "凍雨",
+    71: "小雪", 73: "中雪", 75: "大雪",
+    77: "雪粒",
+    80: "小雨", 81: "中雨", 82: "大雨",
+    85: "小雪", 86: "大雪",
+    95: "雷暴", 96: "雷暴+小冰雹", 99: "雷暴+大冰雹",
+}
+
+
+async def _fetch_openmeteo_current(
+    client: httpx.AsyncClient, lat: float, lon: float
+) -> Optional[CurrentWeather]:
+    """Fetch current weather from Open-Meteo (no API key required)."""
+    try:
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation,rain",
+            "timezone": "Asia/Taipei",
+        }
+        r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
+        if r.status_code != 200:
+            logger.warning(f"Open-Meteo returned {r.status_code}")
+            return None
+        data = r.json()
+        cur = data.get("current", {})
+        if not cur:
+            return None
+
+        # Open-Meteo returns precipitation as hourly sum; we approximate 24h by
+        # multiplying hourly rate by 24 (rough estimate; CWA provides actual 24h sum).
+        precip_1h = float(cur.get("precipitation", 0) or 0)
+        rain_1h = float(cur.get("rain", 0) or 0)
+        rainfall_24h = max(precip_1h, rain_1h) * 24  # rough approximation
+
+        return CurrentWeather(
+            obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
+            wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
+            wind_direction_deg=int(cur.get("wind_direction_10m", 0) or 0),
+            rainfall_24h_mm=rainfall_24h,
+            temperature_c=float(cur.get("temperature_2m", 0) or 0),
+            humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
+            is_stale=False,
+            fetched_at=datetime.now(timezone.utc),
+        )
+    except Exception as e:
+        logger.warning(f"Open-Meteo fetch failed: {e}")
+        return None
+
+
+async def _fetch_openmeteo_forecast(
+    client: httpx.AsyncClient, lat: float, lon: float, hours: int = 36
+) -> List[ForecastBucket]:
+    """Fetch hourly forecast from Open-Meteo."""
+    try:
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability,precipitation,weathercode",
+            "timezone": "Asia/Taipei",
+            "forecast_hours": hours,
+        }
+        r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        hourly = data.get("hourly", {})
+        if not hourly:
+            return []
+
+        times = hourly.get("time", [])
+        wind = hourly.get("wind_speed_10m", [])
+        precip = hourly.get("precipitation", [])
+        pop = hourly.get("precipitation_probability", [])
+        codes = hourly.get("weathercode", [])
+
+        buckets = []
+        for i, t_str in enumerate(times[:hours]):
+            try:
+                start = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                end = start + timedelta(hours=1)
+                ws = float(wind[i] if i < len(wind) else 0)
+                rf = float(precip[i] if i < len(precip) else 0)
+                prob = int(pop[i] if i < len(pop) else 0)
+                code = int(codes[i] if i < len(codes) else 0)
+                phenomenon = OPEN_METEO_WEATHER_CODES.get(code, "未知")
+                buckets.append(ForecastBucket(
+                    start_time=start, end_time=end,
+                    wind_speed_ms=ws, rainfall_mm=rf,
+                    weather_phenomenon=phenomenon, pop_pct=prob,
+                ))
+            except Exception:
+                continue
+        return buckets
+    except Exception as e:
+        logger.warning(f"Open-Meteo forecast fetch failed: {e}")
+        return []
+
+
 class WeatherService:
     # Singleton-style; module-level instance is created by init_weather_service().
 
@@ -297,12 +411,14 @@ class WeatherService:
     async def start(self) -> None:
         if self._task is not None:
             return
-        if not self._settings.CWA_API_KEY:
-            logger.info("CWA_API_KEY not set; weather service disabled")
-            return
+        # Weather service now uses Open-Meteo (free, no API key) as primary source.
+        # CWA is optional for Taiwan-specific typhoon warnings when CWA_API_KEY is set.
         self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run())
-        logger.info(f"Weather service started (refresh every {self._settings.WEATHER_REFRESH_SECONDS}s)")
+        source = "Open-Meteo (free)"
+        if self._settings.CWA_API_KEY:
+            source += " + CWA (typhoon warnings)"
+        logger.info(f"Weather service started: {source} (refresh every {self._settings.WEATHER_REFRESH_SECONDS}s)")
 
     async def stop(self) -> None:
         if self._stop_event is not None:
@@ -337,37 +453,42 @@ class WeatherService:
 
     async def _tick(self) -> None:
         s = self._settings
-        params_obs = {"Authorization": s.CWA_API_KEY, "stationId": s.CWA_STATION_ID}
-        params_township = {"Authorization": s.CWA_API_KEY, "locationName": s.CWA_TOWNSHIP}
-        params_typhoon = {"Authorization": s.CWA_API_KEY}
+        lat, lon = s.SITE_LAT, s.SITE_LON
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
-            results = await asyncio.gather(
-                self._fetch(client, "O-A0003-001", params_obs),
-                self._fetch(client, "F-C0032-001", params_township),
-                self._fetch(client, "F-D0047-091", params_township),
-                self._fetch(client, "W-C0033-001", params_typhoon),
+            # Primary: Open-Meteo (free, no API key)
+            openmeteo_results = await asyncio.gather(
+                _fetch_openmeteo_current(client, lat, lon),
+                _fetch_openmeteo_forecast(client, lat, lon, 36),
                 return_exceptions=True,
             )
-        obs_payload, fc_short_payload, fc_long_payload, typhoon_payload = results
 
+            # Optional: CWA typhoon warnings (Taiwan-specific, requires key)
+            cwa_typhoon = None
+            if s.CWA_API_KEY:
+                params_typhoon = {"Authorization": s.CWA_API_KEY}
+                typhoon_payload = await self._fetch(client, "W-C0033-001", params_typhoon)
+                if isinstance(typhoon_payload, dict):
+                    cwa_typhoon = _parse_typhoon_warning(typhoon_payload, lat, lon)
+
+        # Process Open-Meteo results
         any_ok = False
-        if isinstance(obs_payload, dict):
-            cur = _parse_station_observation(obs_payload, s.CWA_STATION_ID)
-            if cur is not None:
-                self._cache.current = cur
-                any_ok = True
-        if isinstance(fc_long_payload, dict):
-            buckets = _parse_township_forecast(fc_long_payload)
-            if buckets:
-                self._cache.forecast_36h = buckets
-                any_ok = True
-        elif isinstance(fc_short_payload, dict):
-            buckets = _parse_township_forecast(fc_short_payload)
-            if buckets:
-                self._cache.forecast_36h = buckets
-                any_ok = True
-        if isinstance(typhoon_payload, dict):
-            self._cache.typhoon = _parse_typhoon_warning(typhoon_payload, s.SITE_LAT, s.SITE_LON)
+        cur_om = openmeteo_results[0]
+        if isinstance(cur_om, CurrentWeather):
+            self._cache.current = cur_om
+            any_ok = True
+        elif isinstance(cur_om, Exception):
+            logger.warning(f"Open-Meteo current failed: {cur_om}")
+
+        fc_om = openmeteo_results[1]
+        if isinstance(fc_om, list) and fc_om:
+            self._cache.forecast_36h = fc_om
+            any_ok = True
+        elif isinstance(fc_om, Exception):
+            logger.warning(f"Open-Meteo forecast failed: {fc_om}")
+
+        # Typhoon from CWA (if available)
+        if cwa_typhoon:
+            self._cache.typhoon = cwa_typhoon
             any_ok = True
 
         if any_ok:
