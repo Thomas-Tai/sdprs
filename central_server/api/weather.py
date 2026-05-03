@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SDPRS Central Server - Weather API endpoints (CWA Open Data)
+# SDPRS Central Server - Weather API endpoints (Open-Meteo + CWA)
 # See Plan/weather_integration.md sections 8 + 10.
 #
 # All endpoints session-auth, all return safe JSON (never 5xx from missing
@@ -10,19 +10,22 @@ import logging
 from dataclasses import asdict
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
-from ..services.weather_service import get_weather_service
+from ..auth import get_current_user
+from ..database import get_weather_config, set_weather_config
+from ..services.weather_service import get_weather_service, update_weather_location
 
 logger = logging.getLogger("api.weather")
 
 router = APIRouter()
 
 
-def _require_session(request: Request) -> None:
-    user = request.session.get("user") if hasattr(request, "session") else None
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+class WeatherConfigPayload(BaseModel):
+    site_lat: float = Field(..., ge=-90, le=90)
+    site_lon: float = Field(..., ge=-180, le=180)
+    station_name: str = Field(default="新店", max_length=50)
 
 
 def _serialize(obj: Any) -> Any:
@@ -42,9 +45,34 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
+@router.get("/weather/config")
+async def get_weather_config_api(
+    request: Request,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Item 9: get current weather location configuration."""
+    return get_weather_config()
+
+
+@router.put("/weather/config")
+async def set_weather_config_api(
+    request: Request,
+    payload: WeatherConfigPayload,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Item 9: update weather location. Requires restart for new coordinates to take effect."""
+    ok = set_weather_config(payload.site_lat, payload.site_lon, payload.station_name)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update weather config")
+    # Update the running weather service if available
+    svc = get_weather_service()
+    if svc:
+        update_weather_location(payload.site_lat, payload.site_lon)
+    return {"ok": True, "site_lat": payload.site_lat, "site_lon": payload.site_lon, "station_name": payload.station_name}
+
+
 @router.get("/weather/current")
-async def get_current_weather(request: Request) -> Dict[str, Any]:
-    _require_session(request)
+async def get_current_weather(request: Request, user: str = Depends(get_current_user)) -> Dict[str, Any]:
     svc = get_weather_service()
     if svc is None:
         raise HTTPException(status_code=503, detail="Weather service not enabled")
@@ -55,8 +83,7 @@ async def get_current_weather(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/weather/forecast")
-async def get_weather_forecast(request: Request) -> Dict[str, Any]:
-    _require_session(request)
+async def get_weather_forecast(request: Request, user: str = Depends(get_current_user)) -> Dict[str, Any]:
     svc = get_weather_service()
     if svc is None:
         raise HTTPException(status_code=503, detail="Weather service not enabled")
@@ -64,8 +91,7 @@ async def get_weather_forecast(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/weather/typhoon")
-async def get_typhoon(request: Request) -> Any:
-    _require_session(request)
+async def get_typhoon(request: Request, user: str = Depends(get_current_user)) -> Any:
     svc = get_weather_service()
     if svc is None:
         raise HTTPException(status_code=503, detail="Weather service not enabled")
@@ -75,8 +101,7 @@ async def get_typhoon(request: Request) -> Any:
 
 
 @router.get("/weather/health")
-async def get_weather_health(request: Request) -> Dict[str, Any]:
-    _require_session(request)
+async def get_weather_health(request: Request, user: str = Depends(get_current_user)) -> Dict[str, Any]:
     svc = get_weather_service()
     if svc is None:
         return {"enabled": False}

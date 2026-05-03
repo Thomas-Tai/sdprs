@@ -743,14 +743,30 @@ handleWSMessage = function(msg) {
 
 // ===== Fullscreen toggle (F key + button). Hides navbar via body.fullscreen-mode CSS. =====
 function toggleFullscreen() {
+    console.log('[Monitor] toggleFullscreen called');
     if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().then(() => {
-            document.body.classList.add('fullscreen-mode');
-        }).catch(err => console.warn('[Monitor] Fullscreen failed:', err));
+        const el = document.documentElement;
+        const requestFs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+        if (requestFs) {
+            requestFs.call(el).then(() => {
+                document.body.classList.add('fullscreen-mode');
+                console.log('[Monitor] Entered fullscreen');
+            }).catch(err => {
+                console.error('[Monitor] Fullscreen failed:', err);
+                alert('全螢幕功能需要使用者授權，請嘗試按 F 鍵');
+            });
+        } else {
+            console.warn('[Monitor] Fullscreen API not supported');
+            alert('此瀏覽器不支援全螢幕功能');
+        }
     } else {
-        document.exitFullscreen().then(() => {
-            document.body.classList.remove('fullscreen-mode');
-        });
+        const exitFs = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+        if (exitFs) {
+            exitFs.call(document).then(() => {
+                document.body.classList.remove('fullscreen-mode');
+                console.log('[Monitor] Exited fullscreen');
+            });
+        }
     }
 }
 document.addEventListener('fullscreenchange', () => {
@@ -763,6 +779,8 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
         toggleFullscreen();
+    }
+});
     }
 });
 

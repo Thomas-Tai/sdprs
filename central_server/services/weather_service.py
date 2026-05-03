@@ -550,6 +550,17 @@ def get_weather_service() -> Optional[WeatherService]:
     return _weather_service
 
 
+def update_weather_location(lat: float, lon: float) -> bool:
+    """Item 9: update the running weather service's location coordinates."""
+    global _weather_service
+    if _weather_service is None:
+        return False
+    _weather_service._settings.SITE_LAT = lat
+    _weather_service._settings.SITE_LON = lon
+    logger.info(f"Weather location updated to lat={lat}, lon={lon}")
+    return True
+
+
 __all__ = [
     "WeatherService",
     "CurrentWeather",
