@@ -781,8 +781,6 @@ document.addEventListener('keydown', function(e) {
         toggleFullscreen();
     }
 });
-    }
-});
 
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', function() {

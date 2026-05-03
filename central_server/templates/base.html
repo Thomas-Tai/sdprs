@@ -587,12 +587,13 @@
             setTimeout(() => startAlertLoop(), 100);
         }
         
-        // 時間格式化
+        // 時間格式化 (UTC+8 台灣/澳門時區)
         function formatTimestamp(isoString) {
             if (!isoString) return '-';
             try {
                 const d = new Date(isoString);
                 return d.toLocaleString('zh-TW', {
+                    timeZone: 'Asia/Macau',
                     year: 'numeric',
                     month: '2-digit',
                     day: '2-digit',
