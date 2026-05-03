@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from ..database import get_weather_config
+
 logger = logging.getLogger("weather_service")
 
 SMG_XML_URL = "https://xml.smg.gov.mo/c_actualweather.xml"
@@ -544,7 +546,11 @@ class WeatherService:
 
     async def _tick(self) -> None:
         s = self._settings
-        lat, lon = s.SITE_LAT, s.SITE_LON
+        # Read weather config from database (user-configurable via UI)
+        # If lat/lon is None, use SMG Macau only; if set, also use Open-Meteo fallback
+        weather_cfg = get_weather_config()
+        lat = weather_cfg.get("site_lat")
+        lon = weather_cfg.get("site_lon")
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
             # Primary: SMG Macau XML (免費、免 API Key、澳門專用)
