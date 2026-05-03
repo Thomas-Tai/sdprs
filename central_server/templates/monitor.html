@@ -69,7 +69,7 @@
             <div class="p-2 bg-gray-100 rounded-b-lg text-sm text-gray-600">
                 <span id="snapshot-time-{{ node.node_id }}" data-node-id="{{ node.node_id }}">
                     {% if node.snapshot_timestamp %}
-                        {{ node.snapshot_timestamp }}
+                        {{ node.snapshot_timestamp }} (UTC+8)
                     {% else %}
                         無快照
                     {% endif %}
