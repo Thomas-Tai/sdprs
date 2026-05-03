@@ -270,13 +270,19 @@ OPEN_METEO_WEATHER_CODES = {
 async def _fetch_openmeteo_current(
     client: httpx.AsyncClient, lat: float, lon: float
 ) -> Optional[CurrentWeather]:
-    """Fetch current weather from Open-Meteo (no API key required)."""
+    """Fetch current weather from Open-Meteo (no API key required).
+
+    API params per user request:
+    - current=wind_speed_10m,precipitation
+    - wind_speed_unit=ms (ensure m/s unit)
+    """
     try:
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation,rain",
-            "timezone": "Asia/Taipei",
+            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation",
+            "wind_speed_unit": "ms",
+            "timezone": "Asia/Macau",
         }
         r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
         if r.status_code != 200:
@@ -287,17 +293,15 @@ async def _fetch_openmeteo_current(
         if not cur:
             return None
 
-        # Open-Meteo returns precipitation as hourly sum; we approximate 24h by
-        # multiplying hourly rate by 24 (rough estimate; CWA provides actual 24h sum).
-        precip_1h = float(cur.get("precipitation", 0) or 0)
-        rain_1h = float(cur.get("rain", 0) or 0)
-        rainfall_24h = max(precip_1h, rain_1h) * 24  # rough approximation
+        # Open-Meteo precipitation is hourly; approximate 24h by multiplying
+        # For display, we use the hourly value as "24h" since it's the available data
+        precip_current = float(cur.get("precipitation", 0) or 0)
 
         return CurrentWeather(
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
             wind_direction_deg=int(cur.get("wind_direction_10m", 0) or 0),
-            rainfall_24h_mm=rainfall_24h,
+            rainfall_24h_mm=precip_current,  # Use current precipitation value
             temperature_c=float(cur.get("temperature_2m", 0) or 0),
             humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
             is_stale=False,
@@ -317,7 +321,8 @@ async def _fetch_openmeteo_forecast(
             "latitude": lat,
             "longitude": lon,
             "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability,precipitation,weathercode",
-            "timezone": "Asia/Taipei",
+            "wind_speed_unit": "ms",
+            "timezone": "Asia/Macau",
             "forecast_hours": hours,
         }
         r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
