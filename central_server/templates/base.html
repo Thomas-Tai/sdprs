@@ -148,7 +148,7 @@
                 </div>
 
                 <!-- 天氣資訊 (item 9) — 風速、降雨、颱風警告 -->
-                <div id="weather-widget" class="stat-item flex items-center gap-2 hidden" title="即時天氣資訊 (CWA)">
+                <div id="weather-widget" class="stat-item flex items-center gap-2 hidden" title="即時天氣資訊 (Open-Meteo)">
                     <span id="weather-wind" class="text-sm">-- m/s 風</span>
                     <span class="text-gray-400">|</span>
                     <span id="weather-rain" class="text-sm">-- mm 雨/24h</span>
@@ -687,18 +687,29 @@
         };
 
         // ===== 天氣資訊刷新 (item 9) =====
-        // 每 10 分鐘刷新一次（與 CWA API 更新頻率同步）。
-        // 若 CWA_API_KEY 未設定，API 返回 503，widget 保持隱藏。
+        // Open-Meteo provides free weather data without API key.
+        // Refresh every 10 min aligned with API update frequency.
+        // On initial failure, retry after 30 seconds (not 10 min).
         let weatherData = null;
+        let weatherRetryCount = 0;
+        const MAX_WEATHER_RETRIES = 3;
         async function refreshWeatherWidget() {
             const widget = document.getElementById('weather-widget');
             if (!widget) return;
             try {
                 const r = await fetch('/api/weather/current');
-                if (r.status === 503) { widget.classList.add('hidden'); return; }  // service disabled
+                if (r.status === 503) {
+                    // Service not ready yet - retry sooner on initial load
+                    if (weatherRetryCount < MAX_WEATHER_RETRIES) {
+                        weatherRetryCount++;
+                        setTimeout(refreshWeatherWidget, 30_000);
+                    }
+                    return;
+                }
                 if (!r.ok) return;
                 const data = await r.json();
                 weatherData = data;
+                weatherRetryCount = 0;  // Reset on success
                 widget.classList.remove('hidden');
 
                 // Wind display with color thresholds
@@ -723,7 +734,12 @@
                 // Stale marker
                 const staleEl = document.getElementById('weather-stale-marker');
                 if (staleEl) staleEl.classList.toggle('hidden', !data.is_stale);
-            } catch (e) { widget.classList.add('hidden'); }
+            } catch (e) {
+                if (weatherRetryCount < MAX_WEATHER_RETRIES) {
+                    weatherRetryCount++;
+                    setTimeout(refreshWeatherWidget, 30_000);
+                }
+            }
         }
         async function refreshTyphoonBadge() {
             try {

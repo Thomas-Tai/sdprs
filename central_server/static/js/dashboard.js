@@ -432,26 +432,46 @@ window.addEventListener('scroll', () => {
 // ===== Handover note (item 16) =====
 function setupHandoverBar() {
     const editBtn = document.getElementById('handover-edit-btn');
-    if (!editBtn) return;
+    if (!editBtn) {
+        console.warn('[Dashboard] Handover edit button not found');
+        return;
+    }
     editBtn.addEventListener('click', async () => {
-        const cur = document.getElementById('handover-note-text').textContent;
+        const noteText = document.getElementById('handover-note-text');
+        if (!noteText) {
+            console.error('[Dashboard] Handover note text element not found');
+            return;
+        }
+        const cur = noteText.textContent.trim();
         const seed = cur === '（尚無備註）' ? '' : cur;
         const next = window.prompt('輸入新的交班備註 (空白會清除)：', seed);
         if (next === null) return;  // cancel
+        editBtn.disabled = true;
+        editBtn.textContent = '儲存中...';
         try {
             const r = await fetch('/api/handover/note', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ note: next }),
             });
-            if (!r.ok) throw new Error('HTTP ' + r.status);
+            if (!r.ok) {
+                const errBody = await r.text();
+                throw new Error('HTTP ' + r.status + ': ' + errBody);
+            }
             const body = await r.json();
-            document.getElementById('handover-note-text').textContent = body.note || '（尚無備註）';
+            noteText.textContent = body.note || '（尚無備註）';
+            // Show success indicator briefly
+            editBtn.textContent = '已儲存 ✓';
+            setTimeout(() => { editBtn.textContent = '編輯'; }, 1500);
         } catch (e) {
             console.error('[Dashboard] Failed to save handover note:', e);
-            alert('儲存失敗，請重試');
+            alert('儲存失敗：' + e.message + '\n請重試');
+            editBtn.textContent = '編輯';
+        } finally {
+            editBtn.disabled = false;
         }
     });
+    console.log('[Dashboard] Handover bar setup complete');
 }
 
 // ===== Bulk resolve (item 10) =====
