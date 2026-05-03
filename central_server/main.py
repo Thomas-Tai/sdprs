@@ -383,14 +383,22 @@ async def monitor_page(request: Request):
 
     mqtt_svc = get_mqtt_service()
     node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
-    glass_nodes = [
-        {"node_id": nid, **state}
-        for nid, state in node_states.items()
-        if state.get("type") == "glass"
-    ]
+    snapshots = getattr(request.app.state, "latest_snapshots", {})
+
+    glass_nodes = []
+    for nid, state in node_states.items():
+        if state.get("type") != "glass":
+            continue
+        # Merge snapshot timestamp from latest_snapshots if available
+        snap_data = snapshots.get(nid)
+        node_dict = {"node_id": nid, **state}
+        if snap_data:
+            ts = snap_data.get("timestamp")
+            if ts:
+                node_dict["snapshot_timestamp"] = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+        glass_nodes.append(node_dict)
 
     # Also include nodes that have snapshots but no MQTT heartbeat yet
-    snapshots = getattr(request.app.state, "latest_snapshots", {})
     mqtt_node_ids = {n["node_id"] for n in glass_nodes}
     for nid, snap_data in snapshots.items():
         if nid not in mqtt_node_ids:

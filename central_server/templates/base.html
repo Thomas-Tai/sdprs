@@ -147,8 +147,9 @@
                     <span id="stat-pump-active" class="font-bold text-blue-600">{{ pump_active_count }}</span>
                 </div>
 
-                <!-- 天氣資訊 (item 9) — 風速、降雨、颱風警告 -->
+                <!-- 天氣資訊 (item 9) — 風速、降雨、站名、颱風警告 -->
                 <div id="weather-widget" class="stat-item flex items-center gap-2 hidden" title="即時天氣資訊 (Open-Meteo)">
+                    <span id="weather-station" class="text-xs text-gray-500 font-medium hidden">📍</span>
                     <span id="weather-wind" class="text-sm">-- m/s 風</span>
                     <span class="text-gray-400">|</span>
                     <span id="weather-rain" class="text-sm">-- mm 雨/24h</span>
@@ -693,6 +694,22 @@
         let weatherData = null;
         let weatherRetryCount = 0;
         const MAX_WEATHER_RETRIES = 3;
+        let weatherStationName = '';
+
+        async function loadWeatherConfig() {
+            try {
+                const r = await fetch('/api/weather/config');
+                if (!r.ok) return;
+                const cfg = await r.json();
+                weatherStationName = cfg.station_name || '';
+                const stationEl = document.getElementById('weather-station');
+                if (stationEl && weatherStationName) {
+                    stationEl.textContent = '📍 ' + weatherStationName;
+                    stationEl.classList.remove('hidden');
+                }
+            } catch (e) { console.warn('[Weather] Failed to load config:', e); }
+        }
+
         async function refreshWeatherWidget() {
             const widget = document.getElementById('weather-widget');
             if (!widget) return;
@@ -711,6 +728,13 @@
                 weatherData = data;
                 weatherRetryCount = 0;  // Reset on success
                 widget.classList.remove('hidden');
+
+                // Station name display
+                const stationEl = document.getElementById('weather-station');
+                if (stationEl && weatherStationName) {
+                    stationEl.textContent = '📍 ' + weatherStationName;
+                    stationEl.classList.remove('hidden');
+                }
 
                 // Wind display with color thresholds
                 const windEl = document.getElementById('weather-wind');
@@ -760,7 +784,7 @@
         }
         setInterval(refreshWeatherWidget, 600_000);
         setInterval(refreshTyphoonBadge, 600_000);
-        document.addEventListener('DOMContentLoaded', () => { refreshWeatherWidget(); refreshTyphoonBadge(); });
+        document.addEventListener('DOMContentLoaded', () => { loadWeatherConfig(); refreshWeatherWidget(); refreshTyphoonBadge(); });
 
         // 格式化運行時間
         function formatUptime(seconds) {
