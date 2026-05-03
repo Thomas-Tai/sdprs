@@ -9,9 +9,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..auth import get_current_user
 from ..database import get_db_cursor
 from ..services.audit_service import log_action, ACTION_HANDOVER_EDIT
 
@@ -24,13 +25,6 @@ NOTE_TTL_HOURS = 24
 
 class HandoverNotePayload(BaseModel):
     note: str = Field(default="", max_length=2000)
-
-
-def _require_session(request: Request) -> str:
-    user = request.session.get("user") if hasattr(request, "session") else None
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
 
 
 def _read_row() -> Optional[Dict[str, Any]]:
@@ -55,8 +49,10 @@ def _is_expired(updated_at: Optional[str]) -> bool:
 
 
 @router.get("/handover/note")
-async def get_handover_note(request: Request) -> Dict[str, Any]:
-    _require_session(request)
+async def get_handover_note(
+    request: Request,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
     row = _read_row() or {"note": "", "author": None, "updated_at": None}
     expired = _is_expired(row["updated_at"])
     return {
@@ -68,8 +64,11 @@ async def get_handover_note(request: Request) -> Dict[str, Any]:
 
 
 @router.put("/handover/note")
-async def put_handover_note(request: Request, payload: HandoverNotePayload) -> Dict[str, Any]:
-    user = _require_session(request)
+async def put_handover_note(
+    request: Request,
+    payload: HandoverNotePayload,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
     note = payload.note.strip()
     with get_db_cursor() as cur:
         cur.execute(

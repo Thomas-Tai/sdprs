@@ -18,7 +18,10 @@
     </script>
 
     <!-- Tailwind CSS CDN (darkMode=class so html.dark drives variants) -->
-    <script>tailwind = { config: { darkMode: 'class' } };</script>
+    <!-- Use window.tailwindConfig for reliable CDN config pickup -->
+    <script>
+        window.tailwindConfig = { darkMode: 'class' };
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- Custom CSS -->

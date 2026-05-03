@@ -741,19 +741,7 @@ handleWSMessage = function(msg) {
     }
 };
 
-// Group-by selector
-const groupBySelect = document.getElementById('monitor-group-by');
-if (groupBySelect) {
-    // Restore preference
-    const saved = localStorage.getItem('sdprs-monitor-groupby');
-    if (saved) groupBySelect.value = saved;
-    groupBySelect.addEventListener('change', () => {
-        localStorage.setItem('sdprs-monitor-groupby', groupBySelect.value);
-        applySortAndGrouping();
-    });
-}
-
-// Fullscreen toggle (F key + button). Hides navbar via body.fullscreen-mode CSS.
+// ===== Fullscreen toggle (F key + button). Hides navbar via body.fullscreen-mode CSS. =====
 function toggleFullscreen() {
     if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen().then(() => {
@@ -777,28 +765,41 @@ document.addEventListener('keydown', function(e) {
         toggleFullscreen();
     }
 });
-const fsBtn = document.getElementById('monitor-fullscreen-btn');
-if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
 
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', function() {
     // Start snapshot refresh (1fps)
     setInterval(refreshSnapshots, SNAPSHOT_REFRESH_INTERVAL);
-    
+
     // Start stale check
     setInterval(checkNodeStatus, STALE_CHECK_INTERVAL);
-    
+
     // Initial status check
     checkNodeStatus();
-    
+
     // Setup image error handlers
     setupImageErrorHandlers();
-    
+
     // WebSocket is already connected by base.html
     // handleWSMessage has been overridden above
 
     // Load initial pump node data
     loadPumpNodes();
+
+    // Fullscreen button listener (button exists after DOM ready)
+    const fsBtn = document.getElementById('monitor-fullscreen-btn');
+    if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
+
+    // Group-by selector (exists after DOM ready)
+    const groupBySelect = document.getElementById('monitor-group-by');
+    if (groupBySelect) {
+        const saved = localStorage.getItem('sdprs-monitor-groupby');
+        if (saved) groupBySelect.value = saved;
+        groupBySelect.addEventListener('change', () => {
+            localStorage.setItem('sdprs-monitor-groupby', groupBySelect.value);
+            applySortAndGrouping();
+        });
+    }
 
     console.log('[Monitor] Initialized');
 });
