@@ -196,18 +196,18 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
     # Seed the singleton row if missing.
     cursor.execute("INSERT OR IGNORE INTO handover_note (id, note) VALUES (1, '');")
 
-    # Weather configuration (item 9: user-configurable location)
-    # Default: Macau Science Center (澳門科學館: 22.186250, 113.557083)
+    # Weather configuration (item 9: user-configurable location for Open-Meteo)
+    # Default: empty (SMG Macau XML is always enabled; Open-Meteo requires user config)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS weather_config (
             id        INTEGER PRIMARY KEY CHECK (id = 1),
-            site_lat  REAL NOT NULL DEFAULT 22.186250,
-            site_lon  REAL NOT NULL DEFAULT 113.557083,
-            station_name TEXT DEFAULT '澳門科學館',
+            site_lat  REAL DEFAULT NULL,
+            site_lon  REAL DEFAULT NULL,
+            station_name TEXT DEFAULT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    cursor.execute("INSERT OR IGNORE INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, 22.186250, 113.557083, '澳門科學館');")
+    # Don't insert default row - empty means SMG Macau only
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);")
@@ -291,18 +291,18 @@ def _create_tables_postgresql(conn):
     """))
     conn.execute(sqlalchemy.text("INSERT INTO handover_note (id, note) VALUES (1, '') ON CONFLICT (id) DO NOTHING;"))
 
-    # Weather configuration (item 9: user-configurable location)
-    # Default: Macau Science Center (澳門科學館: 22.186250, 113.557083)
+    # Weather configuration (item 9: user-configurable location for Open-Meteo)
+    # Default: empty (SMG Macau XML is always enabled; Open-Meteo requires user config)
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS weather_config (
             id        INTEGER PRIMARY KEY CHECK (id = 1),
-            site_lat  REAL NOT NULL DEFAULT 22.186250,
-            site_lon  REAL NOT NULL DEFAULT 113.557083,
-            station_name TEXT DEFAULT '澳門科學館',
+            site_lat  REAL DEFAULT NULL,
+            site_lon  REAL DEFAULT NULL,
+            station_name TEXT DEFAULT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
-    conn.execute(sqlalchemy.text("INSERT INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, 22.186250, 113.557083, '澳門科學館') ON CONFLICT (id) DO NOTHING;"))
+    # Don't insert default row - empty means SMG Macau only
 
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))
@@ -647,8 +647,10 @@ def set_node_snooze(node_id: str, snoozed_until: Optional[str], reason: Optional
 
 
 def get_weather_config() -> Dict[str, Any]:
-    """Item 9: get weather location config (singleton row)."""
-    defaults = {"site_lat": 22.186250, "site_lon": 113.557083, "station_name": "澳門科學館"}
+    """Item 9: get weather location config (singleton row).
+
+    Returns None for lat/lon if not configured (SMG Macau only mode).
+    """
     if _backend == "postgresql":
         import sqlalchemy
         database_url = os.environ.get("DATABASE_URL", "")
@@ -657,33 +659,36 @@ def get_weather_config() -> Dict[str, Any]:
             result = conn.execute(sqlalchemy.text("SELECT site_lat, site_lon, station_name FROM weather_config WHERE id = 1;"))
             row = result.fetchone()
             if row:
-                return {"site_lat": row[0], "site_lon": row[1], "station_name": row[2] or "澳門科學館"}
-        return defaults
+                return {"site_lat": row[0], "site_lon": row[1], "station_name": row[2]}
+        return {"site_lat": None, "site_lon": None, "station_name": None}
     with get_db_cursor() as cursor:
         cursor.execute("SELECT site_lat, site_lon, station_name FROM weather_config WHERE id = 1;")
         row = cursor.fetchone()
         if row:
-            return {"site_lat": row["site_lat"], "site_lon": row["site_lon"], "station_name": row["station_name"] or "澳門科學館"}
-    return defaults
+            return {"site_lat": row["site_lat"], "site_lon": row["site_lon"], "station_name": row["station_name"]}
+    return {"site_lat": None, "site_lon": None, "station_name": None}
 
 
-def set_weather_config(site_lat: float, site_lon: float, station_name: Optional[str] = None) -> bool:
-    """Item 9: update weather location config."""
+def set_weather_config(site_lat: Optional[float], site_lon: Optional[float], station_name: Optional[str] = None) -> bool:
+    """Item 9: update weather location config.
+
+    If lat/lon is None, disables Open-Meteo (SMG Macau only mode).
+    """
     if _backend == "postgresql":
         import sqlalchemy
         database_url = os.environ.get("DATABASE_URL", "")
         engine = sqlalchemy.create_engine(database_url)
         with engine.connect() as conn:
             conn.execute(
-                sqlalchemy.text("UPDATE weather_config SET site_lat = :lat, site_lon = :lon, station_name = :name, updated_at = CURRENT_TIMESTAMP WHERE id = 1;"),
-                {"lat": site_lat, "lon": site_lon, "name": station_name or "澳門科學館"},
+                sqlalchemy.text("INSERT INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, :lat, :lon, :name) ON CONFLICT (id) DO UPDATE SET site_lat = :lat, site_lon = :lon, station_name = :name, updated_at = CURRENT_TIMESTAMP;"),
+                {"lat": site_lat, "lon": site_lon, "name": station_name},
             )
             conn.commit()
         return True
     with get_db_cursor() as cursor:
         cursor.execute(
-            "UPDATE weather_config SET site_lat = ?, site_lon = ?, station_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1;",
-            (site_lat, site_lon, station_name or "澳門科學館"),
+            "INSERT OR REPLACE INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, ?, ?, ?);",
+            (site_lat, site_lon, station_name),
         )
         return cursor.rowcount > 0
 

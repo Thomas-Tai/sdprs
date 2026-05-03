@@ -39,6 +39,8 @@ class CurrentWeather:
     humidity_pct: int
     is_stale: bool
     fetched_at: datetime
+    source: str = "SMG"  # "SMG" or "Open-Meteo"
+    station_name: str = "外港"  # Station name for display
 
 
 @dataclass
@@ -65,6 +67,13 @@ class TyphoonWarning:
 @dataclass
 class _Cache:
     current: Optional[CurrentWeather] = None
+    forecast_36h: List[ForecastBucket] = field(default_factory=list)
+    typhoon: Optional[TyphoonWarning] = None
+    last_success_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    api_reachable: bool = False
+    consecutive_failures: int = 0
+    source: str = "SMG"  # Current data source
     forecast_36h: List[ForecastBucket] = field(default_factory=list)
     typhoon: Optional[TyphoonWarning] = None
     last_success_at: Optional[datetime] = None
@@ -150,6 +159,8 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     humidity_pct=_get_int('Humidity'),
                     is_stale=False,
                     fetched_at=datetime.now(timezone.utc),
+                    source="SMG",
+                    station_name=name,
                 )
 
         logger.warning(f"SMG XML: station '{station_name}' not found")
@@ -381,6 +392,8 @@ async def _fetch_openmeteo_current(
             humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
             is_stale=False,
             fetched_at=datetime.now(timezone.utc),
+            source="Open-Meteo",
+            station_name=f"{lat:.3f},{lon:.3f}",
         )
     except Exception as e:
         logger.warning(f"Open-Meteo fetch failed: {e}")
@@ -485,6 +498,8 @@ class WeatherService:
             "is_stale": cur.is_stale if cur else True,
             "api_reachable": self._cache.api_reachable,
             "last_error": self._cache.last_error,
+            "source": self._cache.source,
+            "station_name": cur.station_name if cur else None,
         }
 
     # ---- lifecycle ---------------------------------------------------------
@@ -534,16 +549,19 @@ class WeatherService:
     async def _tick(self) -> None:
         s = self._settings
         lat, lon = s.SITE_LAT, s.SITE_LON
+
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
             # Primary: SMG Macau XML (免費、免 API Key、澳門專用)
             smg_current = await _fetch_smg_current(client, "外港")
 
-            # Fallback: Open-Meteo (free, no API key)
-            openmeteo_results = await asyncio.gather(
-                _fetch_openmeteo_current(client, lat, lon),
-                _fetch_openmeteo_forecast(client, lat, lon, 36),
-                return_exceptions=True,
-            )
+            # Fallback: Open-Meteo (only if user configured lat/lon)
+            openmeteo_results = [None, []]
+            if lat is not None and lon is not None:
+                openmeteo_results = await asyncio.gather(
+                    _fetch_openmeteo_current(client, lat, lon),
+                    _fetch_openmeteo_forecast(client, lat, lon, 36),
+                    return_exceptions=True,
+                )
 
             # Optional: CWA typhoon warnings (Taiwan-specific, requires key)
             cwa_typhoon = None
@@ -551,7 +569,7 @@ class WeatherService:
                 params_typhoon = {"Authorization": s.CWA_API_KEY}
                 typhoon_payload = await self._fetch(client, "W-C0033-001", params_typhoon)
                 if isinstance(typhoon_payload, dict):
-                    cwa_typhoon = _parse_typhoon_warning(typhoon_payload, lat, lon)
+                    cwa_typhoon = _parse_typhoon_warning(typhoon_payload, lat or 0, lon or 0)
 
         # Process results - prefer SMG over Open-Meteo for current weather
         any_ok = False
@@ -559,24 +577,27 @@ class WeatherService:
         # Current weather: SMG primary, Open-Meteo fallback
         if isinstance(smg_current, CurrentWeather):
             self._cache.current = smg_current
+            self._cache.source = "SMG"
             any_ok = True
             logger.debug("Using SMG Macau data for current weather")
-        else:
+        elif lat is not None and lon is not None:
             cur_om = openmeteo_results[0]
             if isinstance(cur_om, CurrentWeather):
                 self._cache.current = cur_om
+                self._cache.source = "Open-Meteo"
                 any_ok = True
-                logger.debug("Using Open-Meteo data for current weather (SMG unavailable)")
+                logger.debug("Using Open-Meteo data for current weather")
             elif isinstance(cur_om, Exception):
                 logger.warning(f"Open-Meteo current failed: {cur_om}")
 
         # Forecast: Open-Meteo only (SMG doesn't provide hourly forecast in XML)
-        fc_om = openmeteo_results[1]
-        if isinstance(fc_om, list) and fc_om:
-            self._cache.forecast_36h = fc_om
-            any_ok = True
-        elif isinstance(fc_om, Exception):
-            logger.warning(f"Open-Meteo forecast failed: {fc_om}")
+        if lat is not None and lon is not None:
+            fc_om = openmeteo_results[1]
+            if isinstance(fc_om, list) and fc_om:
+                self._cache.forecast_36h = fc_om
+                any_ok = True
+            elif isinstance(fc_om, Exception):
+                logger.warning(f"Open-Meteo forecast failed: {fc_om}")
 
         # Typhoon from CWA (if available)
         if cwa_typhoon:

@@ -23,9 +23,9 @@ router = APIRouter()
 
 
 class WeatherConfigPayload(BaseModel):
-    site_lat: float = Field(..., ge=-90, le=90)
-    site_lon: float = Field(..., ge=-180, le=180)
-    station_name: str = Field(default="新店", max_length=50)
+    site_lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    site_lon: Optional[float] = Field(default=None, ge=-180, le=180)
+    station_name: Optional[str] = Field(default=None, max_length=50)
 
 
 def _serialize(obj: Any) -> Any:
