@@ -5,15 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}SDPRS 防災監控{% endblock %}</title>
     
-    <!-- Tailwind CSS CDN -->
+    <!-- Theme bootstrap (item 6): apply class BEFORE first paint to avoid
+         flash-of-light when reloading in dark mode. Must run before any
+         CSS or body content. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('sdprs-theme');
+                if (t === 'dark') document.documentElement.classList.add('dark');
+            } catch (e) { /* localStorage may be blocked */ }
+        })();
+    </script>
+
+    <!-- Tailwind CSS CDN (darkMode=class so html.dark drives variants) -->
+    <script>tailwind = { config: { darkMode: 'class' } };</script>
     <script src="https://cdn.tailwindcss.com"></script>
-    
+
     <!-- Custom CSS -->
     <link rel="stylesheet" href="/static/css/styles.css">
-    
+
+    <!-- Chart.js (item 11 sparkline + monitor.html pump history) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-100 min-h-screen">
+<body class="bg-gray-100 min-h-screen"
+      data-session-login-at="{{ session_login_at | default('') }}"
+      data-session-max-age="{{ session_max_age_s | default(86400) }}">
     <!-- 頂部導覽列 (固定) -->
     <nav class="nav-dark sticky top-0 z-50 shadow-lg">
         <div class="max-w-7xl mx-auto px-4">
@@ -30,8 +48,27 @@
                     <a href="/system" class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium {% if request.url.path == '/system' %}bg-gray-800 text-white{% endif %}">系統狀態</a>
                 </div>
                 
-                <!-- 右側：靜音按鈕 + 登出 -->
+                <!-- 右側：連線狀態 + 靜音按鈕 + 登出 -->
                 <div class="flex items-center space-x-4">
+                    <!-- 連線狀態徽章（Critical: silent-disconnect indicator） -->
+                    <span id="conn-status" class="conn-pill conn-connecting" title="伺服器連線狀態">
+                        <span class="conn-dot"></span>
+                        <span id="conn-status-label">連線中…</span>
+                    </span>
+
+                    <!-- 啟用警報音按鈕 (item 20: browsers gate AudioContext on first user gesture).
+                         一旦點過一次就藏起來，並在 localStorage 記住跨刷新狀態。 -->
+                    <button id="audio-unlock-btn"
+                            class="hidden bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm font-medium"
+                            title="瀏覽器需要使用者互動才能播放聲音；點此解鎖警報音">
+                        🔊 啟用警報音
+                    </button>
+
+                    <!-- 主題切換 (item 6) -->
+                    <button id="theme-toggle-btn" class="theme-toggle-btn" title="切換深色／淺色模式" aria-label="切換主題">
+                        <span id="theme-toggle-icon">🌙</span>
+                    </button>
+
                     <!-- 靜音按鈕 -->
                     <button id="mute-btn" class="text-2xl focus:outline-none" title="切換靜音">
                         🔊
@@ -106,6 +143,13 @@
                     <span>水泵運行:</span>
                     <span id="stat-pump-active" class="font-bold text-blue-600">{{ pump_active_count }}</span>
                 </div>
+
+                <!-- 警報速率火花線 (item 11) — 過去 4 小時，每 15 分鐘一格 -->
+                <div class="stat-item flex items-center gap-2 ml-auto" title="過去 4 小時警報速率 (每 15 分鐘)">
+                    <span class="text-xs text-gray-500">速率</span>
+                    <canvas id="alert-rate-sparkline" width="120" height="28" style="max-height:28px"></canvas>
+                    <span id="alert-rate-intensifying" class="hidden text-xs px-1.5 py-0.5 rounded bg-red-600 text-white font-medium">⚡ 加劇</span>
+                </div>
             </div>
         </div>
     </div>
@@ -115,6 +159,11 @@
         {% block content %}{% endblock %}
     </main>
     
+    <!-- 伺服器端注入：未認領警報 ID 列表（item 3 種子資料） -->
+    <script id="sdprs-bootstrap" type="application/json">
+        {"unackedAlertIds": {{ unacked_alert_ids | default([]) | tojson }}}
+    </script>
+
     <!-- 共用 JavaScript -->
     <script>
         // ===== 靜音控制 =====
@@ -135,6 +184,26 @@
                 muteBtn.textContent = isMuted ? '🔇' : '🔊';
             }
         }
+
+        // ===== 主題切換 (item 6) =====
+        // 已在 <head> 內 inline script 套用初始 class，這裡只負責切換按鈕。
+        const themeToggleBtn = document.getElementById('theme-toggle-btn');
+        const themeToggleIcon = document.getElementById('theme-toggle-icon');
+        function syncThemeIcon() {
+            if (!themeToggleIcon) return;
+            const isDark = document.documentElement.classList.contains('dark');
+            themeToggleIcon.textContent = isDark ? '☀️' : '🌙';
+        }
+        syncThemeIcon();
+        if (themeToggleBtn) {
+            themeToggleBtn.addEventListener('click', () => {
+                const isDark = document.documentElement.classList.toggle('dark');
+                try {
+                    localStorage.setItem('sdprs-theme', isDark ? 'dark' : 'light');
+                } catch (e) { /* localStorage may be blocked */ }
+                syncThemeIcon();
+            });
+        }
         
         // ===== 手機版漢堡選單 =====
         const mobileMenuBtn = document.getElementById('mobile-menu-btn');
@@ -149,31 +218,85 @@
         // ===== WebSocket 連線 =====
         let ws = null;
         let wsReconnectDelay = 1000;
-        
+
+        // ----- Connection status tracking (Sprint A item 1) -----
+        // Server pushes {"type":"ping"} every 5s; we track the gap.
+        // States: connected (live) | connecting (open but no ping yet, or reconnecting) | disconnected
+        let lastPongAt = 0;
+        const STALE_THRESHOLD_MS = 12000;  // 12s — covers 2 missed pings + slack
+        let connState = 'connecting';
+
+        function setConnState(state, ageSec) {
+            const pill = document.getElementById('conn-status');
+            const label = document.getElementById('conn-status-label');
+            if (!pill || !label) return;
+            pill.classList.remove('conn-connected', 'conn-connecting', 'conn-disconnected');
+            if (state === 'connected') {
+                pill.classList.add('conn-connected');
+                label.textContent = '即時連線';
+            } else if (state === 'connecting') {
+                pill.classList.add('conn-connecting');
+                label.textContent = '重新連線中…';
+            } else {
+                pill.classList.add('conn-disconnected');
+                label.textContent = ageSec ? `連線中斷 ${ageSec}s` : '連線中斷';
+            }
+            connState = state;
+            // Grey out the stat bar when not live, signaling stale data.
+            const statBar = document.querySelector('.stat-bar');
+            if (statBar) {
+                statBar.classList.toggle('stat-bar-stale', state !== 'connected');
+            }
+        }
+
+        function tickConnState() {
+            if (!lastPongAt) return;  // never received a ping yet — leave 'connecting' alone
+            const ageMs = Date.now() - lastPongAt;
+            if (ageMs > STALE_THRESHOLD_MS) {
+                setConnState('disconnected', Math.floor(ageMs / 1000));
+            } else if (connState !== 'connected') {
+                setConnState('connected');
+            }
+        }
+        setInterval(tickConnState, 1000);
+
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${location.host}/ws`);
-            
+            setConnState('connecting');
+
             ws.onopen = () => {
                 console.log('WebSocket connected');
                 wsReconnectDelay = 1000;
+                // Don't flip to 'connected' until we see the first server ping —
+                // that's the actual proof the pipeline works end-to-end.
             };
-            
+
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
+                    if (msg && msg.type === 'ping') {
+                        lastPongAt = Date.now();
+                        setConnState('connected');
+                        return;  // ping is server-internal; don't fan out to handlers
+                    }
+                    // Any message proves the link is alive too.
+                    lastPongAt = Date.now();
+                    if (connState !== 'connected') setConnState('connected');
                     handleWSMessage(msg);
                 } catch (e) {
                     console.error('Failed to parse WebSocket message:', e);
                 }
             };
-            
+
             ws.onclose = () => {
                 console.log('WebSocket disconnected, reconnecting...');
+                setConnState('disconnected');
+                lastPongAt = 0;
                 setTimeout(connectWebSocket, wsReconnectDelay);
                 wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
             };
-            
+
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
             };
@@ -186,15 +309,35 @@
         
         function updateStatusBar(msg) {
             if (!msg || !msg.type) return;
-            
+
             switch (msg.type) {
                 case 'new_alert':
                     const pendingEl = document.getElementById('stat-pending');
                     if (pendingEl) {
                         pendingEl.textContent = parseInt(pendingEl.textContent) + 1;
                     }
+                    // Audio loop seed: PENDING_VIDEO doesn't yet have a triagable
+                    // payload, but we still flash the tab so the operator knows.
+                    // The actionable state (PENDING) is added on alert_updated.
+                    notifyOnNewAlert(msg.data);
                     break;
-                    
+
+                case 'alert_updated':
+                    // PENDING_VIDEO -> PENDING transition: video arrived, demand action.
+                    if (msg.data && msg.data.status === 'PENDING' && msg.data.alert_id) {
+                        unackedAlertIds.add(msg.data.alert_id);
+                        startAlertLoop();
+                    }
+                    break;
+
+                case 'alert_acknowledged':
+                    if (msg.data && msg.data.alert_id) {
+                        unackedAlertIds.delete(msg.data.alert_id);
+                        if (unackedAlertIds.size === 0) stopAlertLoop();
+                        updateTabTitle();
+                    }
+                    break;
+
                 case 'alert_resolved':
                     const pending = document.getElementById('stat-pending');
                     const resolved = document.getElementById('stat-resolved');
@@ -203,6 +346,11 @@
                     }
                     if (resolved) {
                         resolved.textContent = parseInt(resolved.textContent) + 1;
+                    }
+                    if (msg.data && msg.data.alert_id) {
+                        unackedAlertIds.delete(msg.data.alert_id);
+                        if (unackedAlertIds.size === 0) stopAlertLoop();
+                        updateTabTitle();
                     }
                     break;
                     
@@ -242,32 +390,186 @@
             connectWebSocket();
         });
         
-        // 播放告警音
-        function playAlertSound() {
-            if (isMuted) return;
-            
-            // 使用 Web Audio API 生成告警音
+        // ===== 告警音 + 標籤閃爍 + 桌面通知 (Sprint A item 3) =====
+        // 問題：原本 playAlertSound 只播放一次。操作員去倒咖啡 8 小時後，
+        // 隊列裡有 3 個待處理警報，但沒任何聲音 — 等於沒人在看。
+        // 修正：未認領計數 > 0 時，每 30 秒重複播放，直到全部認領或處理。
+
+        const unackedAlertIds = new Set();
+        let alertLoopTimer = null;
+        const ALERT_REPEAT_INTERVAL_MS = 30000;
+        const originalTitle = document.title;
+
+        // 從伺服器端注入的開機資料 seed（避免重新整理後丟失追蹤）
+        try {
+            const bootEl = document.getElementById('sdprs-bootstrap');
+            if (bootEl) {
+                const boot = JSON.parse(bootEl.textContent);
+                if (Array.isArray(boot.unackedAlertIds)) {
+                    boot.unackedAlertIds.forEach(id => unackedAlertIds.add(id));
+                }
+            }
+        } catch (e) { console.warn('Failed to parse bootstrap data:', e); }
+
+        // ----- AudioContext unlock (item 20) -----
+        // Browsers (Chrome/Safari/iOS) refuse to start AudioContext until a user gesture.
+        // A fresh tab + audio loop firing before any click = silent failure. This shared
+        // context is created lazily and reused for every tone, so unlocking it once
+        // (via the 啟用警報音 button OR any document click) keeps it alive for the session.
+        let sharedAudioCtx = null;
+        function getAudioCtx() {
+            if (!sharedAudioCtx) {
+                const Ctor = window.AudioContext || window.webkitAudioContext;
+                if (!Ctor) return null;
+                sharedAudioCtx = new Ctor();
+            }
+            return sharedAudioCtx;
+        }
+        function unlockAudio() {
+            const ctx = getAudioCtx();
+            if (!ctx) return false;
+            // resume() returns a promise; if we're inside a real user gesture, it succeeds.
+            if (ctx.state === 'suspended') {
+                ctx.resume().catch(() => {});
+            }
+            // Play a one-sample silent buffer to fully wake the pipeline on iOS.
             try {
-                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const buf = ctx.createBuffer(1, 1, 22050);
+                const src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                src.start(0);
+            } catch (e) { /* ignore */ }
+            localStorage.setItem('sdprs-audio-unlocked', 'true');
+            const btn = document.getElementById('audio-unlock-btn');
+            if (btn) btn.classList.add('hidden');
+            return true;
+        }
+
+        const audioUnlockBtn = document.getElementById('audio-unlock-btn');
+        if (audioUnlockBtn) {
+            // Show the button if we haven't unlocked yet OR if the AudioContext that
+            // *should* be available is still suspended (e.g. user cleared permissions).
+            const previouslyUnlocked = localStorage.getItem('sdprs-audio-unlocked') === 'true';
+            if (!previouslyUnlocked) {
+                audioUnlockBtn.classList.remove('hidden');
+            }
+            audioUnlockBtn.addEventListener('click', unlockAudio);
+        }
+        // Any click anywhere also unlocks (and dismisses the button) — reduces friction.
+        document.addEventListener('click', () => {
+            if (localStorage.getItem('sdprs-audio-unlocked') !== 'true') unlockAudio();
+        }, { once: true });
+
+        function playAlertSound(urgent) {
+            if (isMuted) return;
+            try {
+                const audioCtx = getAudioCtx();
+                if (!audioCtx) return;
+                if (audioCtx.state === 'suspended') {
+                    // Best-effort resume; if it fails (no gesture yet), the unlock
+                    // button is still visible and the operator hasn't lost anything.
+                    audioCtx.resume().catch(() => {});
+                }
                 const oscillator = audioCtx.createOscillator();
                 const gainNode = audioCtx.createGain();
-                
                 oscillator.connect(gainNode);
                 gainNode.connect(audioCtx.destination);
-                
-                // 警報音：兩段遞減音調
-                oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-                oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.2);
-                oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + 0.4);
-                
-                gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
-                gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
-                
-                oscillator.start(audioCtx.currentTime);
-                oscillator.stop(audioCtx.currentTime + 0.6);
-            } catch (e) {
-                console.warn('Failed to play alert sound:', e);
+
+                if (urgent) {
+                    // First-arrival tone: rising-falling-rising (more attention-grabbing)
+                    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+                    oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.2);
+                    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + 0.4);
+                    gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+                    oscillator.start(audioCtx.currentTime);
+                    oscillator.stop(audioCtx.currentTime + 0.6);
+                } else {
+                    // Repeat tone: shorter, lower amplitude — a reminder, not a panic.
+                    oscillator.frequency.setValueAtTime(720, audioCtx.currentTime);
+                    oscillator.frequency.setValueAtTime(540, audioCtx.currentTime + 0.15);
+                    gainNode.gain.setValueAtTime(0.18, audioCtx.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
+                    oscillator.start(audioCtx.currentTime);
+                    oscillator.stop(audioCtx.currentTime + 0.35);
+                }
+            } catch (e) { console.warn('Failed to play alert sound:', e); }
+        }
+
+        function startAlertLoop() {
+            if (alertLoopTimer) return;  // already running
+            alertLoopTimer = setInterval(() => {
+                if (unackedAlertIds.size === 0) { stopAlertLoop(); return; }
+                playAlertSound(false);
+                updateTabTitle();
+            }, ALERT_REPEAT_INTERVAL_MS);
+            updateTabTitle();
+        }
+
+        function stopAlertLoop() {
+            if (alertLoopTimer) {
+                clearInterval(alertLoopTimer);
+                alertLoopTimer = null;
             }
+            updateTabTitle();
+        }
+
+        function updateTabTitle() {
+            const n = unackedAlertIds.size;
+            // Always show count when > 0 — visible whether tab is focused or not.
+            // Hidden-tab is exactly when this matters most (bathroom break).
+            document.title = n > 0 ? `(${n}) 🔴 ${originalTitle}` : originalTitle;
+        }
+
+        // Hook visibilitychange so coming back to the tab reasserts the count
+        // (some browsers reset title on tab switch).
+        document.addEventListener('visibilitychange', updateTabTitle);
+
+        // ----- Desktop notifications -----
+        // Request permission once on first user interaction (browsers gate this).
+        let notifPermissionRequested = false;
+        function ensureNotifPermission() {
+            if (notifPermissionRequested) return;
+            notifPermissionRequested = true;
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission().catch(() => {});
+            }
+        }
+        document.addEventListener('click', ensureNotifPermission, { once: true });
+
+        function notifyOnNewAlert(data) {
+            // Audio for first arrival
+            playAlertSound(true);
+            // Desktop notification only when tab is hidden — otherwise it's spammy.
+            if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+                try {
+                    const n = new Notification('SDPRS 新警報', {
+                        body: `節點 ${data.node_id} 偵測到事件\n${data.timestamp || ''}`,
+                        tag: `sdprs-alert-${data.alert_id}`,  // dedupe per alert
+                        requireInteraction: true,
+                    });
+                    n.onclick = () => {
+                        window.focus();
+                        location.href = `/alerts/${data.alert_id}`;
+                        n.close();
+                    };
+                } catch (e) { console.warn('Notification failed:', e); }
+            }
+            // Tab title flash is driven by unackedAlertIds; alert_updated will
+            // add this id once the video arrives. For PENDING_VIDEO we still
+            // bump the title transiently:
+            if (data && data.alert_id) {
+                // Treat PENDING_VIDEO as unacked too — operator should know it's coming.
+                unackedAlertIds.add(data.alert_id);
+                startAlertLoop();
+            }
+        }
+
+        // If the page loaded with seeded unacked alerts, start the loop now.
+        if (unackedAlertIds.size > 0) {
+            // Defer one tick so DOM is ready and audio context works after first interaction.
+            setTimeout(() => startAlertLoop(), 100);
         }
         
         // 時間格式化
@@ -288,6 +590,90 @@
             }
         }
         
+        // ===== 工作階段倒數 (item 18) =====
+        // 在到期前 5 分鐘彈窗詢問是否延長；POST /api/session/extend 觸碰
+        // session 即可重置 cookie max_age。先把進行中的 textarea 內容存到
+        // localStorage，避免延長失敗 (例如離線) 時資料遺失。
+        (function () {
+            const loginAtIso = document.body.dataset.sessionLoginAt;
+            const maxAge = parseInt(document.body.dataset.sessionMaxAge, 10);
+            if (!loginAtIso || isNaN(maxAge) || maxAge <= 0) return;
+            const loginMs = Date.parse(loginAtIso.endsWith('Z') ? loginAtIso : loginAtIso + 'Z');
+            if (isNaN(loginMs)) return;
+            const expiresMs = loginMs + maxAge * 1000;
+            const warnAtMs = expiresMs - 5 * 60 * 1000;
+            let warned = false;
+            function check() {
+                if (warned) return;
+                if (Date.now() < warnAtMs) return;
+                warned = true;
+                // Persist any unsaved textareas before showing the prompt —
+                // even cancelling shouldn't lose triage notes.
+                document.querySelectorAll('textarea').forEach((ta, i) => {
+                    if (ta.value && ta.value.length > 0) {
+                        try {
+                            localStorage.setItem('sdprs-textarea-backup-' + i, ta.value);
+                        } catch (e) { /* ignore */ }
+                    }
+                });
+                if (window.confirm('工作階段即將過期，是否延長？')) {
+                    fetch('/api/session/extend', { method: 'POST' })
+                        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+                        .then(() => { location.reload(); })
+                        .catch(err => {
+                            console.warn('[Session] Extend failed:', err);
+                            alert('延長失敗，請重新登入。');
+                            window.location.href = '/login';
+                        });
+                }
+            }
+            // Tight enough to catch the 5-minute window without burning CPU.
+            setInterval(check, 30000);
+            check();
+        })();
+
+        // ===== 警報速率火花線 (item 11) =====
+        // 1 分鐘輪詢一次；接收到 new_alert 也立刻 refresh，視覺感受更跟手。
+        let alertRateChart = null;
+        async function refreshAlertRateSparkline() {
+            const canvas = document.getElementById('alert-rate-sparkline');
+            if (!canvas || typeof Chart === 'undefined') return;
+            try {
+                const r = await fetch('/api/alerts/rate?bucket=15m&window=4h');
+                if (!r.ok) return;
+                const data = await r.json();
+                const labels = data.buckets.map(b => b.bucket_start.slice(11, 16));
+                const counts = data.buckets.map(b => b.count);
+                if (!alertRateChart) {
+                    alertRateChart = new Chart(canvas, {
+                        type: 'line',
+                        data: { labels, datasets: [{ data: counts, borderColor: '#DC2626', backgroundColor: 'rgba(220,38,38,0.15)', borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.3 }] },
+                        options: {
+                            responsive: false, maintainAspectRatio: false, animation: false,
+                            plugins: { legend: { display: false }, tooltip: {
+                                callbacks: { label: (ctx) => `${ctx.label}: ${ctx.raw} 筆` }
+                            } },
+                            scales: { x: { display: false }, y: { display: false, beginAtZero: true } },
+                        },
+                    });
+                } else {
+                    alertRateChart.data.labels = labels;
+                    alertRateChart.data.datasets[0].data = counts;
+                    alertRateChart.update('none');
+                }
+                const intens = document.getElementById('alert-rate-intensifying');
+                if (intens) intens.classList.toggle('hidden', !data.intensifying);
+            } catch (e) { /* sparkline is decorative; swallow */ }
+        }
+        setInterval(refreshAlertRateSparkline, 60_000);
+        // Kick once on load + whenever a new_alert arrives.
+        document.addEventListener('DOMContentLoaded', refreshAlertRateSparkline);
+        const _origUpdate = updateStatusBar;
+        updateStatusBar = function (msg) {
+            _origUpdate(msg);
+            if (msg && msg.type === 'new_alert') refreshAlertRateSparkline();
+        };
+
         // 格式化運行時間
         function formatUptime(seconds) {
             if (!seconds || seconds < 0) return '-';

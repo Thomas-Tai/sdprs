@@ -9,15 +9,27 @@
 
 {% block content %}
 <div class="space-y-6">
-    <!-- 頁面標題 -->
-    <div class="flex items-center justify-between">
+    <!-- 頁面標題 + 控制列 (item 8) -->
+    <div class="flex items-center justify-between flex-wrap gap-3">
         <h1 class="text-2xl font-bold text-gray-800">監控牆 — 即時攝像頭快照</h1>
-        <span class="text-sm text-gray-500">自動每秒刷新 | 點擊放大</span>
+        <div class="flex items-center gap-3 text-sm">
+            <label class="flex items-center gap-1 text-gray-600">
+                依分組：
+                <select id="monitor-group-by" class="border border-gray-300 rounded px-2 py-1">
+                    <option value="status">狀態（預設）</option>
+                    <option value="location">地點</option>
+                </select>
+            </label>
+            <button id="monitor-fullscreen-btn"
+                    class="px-3 py-1 border border-gray-300 rounded hover:bg-gray-100"
+                    title="切換全螢幕模式 (F)">⛶ 全螢幕</button>
+            <span class="text-gray-500">自動每秒刷新 | 點擊放大 | 按 F 切換全螢幕</span>
+        </div>
     </div>
-    
+
     {% if glass_nodes %}
     <!-- 快照網格 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    <div id="snapshot-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {% for node in glass_nodes %}
         <div class="snapshot-card bg-white rounded-lg shadow overflow-hidden relative" data-node-id="{{ node.node_id }}" data-node-type="glass">
             <!-- 頂部：節點資訊 + 地點 -->

@@ -676,6 +676,110 @@ function renderPumpHistoryChart(data) {
     });
 }
 
+// ===== Sort + group + fullscreen (item 8) =====
+// Operator priority during a typhoon: an offline camera or one in alarm
+// must always be top-left so it's visible from across the room. We keep
+// the existing server-rendered cards and just re-order DOM after each
+// node-status update. Group-by-location is optional (off by default).
+
+const RECENT_ALERT_WINDOW_MS = 5 * 60 * 1000;
+const recentAlertAt = new Map();   // node_id -> last new_alert timestamp (ms)
+
+function nodeSortRank(card) {
+    // Lower rank = sorted earlier (top-left).
+    const nodeId = card.dataset.nodeId;
+    const node = nodeStates[nodeId] || {};
+    if (node.status === 'OFFLINE') return 0;
+    if (node.is_stale) return 1;
+    const lastAlert = recentAlertAt.get(nodeId);
+    if (lastAlert && Date.now() - lastAlert < RECENT_ALERT_WINDOW_MS) return 2;
+    return 3;
+}
+
+function applySortAndGrouping() {
+    const grid = document.getElementById('snapshot-grid');
+    if (!grid) return;
+    const cards = Array.from(grid.querySelectorAll('.snapshot-card'));
+    if (cards.length === 0) return;
+
+    const groupBy = (document.getElementById('monitor-group-by') || {}).value || 'status';
+
+    // Always sort by status rank first; for group-by-location, sub-sort by location string.
+    cards.sort((a, b) => {
+        if (groupBy === 'location') {
+            const la = (nodeStates[a.dataset.nodeId] || {}).location || '￿';
+            const lb = (nodeStates[b.dataset.nodeId] || {}).location || '￿';
+            const cmp = la.localeCompare(lb, 'zh-Hant');
+            if (cmp !== 0) return cmp;
+        }
+        const ra = nodeSortRank(a);
+        const rb = nodeSortRank(b);
+        if (ra !== rb) return ra - rb;
+        // Tie-breaker: stable by node_id.
+        return a.dataset.nodeId.localeCompare(b.dataset.nodeId);
+    });
+
+    // Re-append in sorted order. Browsers move existing nodes (no re-create),
+    // so img elements keep their loaded snapshots — no flicker.
+    cards.forEach(c => grid.appendChild(c));
+}
+
+// Re-sort whenever a node's status flips. Hooked into updateNodeCard via wrapper:
+const _origUpdateNodeCard = updateNodeCard;
+updateNodeCard = function(node) {
+    _origUpdateNodeCard(node);
+    applySortAndGrouping();
+};
+
+// Track recent alerts for the "recent-alert" sort tier.
+const _origHandleWS = handleWSMessage;
+handleWSMessage = function(msg) {
+    _origHandleWS(msg);
+    if (msg && msg.type === 'new_alert' && msg.data && msg.data.node_id) {
+        recentAlertAt.set(msg.data.node_id, Date.now());
+        applySortAndGrouping();
+    }
+};
+
+// Group-by selector
+const groupBySelect = document.getElementById('monitor-group-by');
+if (groupBySelect) {
+    // Restore preference
+    const saved = localStorage.getItem('sdprs-monitor-groupby');
+    if (saved) groupBySelect.value = saved;
+    groupBySelect.addEventListener('change', () => {
+        localStorage.setItem('sdprs-monitor-groupby', groupBySelect.value);
+        applySortAndGrouping();
+    });
+}
+
+// Fullscreen toggle (F key + button). Hides navbar via body.fullscreen-mode CSS.
+function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().then(() => {
+            document.body.classList.add('fullscreen-mode');
+        }).catch(err => console.warn('[Monitor] Fullscreen failed:', err));
+    } else {
+        document.exitFullscreen().then(() => {
+            document.body.classList.remove('fullscreen-mode');
+        });
+    }
+}
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) document.body.classList.remove('fullscreen-mode');
+});
+document.addEventListener('keydown', function(e) {
+    // Don't hijack F when the user is typing.
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+    }
+});
+const fsBtn = document.getElementById('monitor-fullscreen-btn');
+if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
+
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', function() {
     // Start snapshot refresh (1fps)

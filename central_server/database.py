@@ -114,27 +114,52 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             visual_confidence  REAL,
             audio_db_peak      REAL,
             audio_freq_peak_hz REAL,
+            acknowledged_by    TEXT,
+            acknowledged_at    DATETIME,
             resolved_by        TEXT,
             resolved_at        DATETIME,
             notes              TEXT,
             created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # Migration: add acknowledgement columns to existing events tables (Sprint A item 2)
+    cursor.execute("PRAGMA table_info(events);")
+    existing_event_cols = {row[1] for row in cursor.fetchall()}
+    if "acknowledged_by" not in existing_event_cols:
+        cursor.execute("ALTER TABLE events ADD COLUMN acknowledged_by TEXT;")
+    if "acknowledged_at" not in existing_event_cols:
+        cursor.execute("ALTER TABLE events ADD COLUMN acknowledged_at DATETIME;")
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS nodes (
             node_id        TEXT PRIMARY KEY,
             node_type      TEXT NOT NULL,
             last_heartbeat DATETIME,
+            last_upload_at DATETIME,
             status         TEXT DEFAULT 'OFFLINE',
             metadata       TEXT,
-            location       TEXT
+            location       TEXT,
+            snoozed_until  DATETIME,
+            snooze_reason  TEXT,
+            battery_voltage REAL,
+            power_source    TEXT
         );
     """)
-    # Migration: add location column to existing nodes tables
+    # Migration: add columns to existing nodes tables
     cursor.execute("PRAGMA table_info(nodes);")
     existing_cols = {row[1] for row in cursor.fetchall()}
     if "location" not in existing_cols:
         cursor.execute("ALTER TABLE nodes ADD COLUMN location TEXT;")
+    if "last_upload_at" not in existing_cols:           # item 13
+        cursor.execute("ALTER TABLE nodes ADD COLUMN last_upload_at DATETIME;")
+    if "snoozed_until" not in existing_cols:            # item 17
+        cursor.execute("ALTER TABLE nodes ADD COLUMN snoozed_until DATETIME;")
+    if "snooze_reason" not in existing_cols:            # item 17
+        cursor.execute("ALTER TABLE nodes ADD COLUMN snooze_reason TEXT;")
+    if "battery_voltage" not in existing_cols:          # item 12
+        cursor.execute("ALTER TABLE nodes ADD COLUMN battery_voltage REAL;")
+    if "power_source" not in existing_cols:             # item 12
+        cursor.execute("ALTER TABLE nodes ADD COLUMN power_source TEXT;")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pump_readings (
@@ -145,9 +170,38 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             pump_state  TEXT
         );
     """)
+
+    # Operator audit log (item 15). Append-only; no foreign keys (target_id
+    # may reference rows that get retention-deleted later).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS operator_actions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            operator     TEXT NOT NULL,
+            action_type  TEXT NOT NULL,
+            target_id    TEXT,
+            details_json TEXT
+        );
+    """)
+
+    # Shift-handover note (item 16). Single-row, last-write-wins.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handover_note (
+            id        INTEGER PRIMARY KEY CHECK (id = 1),
+            note      TEXT NOT NULL DEFAULT '',
+            author    TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    # Seed the singleton row if missing.
+    cursor.execute("INSERT OR IGNORE INTO handover_note (id, note) VALUES (1, '');")
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_operator_actions_ts ON operator_actions(timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_operator_actions_target ON operator_actions(action_type, target_id);")
 
 
 def _create_tables_postgresql(conn):
@@ -162,24 +216,39 @@ def _create_tables_postgresql(conn):
             visual_confidence  REAL,
             audio_db_peak      REAL,
             audio_freq_peak_hz REAL,
+            acknowledged_by    TEXT,
+            acknowledged_at    TIMESTAMP,
             resolved_by        TEXT,
             resolved_at        TIMESTAMP,
             notes              TEXT,
             created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
+    # Migration: add acknowledgement columns to existing events tables (Sprint A item 2)
+    conn.execute(sqlalchemy.text("ALTER TABLE events ADD COLUMN IF NOT EXISTS acknowledged_by TEXT;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE events ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP;"))
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS nodes (
             node_id        TEXT PRIMARY KEY,
             node_type      TEXT NOT NULL,
             last_heartbeat TIMESTAMP,
+            last_upload_at TIMESTAMP,
             status         TEXT DEFAULT 'OFFLINE',
             metadata       TEXT,
-            location       TEXT
+            location       TEXT,
+            snoozed_until  TIMESTAMP,
+            snooze_reason  TEXT,
+            battery_voltage REAL,
+            power_source    TEXT
         );
     """))
     # PG supports IF NOT EXISTS on ADD COLUMN since 9.6 — safe migration
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS location TEXT;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_upload_at TIMESTAMP;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMP;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS snooze_reason TEXT;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS battery_voltage REAL;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS power_source TEXT;"))
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS pump_readings (
             id          SERIAL PRIMARY KEY,
@@ -189,9 +258,31 @@ def _create_tables_postgresql(conn):
             pump_state  TEXT
         );
     """))
+    conn.execute(sqlalchemy.text("""
+        CREATE TABLE IF NOT EXISTS operator_actions (
+            id           SERIAL PRIMARY KEY,
+            timestamp    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            operator     TEXT NOT NULL,
+            action_type  TEXT NOT NULL,
+            target_id    TEXT,
+            details_json TEXT
+        );
+    """))
+    conn.execute(sqlalchemy.text("""
+        CREATE TABLE IF NOT EXISTS handover_note (
+            id        INTEGER PRIMARY KEY CHECK (id = 1),
+            note      TEXT NOT NULL DEFAULT '',
+            author    TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """))
+    conn.execute(sqlalchemy.text("INSERT INTO handover_note (id, note) VALUES (1, '') ON CONFLICT (id) DO NOTHING;"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_operator_actions_ts ON operator_actions(timestamp);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_operator_actions_target ON operator_actions(action_type, target_id);"))
 
 
 # =============================================================================
@@ -474,6 +565,57 @@ def set_node_location(node_id: str, location: Optional[str]) -> bool:
 
     with get_db_cursor() as cursor:
         cursor.execute("UPDATE nodes SET location = ? WHERE node_id = ?", (loc, node_id))
+        return cursor.rowcount > 0
+
+
+def touch_node_upload(node_id: str) -> None:
+    """Item 13: stamp last_upload_at = now. Auto-creates the node row if missing
+    so a snapshot from a never-seen node still gets recorded.
+    Never raises (data-quality column, not load-bearing for ingest)."""
+    now = datetime.utcnow().isoformat()
+    try:
+        if _backend == "postgresql":
+            import sqlalchemy
+            database_url = os.environ.get("DATABASE_URL", "")
+            engine = sqlalchemy.create_engine(database_url)
+            with engine.connect() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO nodes (node_id, node_type, last_upload_at) VALUES (:id, 'glass', :ts) "
+                        "ON CONFLICT (node_id) DO UPDATE SET last_upload_at = EXCLUDED.last_upload_at"
+                    ),
+                    {"id": node_id, "ts": now},
+                )
+                conn.commit()
+            return
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO nodes (node_id, node_type, last_upload_at) VALUES (?, 'glass', ?) "
+                "ON CONFLICT(node_id) DO UPDATE SET last_upload_at = excluded.last_upload_at",
+                (node_id, now),
+            )
+    except Exception as e:
+        logger.warning(f"touch_node_upload({node_id}) failed: {e}")
+
+
+def set_node_snooze(node_id: str, snoozed_until: Optional[str], reason: Optional[str]) -> bool:
+    """Item 17: set or clear node snooze. snoozed_until=None clears."""
+    if _backend == "postgresql":
+        import sqlalchemy
+        database_url = os.environ.get("DATABASE_URL", "")
+        engine = sqlalchemy.create_engine(database_url)
+        with engine.connect() as conn:
+            result = conn.execute(
+                sqlalchemy.text("UPDATE nodes SET snoozed_until = :u, snooze_reason = :r WHERE node_id = :id"),
+                {"u": snoozed_until, "r": reason, "id": node_id},
+            )
+            conn.commit()
+            return result.rowcount > 0
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "UPDATE nodes SET snoozed_until = ?, snooze_reason = ? WHERE node_id = ?",
+            (snoozed_until, reason, node_id),
+        )
         return cursor.rowcount > 0
 
 

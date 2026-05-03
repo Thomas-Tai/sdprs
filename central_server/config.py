@@ -81,6 +81,19 @@ if PYDANTIC_AVAILABLE:
         SERVER_HOST: str = "0.0.0.0"
         SERVER_PORT: int = 8000
 
+        # Weather integration (CWA Open Data) — see Plan/weather_integration.md
+        # Empty CWA_API_KEY disables the entire weather feature (gate).
+        CWA_API_KEY: str = ""
+        CWA_STATION_ID: str = "C0Z100"
+        CWA_TOWNSHIP: str = "新北市新店區"
+        SITE_LAT: float = 24.967
+        SITE_LON: float = 121.541
+        WEATHER_REFRESH_SECONDS: int = 600
+        WEATHER_CACHE_STALE_SECONDS: int = 3600
+
+        # mediamtx Prometheus scrape (item 14) — empty = stream-health UI hidden
+        MEDIAMTX_METRICS_URL: str = "http://localhost:9998/metrics"
+
         class Config:
             env_file = ".env"
             env_file_encoding = "utf-8"
@@ -111,6 +124,16 @@ else:
             return default
         return value.lower() in ("true", "1", "yes")
 
+    def _get_env_float(key: str, default: float) -> float:
+        value = os.environ.get(key)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning(f"Invalid float value for {key}, using default {default}")
+            return default
+
     @dataclass
     class Settings:
         DASHBOARD_USER: str
@@ -128,6 +151,14 @@ else:
         STORAGE_PATH: str
         SERVER_HOST: str
         SERVER_PORT: int
+        CWA_API_KEY: str
+        CWA_STATION_ID: str
+        CWA_TOWNSHIP: str
+        SITE_LAT: float
+        SITE_LON: float
+        WEATHER_REFRESH_SECONDS: int
+        WEATHER_CACHE_STALE_SECONDS: int
+        MEDIAMTX_METRICS_URL: str
 
         def __init__(self):
             self.DASHBOARD_USER = _get_env_str("DASHBOARD_USER", required=True)
@@ -145,6 +176,14 @@ else:
             self.STORAGE_PATH = _get_env_str("STORAGE_PATH", "./storage")
             self.SERVER_HOST = _get_env_str("SERVER_HOST", "0.0.0.0")
             self.SERVER_PORT = _get_env_int("SERVER_PORT", 8000)
+            self.CWA_API_KEY = _get_env_str("CWA_API_KEY", "")
+            self.CWA_STATION_ID = _get_env_str("CWA_STATION_ID", "C0Z100")
+            self.CWA_TOWNSHIP = _get_env_str("CWA_TOWNSHIP", "新北市新店區")
+            self.SITE_LAT = _get_env_float("SITE_LAT", 24.967)
+            self.SITE_LON = _get_env_float("SITE_LON", 121.541)
+            self.WEATHER_REFRESH_SECONDS = _get_env_int("WEATHER_REFRESH_SECONDS", 600)
+            self.WEATHER_CACHE_STALE_SECONDS = _get_env_int("WEATHER_CACHE_STALE_SECONDS", 3600)
+            self.MEDIAMTX_METRICS_URL = _get_env_str("MEDIAMTX_METRICS_URL", "http://localhost:9998/metrics")
 
 
 @lru_cache()

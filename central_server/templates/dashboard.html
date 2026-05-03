@@ -4,6 +4,20 @@
 
 {% block content %}
 <div class="space-y-6">
+    <!-- 上一班備註 (item 16). Empty state still shows so operator can drop a new note. -->
+    <div id="handover-bar" class="bg-yellow-50 border-l-4 border-yellow-500 rounded p-3 flex items-start gap-3 text-sm">
+        <span class="text-yellow-700 font-bold">📌 上一班備註</span>
+        <div class="flex-1">
+            <div id="handover-note-text" class="text-gray-800 whitespace-pre-wrap">{{ handover_note.note or '（尚無備註）' }}</div>
+            <div class="text-xs text-gray-500 mt-1">
+                {% if handover_note.author %}
+                    by {{ handover_note.author }} @ {{ handover_note.updated_at }}
+                {% endif %}
+            </div>
+        </div>
+        <button id="handover-edit-btn" class="text-yellow-700 hover:text-yellow-900 text-sm font-medium">編輯</button>
+    </div>
+
     <!-- 頁面標題 -->
     <div class="flex items-center justify-between">
         <h1 class="text-2xl font-bold text-gray-800">警報事件列表</h1>
@@ -17,9 +31,11 @@
             <div class="flex items-center gap-2">
                 <label for="status" class="text-sm text-gray-600">狀態篩選：</label>
                 <select name="status" id="status" class="border border-gray-300 rounded-md px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option value="">全部</option>
+                    <option value="PENDING_VIDEO,PENDING,ACKNOWLEDGED" {% if current_status_filter == 'PENDING_VIDEO,PENDING,ACKNOWLEDGED' %}selected{% endif %}>進行中（預設）</option>
+                    <option value="all" {% if current_status_filter == 'all' %}selected{% endif %}>全部</option>
                     <option value="PENDING_VIDEO" {% if current_status_filter == 'PENDING_VIDEO' %}selected{% endif %}>等待影片</option>
                     <option value="PENDING" {% if current_status_filter == 'PENDING' %}selected{% endif %}>待處理</option>
+                    <option value="ACKNOWLEDGED" {% if current_status_filter == 'ACKNOWLEDGED' %}selected{% endif %}>已認領</option>
                     <option value="RESOLVED" {% if current_status_filter == 'RESOLVED' %}selected{% endif %}>已處理</option>
                 </select>
             </div>
@@ -46,9 +62,42 @@
         </form>
     </div>
     
+    <!-- Item 7 bootstrap: filter state + initial paging info for infinite scroll -->
+    <script id="dashboard-bootstrap" type="application/json">
+        {
+            "currentStatusFilter": {{ current_status_filter | tojson }},
+            "currentNodeFilter":   {{ current_node_filter | tojson }},
+            "loadedRows":          {{ events | length }},
+            "totalRows":           {{ total | int }},
+            "activeFilter":        "PENDING_VIDEO,PENDING,ACKNOWLEDGED"
+        }
+    </script>
+
+    <!-- 新警報橫幅（item 7：捲動到下方時，新警報暫存於此並提示「+N 新警報 ↑」） -->
+    <div id="new-alerts-banner" class="hidden fixed top-20 right-6 z-40">
+        <button id="new-alerts-banner-btn"
+                class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-full shadow-lg font-medium animate-bounce">
+            <span id="new-alerts-banner-count">0</span> 新警報 ↑
+        </button>
+    </div>
+
     <!-- 新警報容器（即時插入用） -->
     <div id="new-alerts-container" class="space-y-2"></div>
     
+    <!-- 批次操作列 (item 10) — 選擇 1+ 警報後出現 -->
+    <div id="bulk-toolbar" class="hidden bg-blue-50 border border-blue-200 rounded p-3 flex items-center justify-between">
+        <span class="text-sm text-blue-900">已選 <span id="bulk-count">0</span> 筆警報</span>
+        <div class="flex items-center gap-2">
+            <input id="bulk-notes" type="text" placeholder="備註 (可選)" maxlength="200"
+                   class="border border-gray-300 rounded px-2 py-1 text-sm w-64">
+            <button id="bulk-resolve-btn"
+                    class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm font-medium">
+                批次標記已處理
+            </button>
+            <button id="bulk-clear-btn" class="text-blue-700 hover:text-blue-900 text-sm">取消</button>
+        </div>
+    </div>
+
     <!-- 警報列表表格 -->
     <div class="bg-white rounded-lg shadow overflow-hidden">
         {% if events %}
@@ -57,7 +106,11 @@
             <table class="min-w-full divide-y divide-gray-200">
                 <thead class="bg-gray-50">
                     <tr>
+                        <th class="px-3 py-3 text-left">
+                            <input type="checkbox" id="bulk-select-all" class="h-4 w-4">
+                        </th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">時間</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">等待時間</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">節點 ID</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">狀態</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">視覺置信度</th>
@@ -67,9 +120,18 @@
                 </thead>
                 <tbody id="alerts-tbody" class="bg-white divide-y divide-gray-200">
                     {% for event in events %}
-                    <tr id="alert-row-{{ event.id }}" class="alert-row hover:bg-gray-50">
+                    <tr id="alert-row-{{ event.id }}" class="alert-row hover:bg-gray-50" data-alert-id="{{ event.id }}" data-alert-status="{{ event.status }}">
+                        <td class="px-3 py-4">
+                            {% if event.status in ('PENDING', 'ACKNOWLEDGED') %}
+                            <input type="checkbox" class="bulk-select h-4 w-4" value="{{ event.id }}">
+                            {% endif %}
+                        </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                             {{ event.timestamp }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm alert-age" data-timestamp="{{ event.timestamp }}" data-status="{{ event.status }}">
+                            <!-- 由 dashboard.js 的 updateAges() 計算填入 -->
+                            -
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-600">
                             {{ event.node_id }}
@@ -79,6 +141,8 @@
                             <span class="status-badge pending-video">⏳ 等待影片</span>
                             {% elif event.status == 'PENDING' %}
                             <span class="status-badge pending">🔴 待處理</span>
+                            {% elif event.status == 'ACKNOWLEDGED' %}
+                            <span class="status-badge acknowledged" title="已認領 by {{ event.acknowledged_by }}">🔵 已認領</span>
                             {% elif event.status == 'RESOLVED' %}
                             <span class="status-badge resolved">🟢 已處理</span>
                             {% endif %}
@@ -136,7 +200,16 @@
         {% endif %}
     </div>
     
+    <!-- 無限捲動哨兵 (item 7) — 在「進行中」篩選模式下顯示，由 dashboard.js 接管 -->
+    <div id="infinite-scroll-sentinel" class="hidden text-center py-4 text-sm text-gray-400">
+        載入更多…
+    </div>
+    <div id="infinite-scroll-end" class="hidden text-center py-4 text-xs text-gray-400">
+        — 已載入全部 —
+    </div>
+
     <!-- 分頁 -->
+    <div id="pagination-block">
     {% if total_pages > 1 %}
     <div class="flex items-center justify-center space-x-2">
         {% if current_page > 1 %}
@@ -165,6 +238,7 @@
         {% endif %}
     </div>
     {% endif %}
+    </div><!-- /pagination-block -->
 </div>
 {% endblock %}
 
