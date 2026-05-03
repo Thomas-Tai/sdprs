@@ -74,12 +74,6 @@ class _Cache:
     api_reachable: bool = False
     consecutive_failures: int = 0
     source: str = "SMG"  # Current data source
-    forecast_36h: List[ForecastBucket] = field(default_factory=list)
-    typhoon: Optional[TyphoonWarning] = None
-    last_success_at: Optional[datetime] = None
-    last_error: Optional[str] = None
-    api_reachable: bool = False
-    consecutive_failures: int = 0
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -235,6 +229,8 @@ def _parse_station_observation(payload: Dict[str, Any], station_id: str) -> Opti
                 humidity_pct=int(_f("HUMD") * 100) if _f("HUMD") <= 1 else int(_f("HUMD")),
                 is_stale=False,
                 fetched_at=datetime.now(timezone.utc),
+                source="CWA",
+                station_name=station_id,
             )
         return None
     except Exception as e:
