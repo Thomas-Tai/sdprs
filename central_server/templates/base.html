@@ -153,7 +153,7 @@
                     <span id="weather-station-sep" class="text-gray-400 hidden">|</span>
                     <span id="weather-wind" class="text-sm">-- m/s 風</span>
                     <span class="text-gray-400">|</span>
-                    <span id="weather-rain" class="text-sm">-- mm 雨/24h</span>
+                    <span id="weather-rain" class="text-sm">-- mm(當時1小時內雨量)</span>
                     <span id="weather-typhoon-badge" class="hidden ml-1 px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 cursor-pointer" title="點擊查看颱風詳情">颱風</span>
                     <span id="weather-stale-marker" class="hidden text-xs text-gray-400" title="資料延遲">⚠️</span>
                     <span id="weather-update-time" class="text-xs text-gray-400 hidden" title="最後更新時間"></span>
@@ -777,11 +777,11 @@
                     else windEl.className = 'text-sm';
                 }
 
-                // Rain display
+                // Rain display (Open-Meteo precipitation = current hourly accumulation)
                 const rainEl = document.getElementById('weather-rain');
                 if (rainEl && data.rainfall_24h_mm != null) {
                     const rf = data.rainfall_24h_mm.toFixed(1);
-                    rainEl.textContent = rf + ' mm 雨/24h';
+                    rainEl.textContent = rf + ' mm(當時1小時內雨量)';
                     if (data.rainfall_24h_mm >= 30) rainEl.className = 'text-sm font-bold text-blue-600 bg-blue-50 px-1 rounded';
                     else rainEl.className = 'text-sm';
                 }
