@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-# SDPRS Central Server - Weather Service (CWA Open Data + Open-Meteo fallback)
+# SDPRS Central Server - Weather Service (SMG Macau + Open-Meteo fallback)
 # See Plan/weather_integration.md for the full spec.
 #
-# Primary: Open-Meteo (free, no API key required)
+# Primary: SMG Macau XML (free, no API key, Macau-specific)
+# Fallback: Open-Meteo (free, no API key required)
 # Optional: CWA (Taiwan-specific, requires CWA_API_KEY)
 #
 # Critical invariant: any failure here MUST NOT propagate. Weather is a
@@ -13,6 +14,7 @@
 import asyncio
 import logging
 import math
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -21,6 +23,7 @@ import httpx
 
 logger = logging.getLogger("weather_service")
 
+SMG_XML_URL = "https://xml.smg.gov.mo/c_actualweather.xml"
 CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 HTTP_TIMEOUT_S = 8.0
@@ -86,6 +89,78 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
     y = math.sin(dl) * math.cos(p2)
     x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
     return int((math.degrees(math.atan2(y, x)) + 360) % 360)
+
+
+async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外港") -> Optional[CurrentWeather]:
+    """Fetch current weather from SMG Macau XML (免費、免 API Key).
+
+    Args:
+        client: httpx async client
+        station_name: Station name to look for (default: "外港" - Outer Harbour)
+
+    Returns:
+        CurrentWeather if successful, None otherwise
+    """
+    try:
+        r = await client.get(SMG_XML_URL, timeout=HTTP_TIMEOUT_S)
+        if r.status_code != 200:
+            logger.warning(f"SMG XML returned {r.status_code}")
+            return None
+
+        # Parse XML
+        r.encoding = 'utf-8'
+        root = ET.fromstring(r.text)
+
+        # Find the station with matching name
+        for station in root.findall('.//Custom'):
+            name = station.findtext('StationName', default='')
+            if station_name in name:
+                # Extract weather data
+                def _get_float(tag: str, default: float = 0.0) -> float:
+                    val = station.findtext(tag)
+                    if val is None or val in ('-', 'X', 'x', '-99'):
+                        return default
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return default
+
+                def _get_int(tag: str, default: int = 0) -> int:
+                    val = station.findtext(tag)
+                    if val is None or val in ('-', 'X', 'x', '-99'):
+                        return default
+                    try:
+                        return int(float(val))
+                    except (TypeError, ValueError):
+                        return default
+
+                # Wind speed in km/h, convert to m/s (1 km/h = 0.27778 m/s)
+                wind_kmh = _get_float('WindSpeed')
+                wind_ms = wind_kmh * 0.27778
+
+                # Rainfall - use Rainfall (hourly) or DailyRainfall
+                rainfall_hourly = _get_float('Rainfall')
+
+                return CurrentWeather(
+                    obs_time=datetime.now(timezone.utc),
+                    wind_speed_ms=wind_ms,
+                    wind_direction_deg=_get_int('WindDirection'),
+                    rainfall_24h_mm=rainfall_hourly,  # Hourly rainfall
+                    temperature_c=_get_float('Temperature'),
+                    humidity_pct=_get_int('Humidity'),
+                    is_stale=False,
+                    fetched_at=datetime.now(timezone.utc),
+                )
+
+        logger.warning(f"SMG XML: station '{station_name}' not found")
+        return None
+
+    except ET.ParseError as e:
+        logger.warning(f"SMG XML parse error: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"SMG XML fetch failed: {e}")
+        return None
 
 
 def _parse_station_observation(payload: Dict[str, Any], station_id: str) -> Optional[CurrentWeather]:
@@ -460,7 +535,10 @@ class WeatherService:
         s = self._settings
         lat, lon = s.SITE_LAT, s.SITE_LON
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
-            # Primary: Open-Meteo (free, no API key)
+            # Primary: SMG Macau XML (免費、免 API Key、澳門專用)
+            smg_current = await _fetch_smg_current(client, "外港")
+
+            # Fallback: Open-Meteo (free, no API key)
             openmeteo_results = await asyncio.gather(
                 _fetch_openmeteo_current(client, lat, lon),
                 _fetch_openmeteo_forecast(client, lat, lon, 36),
@@ -475,15 +553,24 @@ class WeatherService:
                 if isinstance(typhoon_payload, dict):
                     cwa_typhoon = _parse_typhoon_warning(typhoon_payload, lat, lon)
 
-        # Process Open-Meteo results
+        # Process results - prefer SMG over Open-Meteo for current weather
         any_ok = False
-        cur_om = openmeteo_results[0]
-        if isinstance(cur_om, CurrentWeather):
-            self._cache.current = cur_om
-            any_ok = True
-        elif isinstance(cur_om, Exception):
-            logger.warning(f"Open-Meteo current failed: {cur_om}")
 
+        # Current weather: SMG primary, Open-Meteo fallback
+        if isinstance(smg_current, CurrentWeather):
+            self._cache.current = smg_current
+            any_ok = True
+            logger.debug("Using SMG Macau data for current weather")
+        else:
+            cur_om = openmeteo_results[0]
+            if isinstance(cur_om, CurrentWeather):
+                self._cache.current = cur_om
+                any_ok = True
+                logger.debug("Using Open-Meteo data for current weather (SMG unavailable)")
+            elif isinstance(cur_om, Exception):
+                logger.warning(f"Open-Meteo current failed: {cur_om}")
+
+        # Forecast: Open-Meteo only (SMG doesn't provide hourly forecast in XML)
         fc_om = openmeteo_results[1]
         if isinstance(fc_om, list) and fc_om:
             self._cache.forecast_36h = fc_om
