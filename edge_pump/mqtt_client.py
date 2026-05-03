@@ -11,6 +11,7 @@ Smart Disaster Prevention Response System - MQTT Client Module
 
 import network
 import time
+import json
 from umqtt.simple import MQTTClient
 
 
@@ -116,17 +117,31 @@ class PumpMQTTClient:
 
         return self._wifi_connected and self._mqtt_connected
 
-    def publish_status(self, pump_state, water_level):
-        """發布水泵狀態到 MQTT。"""
+    def publish_status(self, pump_state, water_level, battery_voltage=None, power_source=None):
+        """發布水泵狀態到 MQTT。
+
+        Item 12: battery_voltage (V) and power_source ("mains" / "battery" / "unknown")
+        are optional but should be included when hardware supports them.
+        """
         if not self.ensure_connection():
             return
         if self._client is None:
             return
         try:
             timestamp = format_timestamp()
-            payload = '{"node_id":"%s","timestamp":"%s","pump_state":"%s","water_level":%.1f}' % (
-                self._node_id, timestamp, pump_state, water_level
-            )
+            # Base payload
+            payload_dict = {
+                "node_id": self._node_id,
+                "timestamp": timestamp,
+                "pump_state": pump_state,
+                "water_level": round(water_level, 1)
+            }
+            # Item 12: add battery fields when available
+            if battery_voltage is not None:
+                payload_dict["battery_voltage"] = round(battery_voltage, 2)
+            if power_source is not None:
+                payload_dict["power_source"] = power_source
+            payload = json.dumps(payload_dict)
             self._client.publish(self._topic, payload)
             print("[MQTT] Published: %s" % payload)
         except OSError as e:

@@ -37,6 +37,10 @@ LED_RED_PIN = 27       # 紅色 LED（水泵運行中）
 LED_GREEN_PIN = 25     # 綠色 LED（待機）
 ADC_PIN = 34           # 水位感測器 ADC 輸入（ADC1_CH6, 只讀引腳）
 
+# Item 12: 電池監測引腳（選用）
+BATTERY_ADC_PIN = 35   # 電池電壓 ADC 輸入（ADC1_CH7, 只讀引腳） — 需實際接線
+POWER_SOURCE_PIN = 21  # 電源來源檢測 GPIO（高電位 = 外接電源/UPS；低電位 = 電池）
+
 # ============ 時間間隔 ============
 PUBLISH_INTERVAL = 10   # MQTT 發布間隔（秒）
 POLL_INTERVAL = 1       # 水位讀取間隔（秒）

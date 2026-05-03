@@ -147,6 +147,15 @@
                     <span id="stat-pump-active" class="font-bold text-blue-600">{{ pump_active_count }}</span>
                 </div>
 
+                <!-- 天氣資訊 (item 9) — 風速、降雨、颱風警告 -->
+                <div id="weather-widget" class="stat-item flex items-center gap-2 hidden" title="即時天氣資訊 (CWA)">
+                    <span id="weather-wind" class="text-sm">-- m/s 風</span>
+                    <span class="text-gray-400">|</span>
+                    <span id="weather-rain" class="text-sm">-- mm 雨/24h</span>
+                    <span id="weather-typhoon-badge" class="hidden ml-1 px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 cursor-pointer" title="點擊查看颱風詳情">颱風</span>
+                    <span id="weather-stale-marker" class="hidden text-xs text-gray-400" title="資料延遲">⚠️</span>
+                </div>
+
                 <!-- 警報速率火花線 (item 11) — 過去 4 小時，每 15 分鐘一格 -->
                 <div class="stat-item flex items-center gap-2 ml-auto" title="過去 4 小時警報速率 (每 15 分鐘)">
                     <span class="text-xs text-gray-500">速率</span>
@@ -676,6 +685,66 @@
             _origUpdate(msg);
             if (msg && msg.type === 'new_alert') refreshAlertRateSparkline();
         };
+
+        // ===== 天氣資訊刷新 (item 9) =====
+        // 每 10 分鐘刷新一次（與 CWA API 更新頻率同步）。
+        // 若 CWA_API_KEY 未設定，API 返回 503，widget 保持隱藏。
+        let weatherData = null;
+        async function refreshWeatherWidget() {
+            const widget = document.getElementById('weather-widget');
+            if (!widget) return;
+            try {
+                const r = await fetch('/api/weather/current');
+                if (r.status === 503) { widget.classList.add('hidden'); return; }  // service disabled
+                if (!r.ok) return;
+                const data = await r.json();
+                weatherData = data;
+                widget.classList.remove('hidden');
+
+                // Wind display with color thresholds
+                const windEl = document.getElementById('weather-wind');
+                if (windEl && data.wind_speed_ms != null) {
+                    const ws = data.wind_speed_ms.toFixed(1);
+                    windEl.textContent = ws + ' m/s 風';
+                    if (data.wind_speed_ms >= 25) windEl.className = 'text-sm font-bold text-red-600';
+                    else if (data.wind_speed_ms >= 17) windEl.className = 'text-sm font-bold text-yellow-600';
+                    else windEl.className = 'text-sm';
+                }
+
+                // Rain display
+                const rainEl = document.getElementById('weather-rain');
+                if (rainEl && data.rainfall_24h_mm != null) {
+                    const rf = data.rainfall_24h_mm.toFixed(1);
+                    rainEl.textContent = rf + ' mm 雨/24h';
+                    if (data.rainfall_24h_mm >= 30) rainEl.className = 'text-sm font-bold text-blue-600 bg-blue-50 px-1 rounded';
+                    else rainEl.className = 'text-sm';
+                }
+
+                // Stale marker
+                const staleEl = document.getElementById('weather-stale-marker');
+                if (staleEl) staleEl.classList.toggle('hidden', !data.is_stale);
+            } catch (e) { widget.classList.add('hidden'); }
+        }
+        async function refreshTyphoonBadge() {
+            try {
+                const r = await fetch('/api/weather/typhoon');
+                if (r.status === 503) return;
+                const data = await r.json();
+                const badge = document.getElementById('weather-typhoon-badge');
+                if (!badge) return;
+                if (data && data.name) {
+                    badge.textContent = data.category + ' ' + data.name;
+                    badge.title = '距離: ' + (data.distance_to_site_km || '--') + ' km | 最大風速: ' + (data.max_wind_ms || '--') + ' m/s';
+                    badge.classList.remove('hidden');
+                    badge.onclick = () => { if (weatherData) alert('颱風詳情\n' + JSON.stringify(weatherData.typhoon || data, null, 2)); };
+                } else {
+                    badge.classList.add('hidden');
+                }
+            } catch (e) { /* ignore */ }
+        }
+        setInterval(refreshWeatherWidget, 600_000);
+        setInterval(refreshTyphoonBadge, 600_000);
+        document.addEventListener('DOMContentLoaded', () => { refreshWeatherWidget(); refreshTyphoonBadge(); });
 
         // 格式化運行時間
         function formatUptime(seconds) {

@@ -26,6 +26,7 @@ from config import (
     SSID, WIFI_PASS, MQTT_BROKER, MQTT_PORT, NODE_ID, MQTT_TOPIC_STATUS,
     HIGH_THRESHOLD, LOW_THRESHOLD,
     RELAY_PIN, LED_RED_PIN, LED_GREEN_PIN, ADC_PIN,
+    BATTERY_ADC_PIN, POWER_SOURCE_PIN,  # Item 12
     PUBLISH_INTERVAL, POLL_INTERVAL,
     WDT_ENABLED, WDT_TIMEOUT,
     MQTT_USERNAME, MQTT_PASSWORD
@@ -69,6 +70,19 @@ def main():
     # 1. 初始化 ADC
     print("[MAIN] Initializing ADC on pin %d..." % ADC_PIN)
     adc = init_adc(ADC_PIN)
+
+    # Item 12: 電池監測（選用 — 若引腳未接線則跳過）
+    battery_adc = None
+    power_source_pin = None
+    try:
+        if BATTERY_ADC_PIN:
+            battery_adc = init_adc(BATTERY_ADC_PIN)
+            print("[MAIN] Battery ADC initialized on pin %d" % BATTERY_ADC_PIN)
+        if POWER_SOURCE_PIN:
+            power_source_pin = machine.Pin(POWER_SOURCE_PIN, machine.Pin.IN)
+            print("[MAIN] Power source pin initialized on pin %d" % POWER_SOURCE_PIN)
+    except Exception as e:
+        print("[MAIN] Battery/power pins unavailable: %s (continuing without)" % str(e))
 
     # 2. 初始化水泵控制器
     print("[MAIN] Initializing pump controller...")
@@ -128,9 +142,18 @@ def main():
             # 3. MQTT 狀態發布（每 PUBLISH_INTERVAL 秒）
             now = time.ticks_ms()
             if time.ticks_diff(now, last_publish) >= PUBLISH_INTERVAL * 1000:
-                mqtt.publish_status(pump.state, water_level)
+                # Item 12: 讀取電池電壓和電源來源
+                battery_voltage = None
+                power_source = None
+                if battery_adc:
+                    # 電池電壓 = ADC 值 * 3.3V / 4095，再乘分壓比（假設 1:2 分壓）
+                    raw = battery_adc.read()
+                    battery_voltage = raw * 3.3 / 4095.0 * 2.0  # 假設 1:2 分壓比，需按實際接線調整
+                if power_source_pin:
+                    power_source = "mains" if power_source_pin.value() else "battery"
+                mqtt.publish_status(pump.state, water_level, battery_voltage, power_source)
                 last_publish = now
-                # NTP 同步：WiFi 首次連線後執行一次（不管成功與否都不重試）
+                # NTP 同步：WiFi 馒次連線後執行一次（不管成功與否都不重試）
                 if not ntp_synced and mqtt._wifi_connected:
                     sync_ntp()
                     ntp_synced = True

@@ -370,16 +370,16 @@ async def snooze_node(
     body: SnoozeRequest,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Item 17 (server-side). Stores snooze on the node row.
+    """Item 17: Store snooze on the node row AND push to edge via MQTT.
 
-    NOTE: this only writes the server-side flag. Pushing the snooze config
-    down to the edge (so the edge actually suppresses audio triggers)
-    requires MQTT cross-module work — that's the deferred half of item 17,
-    gated by the prompt's ESP32 stop-condition. Until then, the server
-    must check this flag when it processes incoming audio-only alerts.
+    The server-side DB flag is used by event_service.py when processing
+    incoming audio-only alerts. The MQTT push allows edge nodes to
+    suppress audio triggers locally (requires edge firmware update to
+    subscribe and process sdprs/edge/{node_id}/cmd/snooze topic).
     """
     from datetime import timedelta as _td
     from ..database import set_node_snooze
+    from ..services.mqtt_service import get_mqtt_service
 
     if get_node(node_id) is None:
         from ..database import upsert_node as _upsert
@@ -389,6 +389,11 @@ async def snooze_node(
     ok = set_node_snooze(node_id, until, body.reason)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to set snooze")
+
+    # Item 17: Push snooze config to edge node via MQTT
+    mqtt_svc = get_mqtt_service()
+    if mqtt_svc:
+        mqtt_svc.send_snooze_config(node_id, until, body.reason)
 
     from ..services.audit_service import log_action, ACTION_SNOOZE
     log_action(user, ACTION_SNOOZE, target_id=node_id, details={"minutes": body.minutes, "reason": body.reason})
@@ -400,9 +405,17 @@ async def unsnooze_node(
     node_id: str,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Clear an active snooze."""
+    """Clear an active snooze AND push cleared config to edge via MQTT."""
     from ..database import set_node_snooze
+    from ..services.mqtt_service import get_mqtt_service
+
     set_node_snooze(node_id, None, None)
+
+    # Item 17: Push cleared snooze config to edge node
+    mqtt_svc = get_mqtt_service()
+    if mqtt_svc:
+        mqtt_svc.send_snooze_config(node_id, None, None)
+
     from ..services.audit_service import log_action, ACTION_UNSNOOZE
     log_action(user, ACTION_UNSNOOZE, target_id=node_id)
     return {"node_id": node_id, "snoozed_until": None}

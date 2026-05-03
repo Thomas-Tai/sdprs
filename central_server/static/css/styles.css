@@ -74,6 +74,14 @@ html.dark .stat-item .text-green-600 { color: #6EE7B7 !important; }
 html.dark .stat-item .text-orange-600 { color: #FDBA74 !important; }
 html.dark .stat-item .text-blue-600 { color: #93C5FD !important; }
 
+/* Weather widget (item 9) — color thresholds for wind/rain */
+.weather-wind-high { background-color: rgba(245, 158, 11, 0.15); padding: 0 0.25rem; border-radius: 0.25rem; }
+.weather-wind-critical { background-color: rgba(239, 68, 68, 0.2); padding: 0 0.25rem; border-radius: 0.25rem; }
+.weather-rain-heavy { background-color: rgba(59, 130, 246, 0.15); padding: 0 0.25rem; border-radius: 0.25rem; }
+html.dark .weather-wind-high { background-color: rgba(245, 158, 11, 0.25); }
+html.dark .weather-wind-critical { background-color: rgba(239, 68, 68, 0.35); }
+html.dark .weather-rain-heavy { background-color: rgba(59, 130, 246, 0.25); }
+
 /* Form controls */
 html.dark select,
 html.dark input,

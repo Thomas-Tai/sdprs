@@ -411,7 +411,38 @@ class MQTTService:
         
         logger.info(f"Sending {command} command to {node_id}")
         return self.publish(topic, payload, qos=1)
-    
+
+    def send_snooze_config(self, node_id: str, snooze_until: Optional[str], snooze_reason: Optional[str] = None) -> bool:
+        """
+        Item 17: Push snooze config to an edge node so it can suppress audio-only triggers.
+
+        The edge node firmware should subscribe to sdprs/edge/{node_id}/cmd/snooze
+        and, when receiving a payload with snooze_until set, suppress pure-audio
+        alerts until that timestamp (UTC ISO). Visual+audio AND-gate alerts are
+        NOT suppressed — only audio-only triggers (which are typhoon false-positives).
+
+        Args:
+            node_id: The target node identifier
+            snooze_until: UTC ISO timestamp when snooze expires, or None to clear
+            snooze_reason: Optional human-readable reason for the snooze
+
+        Returns:
+            True if command was sent successfully
+
+        NOTE: This method exists but the edge-side firmware stop-condition is not
+        implemented yet. Until edge nodes subscribe and process this topic, the
+        server-side snooze flag is checked only when processing incoming alerts
+        (event_service.py). Full edge-side suppression requires firmware update.
+        """
+        topic = f"sdprs/edge/{node_id}/cmd/snooze"
+        payload = {
+            "snooze_until": snooze_until,
+            "snooze_reason": snooze_reason,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        logger.info(f"Sending snooze config to {node_id}: until={snooze_until}")
+        return self.publish(topic, payload, qos=1)
+
     # ===== Offline Detection =====
     
     def _start_offline_detection(self):
