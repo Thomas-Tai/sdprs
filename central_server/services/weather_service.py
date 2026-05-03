@@ -506,6 +506,15 @@ class WeatherService:
             self._cache.consecutive_failures += 1
             self._cache.api_reachable = False
 
+    async def refresh_now(self) -> bool:
+        """Manually trigger an immediate weather refresh. Returns True if successful."""
+        try:
+            await self._tick()
+            return self._cache.api_reachable
+        except Exception as e:
+            logger.warning(f"Manual weather refresh failed: {e}")
+            return False
+
     async def _fetch(self, client: httpx.AsyncClient, dataset_id: str, params: Dict[str, Any]) -> Any:
         url = f"{CWA_BASE}/{dataset_id}"
         try:
@@ -566,6 +575,14 @@ def update_weather_location(lat: float, lon: float) -> bool:
     return True
 
 
+async def refresh_weather_now() -> bool:
+    """Manually trigger immediate weather data refresh."""
+    global _weather_service
+    if _weather_service is None:
+        return False
+    return await _weather_service.refresh_now()
+
+
 __all__ = [
     "WeatherService",
     "CurrentWeather",
@@ -573,4 +590,5 @@ __all__ = [
     "TyphoonWarning",
     "init_weather_service",
     "get_weather_service",
+    "refresh_weather_now",
 ]

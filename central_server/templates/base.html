@@ -157,6 +157,7 @@
                     <span id="weather-typhoon-badge" class="hidden ml-1 px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 cursor-pointer" title="點擊查看颱風詳情">颱風</span>
                     <span id="weather-stale-marker" class="hidden text-xs text-gray-400" title="資料延遲">⚠️</span>
                     <span id="weather-update-time" class="text-xs text-gray-400 hidden" title="最後更新時間"></span>
+                    <button id="weather-refresh-btn" class="text-gray-400 hover:text-blue-600 cursor-pointer text-sm p-1 rounded" title="手動刷新天氣資料">🔄</button>
                 </div>
 
                 <!-- 警報速率火花線 (item 11) — 過去 4 小時，每 15 分鐘一格 -->
@@ -821,12 +822,43 @@
                 }
             } catch (e) { /* ignore */ }
         }
+
+        // ===== 手動刷新天氣 =====
+        async function manualRefreshWeather() {
+            const btn = document.getElementById('weather-refresh-btn');
+            if (!btn) return;
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+                const r = await fetch('/api/weather/refresh', { method: 'POST' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const data = await r.json();
+                if (data.ok) {
+                    btn.textContent = '✅';
+                    setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 1000);
+                    // Refresh display
+                    refreshWeatherWidget();
+                    refreshTyphoonBadge();
+                } else {
+                    btn.textContent = '❌';
+                    setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 2000);
+                }
+            } catch (e) {
+                console.warn('[Weather] Manual refresh failed:', e);
+                btn.textContent = '❌';
+                setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 2000);
+            }
+        }
+
         setInterval(refreshWeatherWidget, 600_000);
         setInterval(refreshTyphoonBadge, 600_000);
         document.addEventListener('DOMContentLoaded', async () => {
             await loadWeatherConfig();  // Wait for station name before refreshing widget
             refreshWeatherWidget();
             refreshTyphoonBadge();
+            // Bind refresh button
+            const btn = document.getElementById('weather-refresh-btn');
+            if (btn) btn.addEventListener('click', manualRefreshWeather);
         });
 
         // 格式化運行時間

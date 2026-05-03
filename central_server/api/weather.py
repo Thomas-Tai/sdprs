@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
 from ..database import get_weather_config, set_weather_config
-from ..services.weather_service import get_weather_service, update_weather_location
+from ..services.weather_service import get_weather_service, update_weather_location, refresh_weather_now
 
 logger = logging.getLogger("api.weather")
 
@@ -106,6 +106,19 @@ async def get_weather_health(request: Request, user: str = Depends(get_current_u
     if svc is None:
         return {"enabled": False}
     return {"enabled": True, **svc.health()}
+
+
+@router.post("/weather/refresh")
+async def refresh_weather(request: Request, user: str = Depends(get_current_user)) -> Dict[str, Any]:
+    """Manually trigger immediate weather data refresh."""
+    svc = get_weather_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail="Weather service not enabled")
+    success = await refresh_weather_now()
+    if success:
+        return {"ok": True, "message": "Weather data refreshed successfully"}
+    else:
+        return {"ok": False, "message": "Weather refresh failed or data unavailable"}
 
 
 __all__ = ["router"]
