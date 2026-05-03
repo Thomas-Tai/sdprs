@@ -29,97 +29,54 @@ os.environ["SECRET_KEY"] = "test-secret-key-for-testing"
 
 @pytest.fixture
 def test_db():
-    """Create a temporary test database."""
-    import sqlite3
-    import threading
-    
-    # Create temporary database file
+    """
+    Create a temporary test database via the production init_db() path.
+
+    Why init_db (not a hand-rolled sqlite3.connect): production code uses
+    `get_db_cursor()` which guards every transaction with `_db_lock`. That
+    lock is set up inside `_init_sqlite()`. Skipping init_db leaves it as
+    None, and the first `with _db_lock:` raises
+    "'NoneType' does not support context manager" — which is exactly the
+    pre-existing fixture bug item #21 fixes.
+    """
+    import central_server.database as db_module
+
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    
-    # Initialize database
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA busy_timeout=5000;")
-    
-    # Create tables
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            node_id            TEXT NOT NULL,
-            timestamp          DATETIME NOT NULL,
-            status             TEXT NOT NULL DEFAULT 'PENDING_VIDEO',
-            mp4_path           TEXT,
-            visual_confidence  REAL,
-            audio_db_peak      REAL,
-            audio_freq_peak_hz REAL,
-            resolved_by        TEXT,
-            resolved_at        DATETIME,
-            notes              TEXT,
-            created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS nodes (
-            node_id        TEXT PRIMARY KEY,
-            node_type      TEXT NOT NULL,
-            last_heartbeat DATETIME,
-            status         TEXT DEFAULT 'OFFLINE',
-            metadata       TEXT
-        );
-    """)
-    
-    conn.commit()
-    
-    yield conn
-    
-    # Cleanup
-    conn.close()
+
+    conn = db_module.init_db(db_path)
     try:
-        os.unlink(db_path)
-    except:
-        pass
+        yield conn
+    finally:
+        db_module.close_db()
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
 
 @pytest.fixture
 def client(test_db):
-    """Create a test client with a test database."""
+    """Create a test client. test_db has already initialised the global
+    database; routers can call get_db()/get_db_cursor() directly."""
     from fastapi import FastAPI
     from starlette.middleware.sessions import SessionMiddleware
-    
-    # Create a minimal test app
+
     app = FastAPI()
     app.add_middleware(
         SessionMiddleware,
         secret_key="test-secret-key-for-testing"
     )
-    
-    # Mock database module
-    import central_server.database as db_module
-    original_get_db = db_module.get_db
-    
-    # Override get_db to use test database
-    def mock_get_db():
-        return test_db
-    
-    db_module.get_db = mock_get_db
-    
-    # Import and include routers
+
     from central_server.api.alerts import router as alerts_router
     app.include_router(alerts_router, prefix="/api")
-    
-    # Initialize app state
+
+    # Routes that broadcast over WebSocket touch app.state — give them stubs
+    # so we don't have to spin up the full lifespan.
     app.state.latest_snapshots = {}
-    
+
     with TestClient(app) as test_client:
         yield test_client
-    
-    # Restore original function
-    db_module.get_db = original_get_db
 
 
 @pytest.fixture
