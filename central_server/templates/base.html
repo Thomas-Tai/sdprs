@@ -149,12 +149,14 @@
 
                 <!-- 天氣資訊 (item 9) — 風速、降雨、站名、颱風警告 -->
                 <div id="weather-widget" class="stat-item flex items-center gap-2 hidden" title="即時天氣資訊 (Open-Meteo)">
-                    <span id="weather-station" class="text-xs text-gray-500 font-medium hidden">📍</span>
+                    <span id="weather-station" class="text-xs text-gray-500 hidden">📍</span>
+                    <span id="weather-station-sep" class="text-gray-400 hidden">|</span>
                     <span id="weather-wind" class="text-sm">-- m/s 風</span>
                     <span class="text-gray-400">|</span>
                     <span id="weather-rain" class="text-sm">-- mm 雨/24h</span>
                     <span id="weather-typhoon-badge" class="hidden ml-1 px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 cursor-pointer" title="點擊查看颱風詳情">颱風</span>
                     <span id="weather-stale-marker" class="hidden text-xs text-gray-400" title="資料延遲">⚠️</span>
+                    <span id="weather-update-time" class="text-xs text-gray-400 hidden" title="最後更新時間"></span>
                 </div>
 
                 <!-- 警報速率火花線 (item 11) — 過去 4 小時，每 15 分鐘一格 -->
@@ -703,11 +705,37 @@
                 const cfg = await r.json();
                 weatherStationName = cfg.station_name || '';
                 const stationEl = document.getElementById('weather-station');
-                if (stationEl && weatherStationName) {
-                    stationEl.textContent = '📍 ' + weatherStationName;
-                    stationEl.classList.remove('hidden');
+                const sepEl = document.getElementById('weather-station-sep');
+                if (stationEl) {
+                    if (weatherStationName) {
+                        stationEl.textContent = '📍 ' + weatherStationName;
+                        stationEl.classList.remove('hidden');
+                        if (sepEl) sepEl.classList.remove('hidden');
+                    } else {
+                        // Show lat/lon if no station name
+                        const lat = cfg.site_lat ? cfg.site_lat.toFixed(3) : '--';
+                        const lon = cfg.site_lon ? cfg.site_lon.toFixed(3) : '--';
+                        stationEl.textContent = '📍 ' + lat + ',' + lon;
+                        stationEl.classList.remove('hidden');
+                        if (sepEl) sepEl.classList.remove('hidden');
+                    }
                 }
             } catch (e) { console.warn('[Weather] Failed to load config:', e); }
+        }
+
+        function formatWeatherUpdateTime(isoTime) {
+            if (!isoTime) return '';
+            try {
+                const d = new Date(isoTime);
+                const now = new Date();
+                const diffMs = now - d;
+                const diffMin = Math.floor(diffMs / 60000);
+                if (diffMin < 1) return '剛更新';
+                if (diffMin < 60) return diffMin + '分前';
+                const diffHour = Math.floor(diffMin / 60);
+                if (diffHour < 24) return diffHour + '時前';
+                return d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+            } catch (e) { return ''; }
         }
 
         async function refreshWeatherWidget() {
@@ -729,11 +757,13 @@
                 weatherRetryCount = 0;  // Reset on success
                 widget.classList.remove('hidden');
 
-                // Station name display
+                // Station name display (also called here for resilience)
                 const stationEl = document.getElementById('weather-station');
+                const sepEl = document.getElementById('weather-station-sep');
                 if (stationEl && weatherStationName) {
                     stationEl.textContent = '📍 ' + weatherStationName;
                     stationEl.classList.remove('hidden');
+                    if (sepEl) sepEl.classList.remove('hidden');
                 }
 
                 // Wind display with color thresholds
@@ -753,6 +783,14 @@
                     rainEl.textContent = rf + ' mm 雨/24h';
                     if (data.rainfall_24h_mm >= 30) rainEl.className = 'text-sm font-bold text-blue-600 bg-blue-50 px-1 rounded';
                     else rainEl.className = 'text-sm';
+                }
+
+                // Last update time
+                const updateTimeEl = document.getElementById('weather-update-time');
+                if (updateTimeEl && data.obs_time) {
+                    const label = formatWeatherUpdateTime(data.obs_time);
+                    updateTimeEl.textContent = label;
+                    updateTimeEl.classList.remove('hidden');
                 }
 
                 // Stale marker
@@ -784,7 +822,11 @@
         }
         setInterval(refreshWeatherWidget, 600_000);
         setInterval(refreshTyphoonBadge, 600_000);
-        document.addEventListener('DOMContentLoaded', () => { loadWeatherConfig(); refreshWeatherWidget(); refreshTyphoonBadge(); });
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadWeatherConfig();  // Wait for station name before refreshing widget
+            refreshWeatherWidget();
+            refreshTyphoonBadge();
+        });
 
         // 格式化運行時間
         function formatUptime(seconds) {
