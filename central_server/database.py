@@ -207,6 +207,34 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # Migration: if table exists with old NOT NULL columns, recreate it
+    try:
+        cursor.execute("PRAGMA table_info(weather_config);")
+        cols = cursor.fetchall()
+        # Check if any column has NOT NULL constraint (pk=0 means not primary key)
+        for col in cols:
+            if col[1] in ('site_lat', 'site_lon') and col[3] == 1:  # notnull=1
+                logger.info("Migrating weather_config table to allow NULL values")
+                cursor.execute("ALTER TABLE weather_config RENAME TO weather_config_old;")
+                cursor.execute("""
+                    CREATE TABLE weather_config (
+                        id        INTEGER PRIMARY KEY CHECK (id = 1),
+                        site_lat  REAL DEFAULT NULL,
+                        site_lon  REAL DEFAULT NULL,
+                        station_name TEXT DEFAULT NULL,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                # Copy data, converting old defaults to NULL (user should reconfigure)
+                cursor.execute("""
+                    INSERT INTO weather_config (id, site_lat, site_lon, station_name, updated_at)
+                    SELECT id, NULL, NULL, NULL, updated_at FROM weather_config_old;
+                """)
+                cursor.execute("DROP TABLE weather_config_old;")
+                break
+    except sqlite3.OperationalError:
+        pass  # Table doesn't exist yet, no migration needed
+
     # Don't insert default row - empty means SMG Macau only
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
@@ -302,6 +330,8 @@ def _create_tables_postgresql(conn):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
+    # Migration: clear any existing lat/lon values to NULL (user should reconfigure)
+    conn.execute(sqlalchemy.text("UPDATE weather_config SET site_lat = NULL, site_lon = NULL, station_name = NULL WHERE id = 1;"))
     # Don't insert default row - empty means SMG Macau only
 
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
