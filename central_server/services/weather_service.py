@@ -116,14 +116,18 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
         r.encoding = 'utf-8'
         root = ET.fromstring(r.text)
 
-        # Find the station with matching name
-        for station in root.findall('.//Custom'):
-            name = station.findtext('StationName', default='')
+        # SMG schema: one <Custom> contains many <WeatherReport>/<station>;
+        # each <station> has <stationname> + readings. Earlier code looked for
+        # <StationName> directly under <Custom>, which silently never matched.
+        for station in root.findall('.//WeatherReport/station'):
+            name = station.findtext('stationname', default='') or ''
             if station_name in name:
-                # Extract weather data
+                # SMG returns missing readings as empty XML elements
+                # (<Temperature/>) which findtext yields as None or "". Treat
+                # both — plus the legacy sentinels — as missing.
                 def _get_float(tag: str, default: float = 0.0) -> float:
                     val = station.findtext(tag)
-                    if val is None or val in ('-', 'X', 'x', '-99'):
+                    if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
                         return default
                     try:
                         return float(val)
@@ -132,7 +136,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
 
                 def _get_int(tag: str, default: int = 0) -> int:
                     val = station.findtext(tag)
-                    if val is None or val in ('-', 'X', 'x', '-99'):
+                    if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
                         return default
                     try:
                         return int(float(val))
