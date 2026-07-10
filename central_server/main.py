@@ -313,28 +313,46 @@ async def logout(request: Request):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard_page(request: Request, status: str = None, node: str = None, page: int = 1):
-    """Main dashboard page."""
+async def dashboard_page(request: Request):
+    """Serve the SDPRS V2 SPA shell.
+
+    The dashboard is now a React single-page app under /static/spa. This
+    route returns the SPA index.html with the logged-in username injected
+    so the client-side data layer can use it. All data comes from /api/*.
+
+    The legacy Jinja dashboard logic is kept available at /dashboard-legacy
+    so previously-bookmarked links / saved searches still work.
+    """
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login")
+    import json as _json
+    spa_index = BASE_DIR / "static" / "spa" / "index.html"
+    html = spa_index.read_text(encoding="utf-8")
+    html = html.replace("__SDPRS_USER__", _json.dumps(user))
+    return HTMLResponse(html)
+
+
+@app.get("/dashboard-legacy", response_class=HTMLResponse)
+async def dashboard_page_legacy(request: Request, status: str = None, node: str = None, page: int = 1):
+    """Legacy Jinja dashboard (preserved for direct links from before the V2 rollout)."""
     user = request.session.get("user")
     if not user:
         return RedirectResponse(url="/login")
 
     ctx = _get_dashboard_context(request)
 
-    # Sprint A item 5: default to active-only filter when no ?status given.
-    # Sentinel "all" means user explicitly opted out of the default.
     DEFAULT_ACTIVE_FILTER = "PENDING_VIDEO,PENDING,ACKNOWLEDGED"
     if status is None:
         effective_status = DEFAULT_ACTIVE_FILTER
         display_status = DEFAULT_ACTIVE_FILTER
     elif status == "all":
-        effective_status = None  # no filter -> all rows
+        effective_status = None
         display_status = "all"
     else:
         effective_status = status
         display_status = status
 
-    # Use list_events for pagination and filtering
     db = get_db()
     result = list_events(db, status_filter=effective_status, node_filter=node, page=page, page_size=20)
 
@@ -345,7 +363,6 @@ async def dashboard_page(request: Request, status: str = None, node: str = None,
     ctx["current_status_filter"] = display_status
     ctx["current_node_filter"] = node or ""
 
-    # Get available node IDs for filter dropdown
     try:
         all_nodes_db = get_all_nodes()
         ctx["available_nodes"] = [n["node_id"] for n in all_nodes_db] if all_nodes_db else []
