@@ -73,7 +73,10 @@ def decide(readings, timing, ctrl_state, config):
       - rain_wet_elapsed_ms:   continuous ms rain has been asserted.
       - burst_phase_elapsed_ms: reset to 0 when next_state["burst_phase"] changes.
       - conflict_elapsed_ms:   reset to 0 when the conflict first latches.
-      - rest_elapsed_ms:       reset to 0 when next_state["resting"] goes False->True.
+      - rest_elapsed_ms:       continuous-OFF duration — reset to 0 on each ON->OFF
+                               and cleared while ON, so the max-runtime rest measures
+                               ACTUAL rest (a conflict burst that runs the pump
+                               mid-rest restarts it rather than consuming it).
     Failing to reset a timer on its transition causes chatter (e.g. the conflict
     burst flapping every tick), so this contract is load-bearing.
     """
