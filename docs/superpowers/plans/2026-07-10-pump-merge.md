@@ -1691,7 +1691,16 @@ git commit -m "feat(server): parse pump sensor flags, keep-alive on malformed pa
 - [ ] **Step 1: Write the failing test** (`central_server/tests/test_ws_loop_capture.py`)
 
 ```python
-from services.mqtt_service import MQTTService
+# mqtt_service.py uses package-relative imports (`from ..config import ...`),
+# so import it as a central_server submodule with the sdprs repo root on
+# sys.path. A top-level `from services...` import raises "attempted relative
+# import beyond top-level package". Monkeypatch targets use the same FQ path.
+# (No conftest.py in the repo — matches tests/test_alerts_api.py.)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from central_server.services.mqtt_service import MQTTService
 
 
 def test_broadcast_uses_stored_loop(monkeypatch):
@@ -1699,7 +1708,7 @@ def test_broadcast_uses_stored_loop(monkeypatch):
     sentinel = object()
     svc._loop = sentinel
     captured = {}
-    monkeypatch.setattr("services.websocket_service.broadcast_from_sync",
+    monkeypatch.setattr("central_server.services.websocket_service.broadcast_from_sync",
                         lambda loop, msg: captured.update(loop=loop, msg=msg))
     svc._broadcast_pump_status("pump_node_01", {"pump_state": "ON", "water_level": 80,
                                                 "raining": True, "sensor_conflict": False})
@@ -1712,7 +1721,7 @@ def test_broadcast_noop_without_loop(monkeypatch):
     svc = MQTTService.__new__(MQTTService)
     svc._loop = None
     called = {"n": 0}
-    monkeypatch.setattr("services.websocket_service.broadcast_from_sync",
+    monkeypatch.setattr("central_server.services.websocket_service.broadcast_from_sync",
                         lambda *a, **k: called.__setitem__("n", called["n"] + 1))
     svc._broadcast_pump_status("n", {})
     assert called["n"] == 0
@@ -1720,7 +1729,7 @@ def test_broadcast_noop_without_loop(monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd sdprs/central_server && pytest tests/test_ws_loop_capture.py -v`
+Run: `cd sdprs/central_server && python -m pytest tests/test_ws_loop_capture.py -v`
 Expected: FAIL — `_broadcast_pump_status` is a no-op / `_loop` unused.
 
 - [ ] **Step 3a: Edit `MQTTService.__init__`** to accept and store a loop, and update `init_mqtt_service`:
@@ -1776,7 +1785,7 @@ Apply the same `self._loop`-based pattern to `_mark_node_offline`'s broadcast (r
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd sdprs/central_server && pytest tests/test_ws_loop_capture.py -v`
+Run: `cd sdprs/central_server && python -m pytest tests/test_ws_loop_capture.py -v`
 Expected: 2 passed.
 
 - [ ] **Step 5: Commit**
