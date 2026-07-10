@@ -1006,6 +1006,34 @@ Expected: FAIL — `ImportError: cannot import name 'build_payload'`.
 
 - [ ] **Step 3: Edit `edge_pump/mqtt_client.py`** — add `build_payload`, rewrite `publish_status`, add LWT + bounded socket + ticks throttle.
 
+First, make the device-only imports desktop-tolerant so the pure `build_payload` can be imported under CPython pytest (`network`/`umqtt` do not exist on the desktop). Replace the top-level import block:
+
+```python
+import network
+import time
+import json
+from umqtt.simple import MQTTClient
+```
+
+with:
+
+```python
+import time
+import json
+
+# Device-only imports, guarded so this module still imports under desktop
+# CPython (pytest) for the pure build_payload(). network/umqtt are used only
+# inside methods that run on the ESP32.
+try:
+    import network
+except ImportError:
+    network = None
+try:
+    from umqtt.simple import MQTTClient
+except ImportError:
+    MQTTClient = None
+```
+
 Add at module level (after `format_timestamp`):
 
 ```python
