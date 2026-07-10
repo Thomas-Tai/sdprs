@@ -798,6 +798,21 @@ def test_burst_phase_timer_resets_on_phase_change():
     pc.apply({"action": "OFF", "next_state": st2, "flags": {}, "reason": "X"})
     t = pc.snapshot_timing({"level_pct": None, "raining": None})
     assert t["burst_phase_elapsed_ms"] == 0
+
+
+def test_rest_timer_tracks_off_duration_and_restarts_after_on():
+    clk = FakeClock()
+    pc = make_pc(clk)
+    pc.apply(control_logic._mk("ON", dict(pc.ctrl_state), {}, "X"))
+    clk.advance(1000)
+    pc.apply(control_logic._mk("OFF", dict(pc.ctrl_state), {}, "X"))
+    clk.advance(2000)
+    t = pc.snapshot_timing({"level_pct": None, "raining": None})
+    assert t["rest_elapsed_ms"] == 2000     # continuous-off duration = actual rest
+    # pump turning back ON clears the rest/off clock
+    pc.apply(control_logic._mk("ON", dict(pc.ctrl_state), {}, "X"))
+    t = pc.snapshot_timing({"level_pct": None, "raining": None})
+    assert t["rest_elapsed_ms"] is None
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -835,7 +850,7 @@ class PumpController:
 
         self.ctrl_state = control_logic.initial_state()
         self._on_since = None
-        self._last_off = None
+        self._off_since = None      # start of the current continuous-OFF period
         self._rain_wet_since = None
         self._level_low_since = None
         self._burst_phase_since = None
@@ -883,6 +898,10 @@ class PumpController:
             "level_low_elapsed_ms": self._elapsed(self._level_low_since, now),
             "burst_phase_elapsed_ms": self._elapsed(self._burst_phase_since, now),
             "conflict_elapsed_ms": self._elapsed(self._conflict_since, now),
+            # rest_elapsed_ms = continuous-OFF duration, so decide()'s max-runtime
+            # rest (Layer 3) measures ACTUAL rest: a conflict burst that runs the
+            # pump mid-rest clears _off_since and restarts the rest.
+            "rest_elapsed_ms": self._elapsed(self._off_since, now),
         }
 
     def apply(self, decision):
@@ -898,12 +917,14 @@ class PumpController:
             self._apply_relay("OFF")
         # HOLD: leave relay as-is
 
-        # pump-on timer
-        if nxt["pump_state"] == "ON" and prev["pump_state"] != "ON":
-            self._on_since = now
-        elif nxt["pump_state"] != "ON":
+        # pump-on / continuous-off timers
+        if nxt["pump_state"] == "ON":
+            if prev["pump_state"] != "ON":
+                self._on_since = now
+            self._off_since = None            # running -> not resting
+        else:  # nxt OFF
             if prev["pump_state"] == "ON":
-                self._last_off = now
+                self._off_since = now          # ON->OFF: start the rest/off clock
             self._on_since = None
 
         # burst-phase timer
@@ -922,7 +943,7 @@ class PumpController:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd sdprs/edge_pump && pytest tests/test_pump_controller.py -v`
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Step 5: Run the whole firmware suite**
 
