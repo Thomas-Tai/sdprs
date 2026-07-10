@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
 
 def initial_state():
     return {"pump_state": "OFF", "conflict_latched": False,
-            "conflict_holdoff": False, "burst_phase": None}
+            "conflict_holdoff": False, "burst_phase": None, "resting": False}
 
 
 def _rain_confirmed(readings, timing, config):
@@ -63,6 +63,20 @@ def _mk(action, state, flags, reason):
 
 
 def decide(readings, timing, ctrl_state, config):
+    """Return a pump decision from readings, elapsed-ms timers, and state.
+
+    Caller (pump_controller) contract — the pure function relies on the caller
+    to maintain these elapsed-ms timers in `timing` and reset them on the
+    transitions decide() signals via `next_state`:
+      - pump_on_elapsed_ms:    reset to 0 when the pump transitions to ON.
+      - level_low_elapsed_ms:  continuous ms the analog level has been <= low.
+      - rain_wet_elapsed_ms:   continuous ms rain has been asserted.
+      - burst_phase_elapsed_ms: reset to 0 when next_state["burst_phase"] changes.
+      - conflict_elapsed_ms:   reset to 0 when the conflict first latches.
+      - rest_elapsed_ms:       reset to 0 when next_state["resting"] goes False->True.
+    Failing to reset a timer on its transition causes chatter (e.g. the conflict
+    burst flapping every tick), so this contract is load-bearing.
+    """
     state = dict(ctrl_state)
     float_dry = readings.get("float_dry")  # True=dry(danger), False=safe, None=off
     rain_confirmed = _rain_confirmed(readings, timing, config)
@@ -125,10 +139,20 @@ def decide(readings, timing, ctrl_state, config):
         flags["dry_run_protect"] = True
         return _mk("OFF", state, flags, DRY_RUN_OFF)
 
-    # ---- Layer 3: max-runtime duty cycle ----
+    # ---- Layer 3: max-runtime duty cycle (bounded rest prevents burnout) ----
+    # After max_run_ms of continuous running the pump must rest for rest_ms
+    # before any lower layer may restart it. `resting` is latched here and
+    # cleared only once rest_elapsed_ms reaches rest_ms.
     on_elapsed = timing.get("pump_on_elapsed_ms")
-    if state.get("pump_state") == "ON" and on_elapsed is not None \
+    if state.get("resting"):
+        rest_elapsed = timing.get("rest_elapsed_ms") or 0
+        if rest_elapsed < config["rest_ms"]:
+            flags["max_runtime_rest"] = True
+            return _mk("OFF", state, flags, MAX_RUNTIME_REST)
+        state["resting"] = False  # rest complete -> resume normal control
+    elif state.get("pump_state") == "ON" and on_elapsed is not None \
             and on_elapsed >= config["max_run_ms"]:
+        state["resting"] = True
         flags["max_runtime_rest"] = True
         return _mk("OFF", state, flags, MAX_RUNTIME_REST)
 
@@ -147,8 +171,13 @@ def decide(readings, timing, ctrl_state, config):
             # digital-only mode: high_water already cleared -> stop
             return _mk("OFF", state, flags, STANDBY)
         low_elapsed = timing.get("level_low_elapsed_ms")
+        # Confirmed rain suppresses the analog dry-off ONLY when the float
+        # switch is present and reports safe (float_dry is False). With the
+        # float disabled (None) the analog reading is the sole dry protection,
+        # so rain must not override it.
+        rain_holds_pump = rain_confirmed and (float_dry is False)
         if level <= config["low_threshold"] and not high_water \
-                and not rain_confirmed and low_elapsed is not None \
+                and not rain_holds_pump and low_elapsed is not None \
                 and low_elapsed >= config["dry_off_delay_ms"]:
             return _mk("OFF", state, flags, STANDBY)
         return _mk("HOLD", state, flags, HOLD)
