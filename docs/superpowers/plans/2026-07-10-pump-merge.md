@@ -1559,8 +1559,18 @@ git commit -m "feat(server): persist raining + sensor_conflict on pump_readings 
 - [ ] **Step 1: Write the failing test** (`central_server/tests/test_handle_pump_status.py`)
 
 ```python
+# mqtt_service.py uses package-relative imports (`from ..config import ...`),
+# so it MUST be imported as `central_server.services.mqtt_service` with the
+# sdprs repo root on sys.path — a top-level `from services...` import raises
+# "attempted relative import beyond top-level package". Monkeypatch targets
+# must use the same fully-qualified module path. (No conftest.py in the repo;
+# matches tests/test_alerts_api.py's self-insert pattern.)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
 import json
-from services.mqtt_service import MQTTService
+from central_server.services.mqtt_service import MQTTService
 
 
 def make_service():
@@ -1575,8 +1585,8 @@ def make_service():
 
 def test_pump_status_stores_new_flags(monkeypatch):
     svc = make_service()
-    monkeypatch.setattr("services.mqtt_service.upsert_node", lambda *a, **k: None)
-    monkeypatch.setattr("services.mqtt_service.insert_pump_reading", lambda *a, **k: None)
+    monkeypatch.setattr("central_server.services.mqtt_service.upsert_node", lambda *a, **k: None)
+    monkeypatch.setattr("central_server.services.mqtt_service.insert_pump_reading", lambda *a, **k: None)
     payload = json.dumps({"node_id": "pump_node_01", "pump_state": "ON",
                           "water_level": 82.4, "raining": True,
                           "sensor_conflict": True, "dry_run_protect": False})
