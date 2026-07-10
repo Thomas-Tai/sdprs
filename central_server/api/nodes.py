@@ -42,6 +42,9 @@ class NodeStatus(BaseModel):
     stream_status: Optional[Dict[str, Any]] = None
     pump_state: Optional[str] = None
     water_level: Optional[float] = None
+    raining: Optional[bool] = None
+    sensor_conflict: Optional[bool] = None
+    dry_run_protect: Optional[bool] = None
     is_stale: bool = False
     snapshot_timestamp: Optional[str] = None
     # Surfaced from the DB so the V2 dashboard can render pump health without
@@ -147,6 +150,9 @@ async def list_nodes(
             stream_status=state.get("stream_status"),
             pump_state=state.get("pump_state") if node_type == "pump" else None,
             water_level=state.get("water_level") if node_type == "pump" else None,
+            raining=state.get("raining") if node_type == "pump" else None,
+            sensor_conflict=state.get("sensor_conflict") if node_type == "pump" else None,
+            dry_run_protect=state.get("dry_run_protect") if node_type == "pump" else None,
             is_stale=is_stale,
             snapshot_timestamp=snapshot_timestamp,
             battery_voltage=db_row.get("battery_voltage"),

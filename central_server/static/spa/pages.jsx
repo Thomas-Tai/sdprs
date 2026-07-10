@@ -779,6 +779,14 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
         <span className="text-[10px] text-ink-muted bg-surface-elevated px-1.5 py-0.5 rounded font-mono">PUMP</span>
       </div>
 
+      {/* Sensor conflict — prominent critical banner, mirrors the glass-node critical alerts */}
+      {node.sensorConflict && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-sev-critical/15 border-b border-sev-critical/40 text-sev-critical text-xs font-semibold">
+          <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
+          <span>⚠ Sensor conflict — inspect float switch</span>
+        </div>
+      )}
+
       <div className="p-3 flex gap-3">
         {/* LEFT — Water tank gauge */}
         <div className="relative w-20 flex-shrink-0 bg-surface-base rounded border border-border-subtle overflow-hidden" style={{ height: compact ? '112px' : '140px' }}>
@@ -854,6 +862,18 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
               </span>
             </div>
           </div>
+
+          {/* Rain / dry-run protect badges */}
+          {(node.raining || node.dryRunProtect) && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {node.raining && (
+                <Pill tone="info" className="!h-5 !text-[10px]">🌧 Raining</Pill>
+              )}
+              {node.dryRunProtect && (
+                <Pill tone="warn" className="!h-5 !text-[10px]">Dry-run protect (pump held OFF)</Pill>
+              )}
+            </div>
+          )}
 
           {/* Location footer */}
           <div className="flex items-center gap-1 text-[10px] text-ink-muted font-mono tnum pt-1 border-t border-border-subtle/60">
@@ -1307,6 +1327,31 @@ const PumpsPage = () => {
                   {p.status === 'critical' ? '嚴重' : danger ? '高水位' : warn ? '警戒' : '正常'}
                 </span>
               </div>
+
+              {/* Sensor conflict — prominent critical banner, mirrors the glass-node critical alerts */}
+              {p.sensorConflict && (
+                <div className="flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded border border-sev-critical/40 bg-sev-critical/15 text-sev-critical text-xs font-semibold">
+                  <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
+                  <span>⚠ Sensor conflict — inspect float switch</span>
+                </div>
+              )}
+
+              {/* Rain / dry-run protect badges */}
+              {(p.raining || p.dryRunProtect) && (
+                <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+                  {p.raining && (
+                    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-sev-info/15 text-sev-info border-sev-info/30">
+                      🌧 Raining
+                    </span>
+                  )}
+                  {p.dryRunProtect && (
+                    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-sev-warn/15 text-sev-warn border-sev-warn/30">
+                      Dry-run protect (pump held OFF)
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* Water level visualization */}
               <div className="relative h-32 bg-surface-base border border-border-subtle rounded overflow-hidden">
                 <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${danger ? 'bg-sev-critical/40' : warn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
