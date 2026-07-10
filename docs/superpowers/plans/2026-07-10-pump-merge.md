@@ -1471,8 +1471,15 @@ git commit -m "feat(pump): thin guarded orchestrator with WDT-after-success + gc
 - [ ] **Step 1: Write the failing test** (`central_server/tests/test_pump_readings_columns.py`)
 
 ```python
-import os, tempfile
-import database
+# This project's tests import via the `central_server.` package prefix with
+# the sdprs repo root on sys.path (matches tests/test_alerts_api.py and
+# tests/test_retention.py — there is no conftest.py). A bare `import database`
+# does NOT resolve under pytest here.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from central_server import database
 
 
 def test_insert_pump_reading_accepts_new_flags(tmp_path, monkeypatch):
