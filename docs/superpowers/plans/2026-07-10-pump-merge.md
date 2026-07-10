@@ -1802,37 +1802,67 @@ git commit -m "fix(server): capture event loop for MQTT-thread WS broadcasts (pu
 ### Task 11: Monitor-wall pump card — rain / dry-run / sensor-conflict
 
 **Files:**
-- Modify: the SPA pump-card component in `central_server/static/spa/` (locate first — likely `components.jsx` or `pages.jsx`)
-- Verify: manual (the SPA transpiles JSX in-browser via Babel; no automated test harness exists)
+- Modify: `central_server/api/nodes.py` — add three fields to the `NodeStatus` response model and populate them in `list_nodes()`.
+- Modify: `central_server/static/spa/api.jsx` — map the three new REST fields in `mapNode()`.
+- Modify: `central_server/static/spa/pages.jsx` — render three indicators in `PumpCard` and in the inline card inside `PumpsPage`.
+- Verify: manual (the SPA transpiles JSX in-browser via Babel; no automated test harness exists).
 
 **Interfaces:**
-- Consumes: the WebSocket `{"type":"pump_status","data":{...raining, sensor_conflict, dry_run_protect...}}` message from Task 10, and `pump_state`/`water_level` already handled today.
+- Consumes: `mqtt_service.node_states[node_id]` already carries `raining` / `sensor_conflict` / `dry_run_protect` (set in Task 9). This task surfaces them through the REST `/api/nodes` pipeline that already feeds the pump card.
 
-- [ ] **Step 1: Locate the pump card.** Search the SPA for the existing pump rendering:
+> **Architecture note — do NOT touch the WebSocket handler.** The V2 SPA has NO per-field WS merge. `app.jsx`'s socket callback special-cases `ping`/`new_alert` and otherwise calls `refresh()` — a full REST re-fetch of `/api/nodes` that replaces node state wholesale. That is exactly how `pump_state`/`water_level` already reach the card. The new flags must therefore be added to the REST payload and mapped into the node object; merging them into WS state alone would flash on-screen and then be overwritten by the next `refresh()` (which fires on every WS message and every 20 s). These fields live only in the in-memory `node_states` (Task 8 added them to the `pump_readings` time-series table, NOT the `nodes` table), so `list_nodes()` must source them from `state`, not from the DB row.
 
-Run: `cd sdprs/central_server && grep -rn "pump_state\|water_level\|pump" static/spa/*.jsx`
-Identify the component that renders a pump node card and the WebSocket message handler that updates node state.
+- [ ] **Step 1: Locate the render sites** (already mapped — verify before editing):
 
-- [ ] **Step 2: Extend the WS handler** so `pump_status` messages merge `raining`, `sensor_conflict`, `dry_run_protect` into the node's state object (alongside the existing `pump_state`/`water_level` merge).
+Run: `cd sdprs/central_server && grep -rn "water_level\|PumpCard\|pump" static/spa/*.jsx api/nodes.py`
+- REST model + query: `NodeStatus` (`api/nodes.py`, model ~L31-52) and `list_nodes()` (~L137-155; note the existing `pump_state=state.get(...) if node_type == "pump" else None` and `water_level=...` lines — the new fields go right beside them).
+- SPA row→node mapper: `mapNode()` (`static/spa/api.jsx`, return object ~L166-188).
+- Pump cards: `PumpCard` (`static/spa/pages.jsx` ~L758-875, used by the monitor-wall grid) and the inline card inside `PumpsPage` (`pages.jsx` ~L1283-1360, the dedicated 抽水站 page — it does NOT reuse `PumpCard`).
 
-- [ ] **Step 3: Add three indicators to the pump card**, driven by that state:
-  - Rain: a small "🌧 Raining" / "Dry" badge from `raining`.
-  - Dry-run protection: a "Dry-run protect (pump held OFF)" badge when `dry_run_protect` is true.
-  - Sensor conflict: a prominent CRITICAL maintenance banner ("⚠ Sensor conflict — inspect float switch") when `sensor_conflict` is true, styled like existing critical alerts.
+- [ ] **Step 2: Surface the fields over REST** (`central_server/api/nodes.py`).
 
-Use the codebase's existing badge/alert classes (match the glass-node critical styling already present) — do not introduce a new styling system.
+Add to the `NodeStatus` model, right after the existing `water_level` field:
 
-- [ ] **Step 4: Manual verification.** Start the server, publish a synthetic pump_status via the broker with `sensor_conflict:true` and confirm the card shows the banner live (no page reload); then `raining:true`/`dry_run_protect:true` and confirm the badges. Example:
+```python
+    raining: Optional[bool] = None
+    sensor_conflict: Optional[bool] = None
+    dry_run_protect: Optional[bool] = None
+```
+
+In `list_nodes()`, right after the existing `water_level=state.get("water_level") if node_type == "pump" else None,` line, add (source from the in-memory `state`, not the DB row):
+
+```python
+            raining=state.get("raining") if node_type == "pump" else None,
+            sensor_conflict=state.get("sensor_conflict") if node_type == "pump" else None,
+            dry_run_protect=state.get("dry_run_protect") if node_type == "pump" else None,
+```
+
+- [ ] **Step 3: Map the fields in the SPA** (`central_server/static/spa/api.jsx`, `mapNode()` return object). Add, matching the file's existing camelCase convention (e.g. `cycleHistory`, `snoozeMin`):
+
+```js
+    raining: n.raining,
+    sensorConflict: n.sensor_conflict,
+    dryRunProtect: n.dry_run_protect,
+```
+
+- [ ] **Step 4: Render three indicators** in BOTH `PumpCard` (`pages.jsx` ~L758-875) and the inline card in `PumpsPage` (`pages.jsx` ~L1283-1360), driven by `node.raining` / `node.dryRunProtect` / `node.sensorConflict`:
+  - Rain: a small "🌧 Raining" badge when `raining` is true (a muted "Dry" state is optional).
+  - Dry-run protection: a "Dry-run protect (pump held OFF)" badge when `dryRunProtect` is true.
+  - Sensor conflict: a prominent CRITICAL maintenance banner ("⚠ Sensor conflict — inspect float switch") when `sensorConflict` is true.
+
+Reuse the SPA's existing severity system — the `Pill` component (`components.jsx`, e.g. `tone="critical" dot pulse`) and/or the repeated `bg-sev-{tone}/15 text-sev-{tone} border-sev-{tone}/30` + `animate-live-blink` classes already used throughout `pages.jsx`. Do NOT introduce a new styling system, and match the glass-node critical styling already present.
+
+- [ ] **Step 5: Manual verification.** Start the server, publish a synthetic pump_status via the broker with `sensor_conflict:true` and confirm the card shows the banner live (the WS message triggers `refresh()`, which now returns the field); then `raining:true`/`dry_run_protect:true` and confirm the badges. Example:
 
 ```bash
 mosquitto_pub -h <broker> -t "sdprs/edge/pump_node_01/pump_status" \
   -m '{"node_id":"pump_node_01","pump_state":"OFF","water_level":10,"raining":true,"sensor_conflict":true,"dry_run_protect":false,"reason":"CONFLICT_LATCH_OFF"}'
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add central_server/static/spa/
+git add central_server/api/nodes.py central_server/static/spa/
 git commit -m "feat(dashboard): pump card shows rain, dry-run protection, sensor-conflict alert"
 ```
 
