@@ -73,7 +73,13 @@ async def lifespan(app: FastAPI):
     logger.info("Initialized latest_snapshots dict")
 
     # Initialize MQTT service
-    mqtt_svc = init_mqtt_service()
+    # Capture uvicorn's running event loop ONCE here (lifespan runs on it) so
+    # the MQTT background thread can hand WebSocket broadcasts to it via
+    # broadcast_from_sync(self._loop, data) instead of the fragile
+    # asyncio.get_event_loop() call from a non-main thread.
+    import asyncio
+    loop = asyncio.get_running_loop()
+    mqtt_svc = init_mqtt_service(loop=loop)
     mqtt_svc.start()
     app.state.mqtt_service = mqtt_svc
     logger.info("MQTT service started")

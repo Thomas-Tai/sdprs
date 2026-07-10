@@ -50,15 +50,19 @@ class MQTTService:
     PUMP_OFFLINE_TIMEOUT = 30   # Pump node offline after 30 seconds (more critical)
     OFFLINE_CHECK_INTERVAL = 10 # Check for offline nodes every 10 seconds
     
-    def __init__(self, db_module=None):
+    def __init__(self, db_module=None, loop=None):
         """
         Initialize the MQTT service.
-        
+
         Args:
             db_module: Database module for node operations (optional, for testing)
+            loop: The asyncio event loop captured at FastAPI startup, used to
+                hand WebSocket broadcasts from this sync/thread service over
+                to the running event loop (optional, for testing)
         """
         self.settings = get_settings()
         self.db = db_module
+        self._loop = loop
         
         # Node states stored in memory
         self.node_states: Dict[str, Dict[str, Any]] = {}
@@ -306,7 +310,24 @@ class MQTTService:
         self._broadcast_pump_status(node_id, data)  # see Task 10
 
     def _broadcast_pump_status(self, node_id, data):
-        pass
+        if self._loop is None:
+            return
+        try:
+            from .websocket_service import broadcast_from_sync
+            broadcast_from_sync(self._loop, {
+                "type": "pump_status",
+                "data": {
+                    "node_id": node_id,
+                    "pump_state": data.get("pump_state"),
+                    "water_level": data.get("water_level"),
+                    "raining": data.get("raining"),
+                    "sensor_conflict": data.get("sensor_conflict"),
+                    "dry_run_protect": data.get("dry_run_protect"),
+                    "timestamp": data.get("timestamp", datetime.utcnow().isoformat()),
+                },
+            })
+        except Exception as ws_error:
+            logger.warning(f"WebSocket broadcast failed: {ws_error}")
     
     def _handle_stream_status(self, node_id: str, payload: str):
         """
@@ -510,20 +531,15 @@ class MQTTService:
             logger.warning(f"Node {node_id} marked OFFLINE (no heartbeat for {elapsed:.0f}s)")
         
         # WebSocket broadcast for offline status
-        try:
-            from .websocket_service import broadcast_from_sync
-            import asyncio
+        if self._loop is not None:
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = None
-            if loop:
-                broadcast_from_sync(loop, {
+                from .websocket_service import broadcast_from_sync
+                broadcast_from_sync(self._loop, {
                     "type": "node_status",
                     "data": {"node_id": node_id, "status": "OFFLINE"}
                 })
-        except Exception as ws_err:
-            logger.debug(f"WebSocket broadcast for offline failed: {ws_err}")
+            except Exception as ws_err:
+                logger.debug(f"WebSocket broadcast for offline failed: {ws_err}")
 
 
 # Singleton instance
@@ -540,18 +556,20 @@ def get_mqtt_service() -> Optional[MQTTService]:
     return _mqtt_service
 
 
-def init_mqtt_service(db_module=None) -> MQTTService:
+def init_mqtt_service(db_module=None, loop=None) -> MQTTService:
     """
     Initialize and start the MQTT service.
-    
+
     Args:
         db_module: Database module for node operations
-        
+        loop: The asyncio event loop captured at FastAPI startup, used for
+            WebSocket broadcasts from the MQTT background thread
+
     Returns:
         The MQTTService instance
     """
     global _mqtt_service
-    _mqtt_service = MQTTService(db_module=db_module)
+    _mqtt_service = MQTTService(db_module=db_module, loop=loop)
     return _mqtt_service
 
 
