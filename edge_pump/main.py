@@ -1,181 +1,165 @@
 # -*- coding: utf-8 -*-
-"""
-SDPRS 水泵節點 - 主程式
-Smart Disaster Prevention Response System - Main Program
-
-這是 ESP32 水泵控制系統的主程式入口。
-
-核心功能：
-1. 每秒讀取水位感測器
-2. 根據滞後邏輯控制繼電器（80% ON / 20% OFF）
-3. 每 10 秒透過 MQTT 回報狀態
-4. 硬體看門狗 (WDT) 防止程式卡死
-5. NTP 時間同步（在 WiFi 連線成功後執行，分散開機衝擊）
-
-設計原則：離線自治 — WiFi/MQTT 失敗不影響水泵控制。
-
-Usage:
-    將此檔案上傳至 ESP32，命名為 main.py，上電後自動執行。
-"""
+"""SDPRS 水泵節點主程式 — 精簡協調層。
+讀感測器 -> decide() -> 執行 -> 發布(盡力) -> 餵狗(僅在成功迭代後)。
+離線自治：所有網路操作為盡力而為且有時限，永不影響控制。"""
 
 import time
-# WDT 導入在下方根據配置決定
-
-# 載入配置
-from config import (
-    SSID, WIFI_PASS, MQTT_BROKER, MQTT_PORT, NODE_ID, MQTT_TOPIC_STATUS,
-    HIGH_THRESHOLD, LOW_THRESHOLD,
-    RELAY_PIN, LED_RED_PIN, LED_GREEN_PIN, ADC_PIN,
-    BATTERY_ADC_PIN, POWER_SOURCE_PIN,  # Item 12
-    PUBLISH_INTERVAL, POLL_INTERVAL,
-    WDT_ENABLED, WDT_TIMEOUT,
-    MQTT_USERNAME, MQTT_PASSWORD
-)
-
-# 載入模組
-from water_sensor import init_adc, read_water_level
+import config
+import control_logic
+from sensors import SensorSet
 from pump_controller import PumpController
 from mqtt_client import PumpMQTTClient
 
 
-def sync_ntp():
-    """
-    同步 NTP 時間。嘗試多個伺服器，失敗不影響主程式。
-    回傳 True 表示成功。呼叫方無論成功與否均不再重試。
-    """
-    import ntptime
-    ntptime.timeout = 5  # 延長超時至 5 秒
-    servers = ["pool.ntp.org", "time.cloudflare.com", "216.239.35.0"]
-    for srv in servers:
-        try:
-            ntptime.host = srv
-            ntptime.settime()
-            t = time.localtime()
-            print("[MAIN] NTP synced via %s: %04d-%02d-%02d %02d:%02d:%02d UTC" % (
-                srv, t[0], t[1], t[2], t[3], t[4], t[5]))
-            return True
-        except Exception as e:
-            print("[MAIN] NTP %s failed: %s" % (srv, str(e)))
-    print("[MAIN] NTP unavailable, timestamps will be inaccurate")
-    return False
+def build_config():
+    return {
+        "high_threshold": float(config.HIGH_THRESHOLD),
+        "low_threshold": float(config.LOW_THRESHOLD),
+        "rain_on_threshold": float(config.RAIN_ON_THRESHOLD),
+        "rain_confirm_ms": config.RAIN_CONFIRM_MS,
+        "dry_off_delay_ms": config.DRY_OFF_DELAY_MS,
+        "burst_on_ms": config.BURST_ON_MS,
+        "burst_cooldown_ms": config.BURST_COOLDOWN_MS,
+        "conflict_max_ms": config.CONFLICT_MAX_MS,
+        "max_run_ms": config.MAX_RUN_MS,
+        "rest_ms": config.REST_MS,
+    }
+
+
+def build_sensor_config():
+    return {
+        "level_enabled": config.LEVEL_ENABLED,
+        "float_enabled": config.FLOAT_ENABLED,
+        "rain_enabled": config.RAIN_ENABLED,
+        "high_water_enabled": config.HIGH_WATER_ENABLED,
+        "float_active_low": config.FLOAT_ACTIVE_LOW,
+        "rain_active_low": config.RAIN_ACTIVE_LOW,
+        "high_water_active_low": config.HIGH_WATER_ACTIVE_LOW,
+        "debounce_ms": config.DEBOUNCE_MS,
+        "adc_pin": config.ADC_PIN, "float_pin": config.FLOAT_PIN,
+        "rain_pin": config.RAIN_PIN, "high_water_pin": config.HIGH_WATER_PIN,
+    }
+
+
+def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb):
+    """One control-loop body. Pure of hardware except via injected objects."""
+    readings = sensor_set.read_all()
+    timing = pump.snapshot_timing(readings)
+    decision = control_logic.decide(readings, timing, pump.ctrl_state, cfg)
+    pump.apply(decision)
+    publish_cb(pump_state=pump.state, water_level=readings.get("level_pct") or 0.0,
+               flags=decision["flags"], reason=decision["reason"])
+    return decision
 
 
 def main():
-    """
-    主程式入口。
-    """
-    print("[MAIN] SDPRS Pump Node starting...")
-    print("[MAIN] Node ID: %s" % NODE_ID)
-
-    # 1. 初始化 ADC
-    print("[MAIN] Initializing ADC on pin %d..." % ADC_PIN)
-    adc = init_adc(ADC_PIN)
-
-    # Item 12: 電池監測（選用 — 若引腳未接線則跳過）
-    battery_adc = None
-    power_source_pin = None
-    try:
-        if BATTERY_ADC_PIN:
-            battery_adc = init_adc(BATTERY_ADC_PIN)
-            print("[MAIN] Battery ADC initialized on pin %d" % BATTERY_ADC_PIN)
-        if POWER_SOURCE_PIN:
-            power_source_pin = machine.Pin(POWER_SOURCE_PIN, machine.Pin.IN)
-            print("[MAIN] Power source pin initialized on pin %d" % POWER_SOURCE_PIN)
-    except Exception as e:
-        print("[MAIN] Battery/power pins unavailable: %s (continuing without)" % str(e))
-
-    # 2. 初始化水泵控制器
-    print("[MAIN] Initializing pump controller...")
-    pump = PumpController(RELAY_PIN, LED_RED_PIN, LED_GREEN_PIN)
-    print("[MAIN] Pump initial state: %s" % pump.state)
-
-    # 3. 初始化 MQTT 客戶端
-    print("[MAIN] Initializing MQTT client...")
-    mqtt = PumpMQTTClient(
-        ssid=SSID,
-        password=WIFI_PASS,
-        broker=MQTT_BROKER,
-        port=MQTT_PORT,
-        node_id=NODE_ID,
-        topic=MQTT_TOPIC_STATUS,
-        username=MQTT_USERNAME,
-        mqtt_password=MQTT_PASSWORD
-    )
-
-    # 4. 看門狗（可選）
+    print("[MAIN] SDPRS Pump Node starting (merged firmware)...")
     wdt = None
-    if WDT_ENABLED:
-        from machine import WDT
-        wdt = WDT(timeout=WDT_TIMEOUT)
-        print("[MAIN] Hardware watchdog enabled (%dms timeout)" % WDT_TIMEOUT)
-    else:
-        print("[MAIN] Hardware watchdog disabled (dev mode)")
+    try:
+        import machine
+        if config.WDT_ENABLED:
+            from machine import WDT
+            wdt = WDT(timeout=config.WDT_TIMEOUT)
+        from sensors import build_readers
+        readers = build_readers(build_sensor_config())
+        relay = machine.Pin(config.RELAY_PIN, machine.Pin.OUT)
+        led_red = machine.Pin(config.LED_RED_PIN, machine.Pin.OUT)
+        led_green = machine.Pin(config.LED_GREEN_PIN, machine.Pin.OUT)
+        sensor_set = SensorSet(build_sensor_config(), readers, _RealClockShim())
+        pump = PumpController(relay, led_red, led_green, {"low_threshold": float(config.LOW_THRESHOLD)})
+        mqtt = PumpMQTTClient(
+            ssid=config.SSID, password=config.WIFI_PASS, broker=config.MQTT_BROKER,
+            port=config.MQTT_PORT, node_id=config.NODE_ID, topic=config.MQTT_TOPIC_STATUS,
+            retry_interval=config.WIFI_RETRY_INTERVAL,
+            username=config.MQTT_USERNAME, mqtt_password=config.MQTT_PASSWORD)
+        # Item 12: battery/power monitoring (optional — preserve existing telemetry;
+        # inner try so an unwired pin disables it without boot-looping the node).
+        battery_adc = None
+        power_source_pin = None
+        try:
+            if config.BATTERY_ADC_PIN:
+                battery_adc = machine.ADC(machine.Pin(config.BATTERY_ADC_PIN))
+                battery_adc.atten(machine.ADC.ATTN_11DB)
+                battery_adc.width(machine.ADC.WIDTH_12BIT)
+            if config.POWER_SOURCE_PIN:
+                power_source_pin = machine.Pin(config.POWER_SOURCE_PIN, machine.Pin.IN)
+        except Exception as e:
+            print("[MAIN] Battery/power pins unavailable: %s (continuing)" % str(e))
+    except Exception as e:
+        print("[MAIN] Init failed, resetting: %s" % str(e))
+        import machine
+        machine.reset()
+        return
 
-    # 5. 計時器
+    cfg = build_config()
     last_publish = time.ticks_ms()
-    ntp_synced = False  # NTP 將在 WiFi 首次連線後執行
+    ntp_synced = False
 
-    print("[MAIN] Entering main loop...")
-    print("[MAIN] HIGH_THRESHOLD=%d%%, LOW_THRESHOLD=%d%%" % (HIGH_THRESHOLD, LOW_THRESHOLD))
+    def publish_cb(pump_state, water_level, flags, reason):
+        nonlocal last_publish, ntp_synced
+        now = time.ticks_ms()
+        if time.ticks_diff(now, last_publish) >= config.PUBLISH_INTERVAL * 1000:
+            battery_voltage, power_source = _read_power(battery_adc, power_source_pin)
+            mqtt.publish_status(pump_state, water_level, flags, reason,
+                                battery_voltage, power_source)
+            last_publish = now
+            if not ntp_synced and mqtt._wifi_connected:
+                _sync_ntp(); ntp_synced = True
+        mqtt.check_msg()
 
-    # 主迴圈
     while True:
         try:
-            # 餘狗
+            run_iteration(sensor_set, pump, mqtt, cfg, publish_cb)
             if wdt:
-                wdt.feed()
-
-            # 1. 讀取水位
-            water_level = read_water_level(adc)
-
-            # 2. 滞後控制邏輯
-            if pump.state == "OFF" and water_level >= HIGH_THRESHOLD:
-                pump.turn_on()
-                print("[PUMP] ON - water_level=%.1f%%" % water_level)
-
-            elif pump.state == "ON" and water_level <= LOW_THRESHOLD:
-                pump.turn_off()
-                print("[PUMP] OFF - water_level=%.1f%%" % water_level)
-
-            # 注意：水位在 LOW_THRESHOLD~HIGH_THRESHOLD 之間時，不做任何切換
-
-            # 3. MQTT 狀態發布（每 PUBLISH_INTERVAL 秒）
-            now = time.ticks_ms()
-            if time.ticks_diff(now, last_publish) >= PUBLISH_INTERVAL * 1000:
-                # Item 12: 讀取電池電壓和電源來源
-                battery_voltage = None
-                power_source = None
-                if battery_adc:
-                    # 電池電壓 = ADC 值 * 3.3V / 4095，再乘分壓比（假設 1:2 分壓）
-                    raw = battery_adc.read()
-                    battery_voltage = raw * 3.3 / 4095.0 * 2.0  # 假設 1:2 分壓比，需按實際接線調整
-                if power_source_pin:
-                    power_source = "mains" if power_source_pin.value() else "battery"
-                mqtt.publish_status(pump.state, water_level, battery_voltage, power_source)
-                last_publish = now
-                # NTP 同步：WiFi 馒次連線後執行一次（不管成功與否都不重試）
-                if not ntp_synced and mqtt._wifi_connected:
-                    sync_ntp()
-                    ntp_synced = True
-
-            # 4. MQTT 訊息檢查（非阻塞）
-            mqtt.check_msg()
-
-            # 5. 等待下一輪
-            time.sleep(POLL_INTERVAL)
-
+                wdt.feed()           # feed ONLY after a full successful iteration
+            import gc
+            gc.collect()
+            time.sleep(config.POLL_INTERVAL)
         except KeyboardInterrupt:
-            print("[MAIN] Shutting down...")
-            pump.turn_off()
+            off_state = dict(pump.ctrl_state)
+            off_state["pump_state"] = "OFF"
+            pump.apply({"action": "OFF", "next_state": off_state,
+                        "flags": {}, "reason": "STANDBY"})
             mqtt.disconnect()
             break
-
         except Exception as e:
-            # 任何未預期錯誤：印出但不中斷主迴圈
             print("[ERROR] %s" % str(e))
-            time.sleep(POLL_INTERVAL)
+            time.sleep(config.POLL_INTERVAL)
 
 
-# 程式入口
+class _RealClockShim:
+    def ticks_ms(self):
+        return time.ticks_ms()
+
+    def ticks_diff(self, a, b):
+        return time.ticks_diff(a, b)
+
+
+def _sync_ntp():
+    import ntptime
+    ntptime.timeout = 5
+    for srv in ("pool.ntp.org", "time.cloudflare.com", "216.239.35.0"):
+        try:
+            ntptime.host = srv
+            ntptime.settime()
+            return True
+        except Exception as e:
+            print("[MAIN] NTP %s failed: %s" % (srv, str(e)))
+    return False
+
+
+def _read_power(battery_adc, power_source_pin):
+    """Best-effort battery voltage + power source. Device-only; returns
+    (None, None) when the pins are unwired so build_payload omits the fields."""
+    battery_voltage = None
+    power_source = None
+    if battery_adc is not None:
+        raw = battery_adc.read()
+        battery_voltage = raw * 3.3 / 4095.0 * 2.0  # 1:2 divider — tune per wiring
+    if power_source_pin is not None:
+        power_source = "mains" if power_source_pin.value() else "battery"
+    return battery_voltage, power_source
+
+
 if __name__ == "__main__":
     main()
