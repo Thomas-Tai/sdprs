@@ -550,24 +550,27 @@ def test_analog_inversion_and_clamp():
 
 def test_digital_debounce_holds_until_stable():
     clk = FakeClock()
-    # active_low: raw 0 => asserted True
-    rd = make_reader([1, 0, 0, 0])  # idle then asserted
+    # active_low: raw 0 => asserted True. The debounce hold is measured from the
+    # first asserted read (t=1000), so the flip lands at t=1000+2500 = 3500.
+    rd = make_reader([1, 0, 0, 0, 0])  # idle then asserted and held
     s = sensors.DigitalSensor(rd, active_low=True, clock=clk, debounce_ms=2500)
     assert s.update() is False           # t=0 idle baseline
-    clk.advance(1000); assert s.update() is False   # 1s of asserted < debounce
-    clk.advance(1000); assert s.update() is False   # 2s < debounce
-    clk.advance(1000); assert s.update() is True    # 3s >= debounce -> flips
+    clk.advance(1000); assert s.update() is False   # t=1000 asserted begins, 0ms held
+    clk.advance(1000); assert s.update() is False   # t=2000 1000ms held < debounce
+    clk.advance(1000); assert s.update() is False   # t=3000 2000ms held < debounce
+    clk.advance(500);  assert s.update() is True    # t=3500 2500ms held -> flips
 
 
 def test_digital_bounce_resets_timer():
     clk = FakeClock()
-    rd = make_reader([1, 0, 1, 0, 0, 0])
+    rd = make_reader([1, 0, 1, 0, 0, 0])  # assert, bounce back to idle, then hold asserted
     s = sensors.DigitalSensor(rd, active_low=True, clock=clk, debounce_ms=2500)
-    s.update()                       # idle
-    clk.advance(1000); s.update()    # asserted 1s
-    clk.advance(1000); s.update()    # bounced back to idle -> timer resets
-    clk.advance(1000); assert s.update() is False   # only 1s of new asserted
-    clk.advance(2000); assert s.update() is True
+    assert s.update() is False           # t=0 idle baseline
+    clk.advance(1000); assert s.update() is False   # t=1000 first asserted read
+    clk.advance(1000); assert s.update() is False   # t=2000 bounced to idle -> candidate resets
+    clk.advance(1000); assert s.update() is False   # t=3000 asserted again -> timer restarts here
+    clk.advance(2000); assert s.update() is False   # t=5000 only 2000ms held < debounce
+    clk.advance(500);  assert s.update() is True    # t=5500 2500ms held -> flips
 
 
 def test_read_all_disabled_sensors_are_none():
