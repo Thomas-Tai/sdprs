@@ -262,63 +262,51 @@ class MQTTService:
         """
         try:
             data = json.loads(payload)
-            
-            with self._lock:
-                # Update node state in memory
-                self.node_states[node_id] = {
-                    "type": "pump",
-                    "status": "ONLINE",
-                    "last_heartbeat": datetime.utcnow(),
-                    "pump_state": data.get("pump_state", "UNKNOWN"),
-                    "water_level": data.get("water_level"),
-                }
-            
-            # Update database
-            metadata = {
-                "pump_state": data.get("pump_state"),
-                "water_level": data.get("water_level")
-            }
-            
-            if self.db:
-                self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
-            else:
-                upsert_node(node_id, "pump", "ONLINE", metadata)
-
-            # Persist time-series sample for history charts
-            try:
-                ts = data.get("timestamp") or datetime.utcnow().isoformat()
-                insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"))
-            except Exception as ts_err:
-                logger.warning(f"Failed to persist pump reading for {node_id}: {ts_err}")
-
-            logger.debug(f"Pump status from {node_id}: state={data.get('pump_state')}")
-            
-            # WebSocket broadcast to connected clients
-            try:
-                from .websocket_service import broadcast_from_sync
-                import asyncio
-                
-                # Get the event loop from app state or current
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.get_running_loop()
-                
-                if loop:
-                    broadcast_from_sync(loop, {
-                        "type": "pump_status",
-                        "data": {
-                            "node_id": node_id,
-                            "pump_state": data.get("pump_state"),
-                            "water_level": data.get("water_level"),
-                            "timestamp": data.get("timestamp", datetime.utcnow().isoformat())
-                        }
-                    })
-            except Exception as ws_error:
-                logger.warning(f"WebSocket broadcast failed: {ws_error}")
-            
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Invalid pump_status JSON from {node_id}: {e}")
+            with self._lock:
+                st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
+                st["last_heartbeat"] = datetime.utcnow()  # garbled-but-alive != offline
+                self.node_states[node_id] = st
+            return
+        if not isinstance(data, dict):
+            logger.error(f"pump_status payload not an object from {node_id}")
+            return
+
+        with self._lock:
+            self.node_states[node_id] = {
+                "type": "pump", "status": "ONLINE",
+                "last_heartbeat": datetime.utcnow(),
+                "pump_state": data.get("pump_state", "UNKNOWN"),
+                "water_level": data.get("water_level"),
+                "raining": data.get("raining"),
+                "float_safe": data.get("float_safe"),
+                "high_water": data.get("high_water"),
+                "sensor_conflict": data.get("sensor_conflict"),
+                "dry_run_protect": data.get("dry_run_protect"),
+                "reason": data.get("reason"),
+            }
+
+        metadata = {"pump_state": data.get("pump_state"), "water_level": data.get("water_level"),
+                    "raining": data.get("raining"), "sensor_conflict": data.get("sensor_conflict")}
+        if self.db:
+            self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
+        else:
+            upsert_node(node_id, "pump", "ONLINE", metadata)
+
+        try:
+            ts = data.get("timestamp") or datetime.utcnow().isoformat()
+            insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"),
+                                raining=data.get("raining"), sensor_conflict=data.get("sensor_conflict"))
+        except Exception as ts_err:
+            logger.warning(f"Failed to persist pump reading for {node_id}: {ts_err}")
+
+        logger.debug(f"Pump status from {node_id}: state={data.get('pump_state')}")
+
+        self._broadcast_pump_status(node_id, data)  # see Task 10
+
+    def _broadcast_pump_status(self, node_id, data):
+        pass
     
     def _handle_stream_status(self, node_id: str, payload: str):
         """
