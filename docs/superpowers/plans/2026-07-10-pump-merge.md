@@ -1343,6 +1343,19 @@ def main():
             port=config.MQTT_PORT, node_id=config.NODE_ID, topic=config.MQTT_TOPIC_STATUS,
             retry_interval=config.WIFI_RETRY_INTERVAL,
             username=config.MQTT_USERNAME, mqtt_password=config.MQTT_PASSWORD)
+        # Item 12: battery/power monitoring (optional — preserve existing telemetry;
+        # inner try so an unwired pin disables it without boot-looping the node).
+        battery_adc = None
+        power_source_pin = None
+        try:
+            if config.BATTERY_ADC_PIN:
+                battery_adc = machine.ADC(machine.Pin(config.BATTERY_ADC_PIN))
+                battery_adc.atten(machine.ADC.ATTN_11DB)
+                battery_adc.width(machine.ADC.WIDTH_12BIT)
+            if config.POWER_SOURCE_PIN:
+                power_source_pin = machine.Pin(config.POWER_SOURCE_PIN, machine.Pin.IN)
+        except Exception as e:
+            print("[MAIN] Battery/power pins unavailable: %s (continuing)" % str(e))
     except Exception as e:
         print("[MAIN] Init failed, resetting: %s" % str(e))
         import machine
@@ -1357,7 +1370,9 @@ def main():
         nonlocal last_publish, ntp_synced
         now = time.ticks_ms()
         if time.ticks_diff(now, last_publish) >= config.PUBLISH_INTERVAL * 1000:
-            mqtt.publish_status(pump_state, water_level, flags, reason)
+            battery_voltage, power_source = _read_power(battery_adc, power_source_pin)
+            mqtt.publish_status(pump_state, water_level, flags, reason,
+                                battery_voltage, power_source)
             last_publish = now
             if not ntp_synced and mqtt._wifi_connected:
                 _sync_ntp(); ntp_synced = True
@@ -1372,7 +1387,10 @@ def main():
             gc.collect()
             time.sleep(config.POLL_INTERVAL)
         except KeyboardInterrupt:
-            pump.apply(control_logic._mk("OFF", dict(pump.ctrl_state), {}, "STANDBY"))
+            off_state = dict(pump.ctrl_state)
+            off_state["pump_state"] = "OFF"
+            pump.apply({"action": "OFF", "next_state": off_state,
+                        "flags": {}, "reason": "STANDBY"})
             mqtt.disconnect()
             break
         except Exception as e:
@@ -1399,6 +1417,19 @@ def _sync_ntp():
         except Exception as e:
             print("[MAIN] NTP %s failed: %s" % (srv, str(e)))
     return False
+
+
+def _read_power(battery_adc, power_source_pin):
+    """Best-effort battery voltage + power source. Device-only; returns
+    (None, None) when the pins are unwired so build_payload omits the fields."""
+    battery_voltage = None
+    power_source = None
+    if battery_adc is not None:
+        raw = battery_adc.read()
+        battery_voltage = raw * 3.3 / 4095.0 * 2.0  # 1:2 divider — tune per wiring
+    if power_source_pin is not None:
+        power_source = "mains" if power_source_pin.value() else "battery"
+    return battery_voltage, power_source
 
 
 if __name__ == "__main__":
