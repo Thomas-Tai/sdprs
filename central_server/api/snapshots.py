@@ -15,7 +15,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
 
-from ..auth import verify_api_key
+from ..auth import verify_api_key, verify_node_id
 
 # Configure logging
 logger = logging.getLogger("snapshots_api")
@@ -120,6 +120,10 @@ async def receive_snapshot(
     - **node_id**: The edge node identifier
     - **Body**: Raw JPEG bytes (Content-Type: image/jpeg)
     """
+    # Enforce the edge node_id allowlist on the path node_id (before reading
+    # the body / storing). No-op when ALLOWED_NODE_IDS is empty -> backward compatible.
+    verify_node_id(node_id)
+
     # Read the raw JPEG bytes from request body
     jpeg_bytes = await request.body()
     

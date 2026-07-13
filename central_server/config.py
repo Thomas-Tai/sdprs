@@ -53,6 +53,10 @@ if PYDANTIC_AVAILABLE:
         - DB_PATH: SQLite database path (used when DATABASE_URL is empty)
         - RETENTION_DAYS: Number of days to retain MP4 files
         - STORAGE_PATH: MP4 storage root directory
+        - COOKIE_SECURE: Add Secure attribute to session cookie (True behind HTTPS)
+        - ALLOWED_NODE_IDS: Comma-separated edge node_id allowlist (empty = allow all)
+        - LOGIN_MAX_ATTEMPTS: Failed logins per IP before lockout
+        - LOGIN_LOCKOUT_SECONDS: Lockout duration after too many failed logins
         """
 
         # Required settings
@@ -80,6 +84,17 @@ if PYDANTIC_AVAILABLE:
         # Server binding
         SERVER_HOST: str = "0.0.0.0"
         SERVER_PORT: int = 8000
+
+        # Auth hardening (T2 trust-boundary slice)
+        # COOKIE_SECURE: set True in production behind HTTPS so the session
+        #   cookie carries the Secure attribute. Default False for HTTP LAN.
+        # ALLOWED_NODE_IDS: comma-separated allowlist of edge node_ids permitted
+        #   to POST alerts/snapshots. Empty = disabled (accept any node_id).
+        # LOGIN_MAX_ATTEMPTS / LOGIN_LOCKOUT_SECONDS: per-IP login throttle.
+        COOKIE_SECURE: bool = False
+        ALLOWED_NODE_IDS: str = ""
+        LOGIN_MAX_ATTEMPTS: int = 5
+        LOGIN_LOCKOUT_SECONDS: int = 300
 
         # Weather integration (CWA Open Data) — see Plan/weather_integration.md
         # Empty CWA_API_KEY disables the entire weather feature (gate).
@@ -151,6 +166,10 @@ else:
         STORAGE_PATH: str
         SERVER_HOST: str
         SERVER_PORT: int
+        COOKIE_SECURE: bool
+        ALLOWED_NODE_IDS: str
+        LOGIN_MAX_ATTEMPTS: int
+        LOGIN_LOCKOUT_SECONDS: int
         CWA_API_KEY: str
         CWA_STATION_ID: str
         CWA_TOWNSHIP: str
@@ -176,6 +195,10 @@ else:
             self.STORAGE_PATH = _get_env_str("STORAGE_PATH", "./storage")
             self.SERVER_HOST = _get_env_str("SERVER_HOST", "0.0.0.0")
             self.SERVER_PORT = _get_env_int("SERVER_PORT", 8000)
+            self.COOKIE_SECURE = _get_env_bool("COOKIE_SECURE", False)
+            self.ALLOWED_NODE_IDS = _get_env_str("ALLOWED_NODE_IDS", "")
+            self.LOGIN_MAX_ATTEMPTS = _get_env_int("LOGIN_MAX_ATTEMPTS", 5)
+            self.LOGIN_LOCKOUT_SECONDS = _get_env_int("LOGIN_LOCKOUT_SECONDS", 300)
             self.CWA_API_KEY = _get_env_str("CWA_API_KEY", "")
             self.CWA_STATION_ID = _get_env_str("CWA_STATION_ID", "C0Z100")
             self.CWA_TOWNSHIP = _get_env_str("CWA_TOWNSHIP", "新北市新店區")

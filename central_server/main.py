@@ -13,6 +13,8 @@ This is the main entry point for the central server, providing:
 import logging
 import os
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +39,7 @@ from .database import (
 from .services.event_service import get_event_counts, list_events
 import time as _time
 from .config import get_settings
+from .auth import authenticate_user
 
 # Configure logging
 logging.basicConfig(
@@ -154,7 +157,13 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,
     session_cookie="sdprs_session",
-    max_age=86400  # 24 hours
+    max_age=86400,  # 24 hours
+    same_site="lax",  # mitigate CSRF on the session cookie
+    # Only mark the cookie Secure (HTTPS-only) when COOKIE_SECURE is enabled.
+    # Default False keeps the current HTTP LAN deployment working; set True
+    # once the dashboard is served over TLS. httponly=True is Starlette's
+    # SessionMiddleware default (no parameter needed).
+    https_only=get_settings().COOKIE_SECURE,
 )
 
 # Get the directory where this file is located
@@ -269,6 +278,16 @@ def _get_dashboard_context(request: Request) -> dict:
     }
 
 
+# ===== Login throttle (per-process, in-memory) =====
+# Brute-force mitigation for the single dashboard password. Maps client IP ->
+# list of recent FAILED-attempt monotonic timestamps. This state lives only in
+# this worker process and RESETS on restart, which is acceptable for the
+# single-node, single-worker uvicorn MVP. A multi-worker / multi-node
+# deployment would need a shared store (e.g. Redis) instead.
+_login_attempts: dict[str, list[float]] = {}
+_login_attempts_lock = threading.Lock()
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Login page."""
@@ -277,18 +296,52 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login(request: Request):
-    """Handle login form submission."""
+    """Handle login form submission.
+
+    Rate-limited per client IP: after LOGIN_MAX_ATTEMPTS failures within
+    LOGIN_LOCKOUT_SECONDS, further attempts are rejected with 429 without even
+    checking credentials. A successful login clears the IP's failure counter.
+    """
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
 
     settings = get_settings()
-    if username == settings.DASHBOARD_USER and password == settings.DASHBOARD_PASS:
+    max_attempts = getattr(settings, "LOGIN_MAX_ATTEMPTS", 5)
+    window = getattr(settings, "LOGIN_LOCKOUT_SECONDS", 300)
+
+    # Use a monotonic clock so lockout windows are immune to wall-clock jumps.
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+
+    with _login_attempts_lock:
+        # Prune failures older than the lockout window for this IP.
+        recent = [t for t in _login_attempts.get(ip, []) if t > now - window]
+        _login_attempts[ip] = recent
+        locked = len(recent) >= max_attempts
+
+    if locked:
+        # Too many recent failures from this IP: reject before touching creds.
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "嘗試次數過多，請稍後再試"},
+            status_code=429,
+        )
+
+    if authenticate_user(username, password):
+        # Success clears this IP's failure history.
+        with _login_attempts_lock:
+            _login_attempts.pop(ip, None)
         request.session["user"] = username
         request.session["login_at"] = datetime.utcnow().isoformat()  # item 18
         from .services.audit_service import log_action, ACTION_LOGIN
         log_action(username, ACTION_LOGIN)
         return RedirectResponse(url="/", status_code=303)
+
+    # Record this failure against the IP.
+    with _login_attempts_lock:
+        _login_attempts.setdefault(ip, []).append(now)
 
     return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤"})
 

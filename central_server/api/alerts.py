@@ -18,7 +18,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
-from ..auth import verify_api_key, verify_api_key_or_session, get_current_user
+from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id
 from ..database import get_db, insert_event, get_event, update_event_status
 from ..config import get_settings
 from ..services.websocket_service import ws_manager
@@ -109,6 +109,10 @@ async def create_alert(
     - **audio_db_peak**: Audio peak level in decibels
     - **audio_freq_peak_hz**: Audio peak frequency in Hertz
     """
+    # Enforce the edge node_id allowlist on the client-supplied node_id.
+    # No-op (allow all) when ALLOWED_NODE_IDS is empty -> backward compatible.
+    verify_node_id(alert.node_id)
+
     logger.info(f"Creating alert from node {alert.node_id}")
     
     # Insert event into database
