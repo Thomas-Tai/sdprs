@@ -94,30 +94,83 @@ function App() {
     setTimeout(() => setToast(null), 3000);
   }, []);
 
-  // Pull fresh alerts/nodes from the server and push them into React state.
-  const refresh = useCallbackA(async () => {
-    try {
-      const r = await window.SDPRS_API.refreshLive();
-      setAlerts(r.alerts);
-      setNodes(r.nodes);
-      setLiveSec(0);
-    } catch (e) {
-      console.warn('[SDPRS] refresh failed', e);
+  // --- Live-refresh coalescing + in-flight guard ----------------------------
+  // Every inbound WS event wants fresh data, but a bare refresh() per event
+  // multiplies into a request storm during an alert burst (refreshLive() = 4+
+  // GETs plus one /cycles per pump). Three entry points now share ONE guarded
+  // runner so refreshLive() NEVER runs concurrently and bursts collapse:
+  //   • refresh()         — forced + awaitable, for user actions (ack/resolve/…)
+  //   • scheduleRefresh() — 300ms trailing-debounce, for WS events + 20s poll
+  // The mutable guard lives in refs (not state) so it neither triggers a
+  // re-render nor goes stale inside the memoized callbacks below.
+  const refreshInFlight = useRefA(null);  // Promise of the active run, else null
+  const refreshPending = useRefA(false);  // work arrived mid-flight → run once more
+  const refreshDebounce = useRefA(null);  // scheduleRefresh() trailing-debounce timer
+
+  // The single guarded runner. In-flight guard: if a run is already active we do
+  // NOT start a parallel one — we mark the run "dirty" (refreshPending) and hand
+  // back the in-flight promise, so awaiters still wait for fresh data. Exactly
+  // ONE trailing run then fires after the active run settles, guaranteeing the
+  // latest server state is eventually fetched with no missed updates.
+  const runRefresh = useCallbackA(() => {
+    if (refreshInFlight.current) {
+      refreshPending.current = true;
+      return refreshInFlight.current;
     }
+    const p = (async () => {
+      try {
+        const r = await window.SDPRS_API.refreshLive();
+        setAlerts(r.alerts);
+        setNodes(r.nodes);
+        setLiveSec(0);
+      } catch (e) {
+        console.warn('[SDPRS] refresh failed', e);
+      } finally {
+        refreshInFlight.current = null;
+        if (refreshPending.current) {
+          refreshPending.current = false;
+          await runRefresh(); // trailing run: pick up state that changed mid-flight
+        }
+      }
+    })();
+    refreshInFlight.current = p;
+    return p;
   }, []);
 
-  // Live updates: refresh on every relevant WebSocket event, with a slow poll
-  // as a safety net (it also keeps alert ages current between events).
+  // Forced refresh for USER ACTIONS. runRefresh already reflects state AT/AFTER
+  // this call: if idle it runs immediately; if a run is in flight (possibly
+  // started before the user's mutation) it queues exactly one trailing run and
+  // returns a promise that resolves only after that trailing run completes — so
+  // `await refresh()` in onAck/onResolve/onSnooze always sees post-mutation data.
+  const refresh = runRefresh;
+
+  // Coalesced refresh for WS events + the safety-net poll. A burst of calls
+  // within 300ms collapses to a single runRefresh() (imperceptible to operators,
+  // but it removes the per-event storm multiplication).
+  const scheduleRefresh = useCallbackA(() => {
+    if (refreshDebounce.current) clearTimeout(refreshDebounce.current);
+    refreshDebounce.current = setTimeout(() => {
+      refreshDebounce.current = null;
+      runRefresh();
+    }, 300);
+  }, [runRefresh]);
+
+  // Live updates: coalesced refresh on every relevant WebSocket event, with a
+  // slow poll as a safety net (it also keeps alert ages current between events).
   useEffectA(() => {
     const stop = window.SDPRS_API.openSocket((msg) => {
       if (!msg || !msg.type) return;
       if (msg.type === 'ping') { setLiveSec(0); return; }
       if (msg.type === 'new_alert') setNewAlertBannerCount(c => c + 1);
-      refresh();
+      scheduleRefresh();
     });
-    const poll = setInterval(refresh, 20000);
-    return () => { stop(); clearInterval(poll); };
-  }, [refresh]);
+    const poll = setInterval(scheduleRefresh, 20000);
+    return () => {
+      stop();
+      clearInterval(poll);
+      if (refreshDebounce.current) { clearTimeout(refreshDebounce.current); refreshDebounce.current = null; }
+    };
+  }, [scheduleRefresh]);
 
   const findNextUnack = useCallbackA((currentId) => {
     const list = alerts.filter(a => a.state === 'pending' && a.id !== currentId);

@@ -516,16 +516,53 @@ class MQTTService:
     def _mark_node_offline(self, node_id: str, node_type: str, elapsed: float):
         """
         Mark a node as offline.
-        
+
+        Re-validates staleness under the lock BEFORE committing the OFFLINE
+        transition. `_check_offline_nodes` selects stale nodes under the lock,
+        then RELEASES it before calling this method — so between the scan and
+        this lock acquisition a heartbeat handler (`_handle_heartbeat` /
+        `_handle_pump_status`, which update `last_heartbeat` while holding
+        `self._lock`) can refresh the node. Re-checking under the same lock
+        makes the check-and-set atomic w.r.t. those handlers and prevents
+        false-offline flapping (spurious CRITICAL pump logs, operator noise,
+        WebSocket churn) when a fresh heartbeat arrived in the gap.
+
         Args:
             node_id: The node identifier
             node_type: Type of node ("glass" or "pump")
-            elapsed: Seconds since last heartbeat
+            elapsed: Seconds since last heartbeat (from the initial scan; the
+                value used below is recomputed under the lock so the log/DB
+                reflect the node's state at commit time)
         """
         with self._lock:
-            if node_id in self.node_states:
-                self.node_states[node_id]["status"] = "OFFLINE"
-        
+            state = self.node_states.get(node_id)
+            if state is None:
+                # Node was removed in the gap — nothing to do.
+                return
+            if state["status"] == "OFFLINE":
+                # Already offline (e.g. duplicate scan) — no re-transition.
+                return
+
+            # Re-read heartbeat + timeout and recompute elapsed under the lock.
+            last_heartbeat = state.get("last_heartbeat")
+            node_type = state.get("type", node_type)
+            timeout = self.PUMP_OFFLINE_TIMEOUT if node_type == "pump" else self.GLASS_OFFLINE_TIMEOUT
+
+            if last_heartbeat is None:
+                # No heartbeat recorded — can't confirm staleness; skip.
+                return
+            elapsed = (datetime.utcnow() - last_heartbeat).total_seconds()
+            if elapsed <= timeout:
+                # A fresh heartbeat arrived in the gap — abort the false offline.
+                logger.debug(
+                    f"Offline mark aborted for {node_id} — fresh heartbeat "
+                    f"({elapsed:.0f}s <= {timeout}s timeout)"
+                )
+                return
+
+            # Still genuinely stale — commit the OFFLINE transition in the lock.
+            state["status"] = "OFFLINE"
+
         # Update database
         if self.db:
             self.db.update_node_status(node_id, "OFFLINE")

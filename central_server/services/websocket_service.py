@@ -16,6 +16,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 # Configure logging
 logger = logging.getLogger("websocket_service")
 
+# Per-client send timeout for broadcast. A slow client that cannot accept a
+# frame within this window (e.g. a hung operator laptop whose TCP send buffer
+# is full) is treated as disconnected and removed, so it cannot block or stall
+# delivery to the other clients.
+SEND_TIMEOUT_SECONDS = 5.0
+
 
 class WebSocketManager:
     """
@@ -92,28 +98,47 @@ class WebSocketManager:
     async def broadcast(self, data: Dict[str, Any]) -> None:
         """
         Broadcast a message to all connected clients.
-        
-        If a client's send fails (disconnected), it will be removed from the pool.
-        
+
+        Sends are dispatched CONCURRENTLY with a per-client timeout so a single
+        slow or stalled client cannot block (head-of-line) delivery to the
+        others. If a client's send fails or times out, it is treated as
+        disconnected and removed from the pool.
+
         Args:
             data: The message data to broadcast (will be JSON serialized)
         """
         if not self._connections:
             return
-        
+
         # Create a list of connections to iterate (copy to avoid modification during iteration)
         async with self._lock:
             connections = list(self._connections)
-        
-        disconnected = []
-        
-        for websocket in connections:
+
+        async def _send(ws: WebSocket) -> Optional[WebSocket]:
+            """Send to one client; return the ws on failure, None on success."""
             try:
-                await websocket.send_json(data)
+                await asyncio.wait_for(ws.send_json(data), timeout=SEND_TIMEOUT_SECONDS)
+                return None
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"WebSocket send timed out after {SEND_TIMEOUT_SECONDS}s; "
+                    "treating client as disconnected"
+                )
+                return ws
             except Exception as e:
                 logger.warning(f"Failed to send to WebSocket: {e}")
-                disconnected.append(websocket)
-        
+                return ws
+
+        # Run all sends concurrently. _send swallows its own exceptions and
+        # returns the failed ws, so return_exceptions=True is belt-and-suspenders.
+        results = await asyncio.gather(
+            *(_send(ws) for ws in connections),
+            return_exceptions=True,
+        )
+
+        # A returned ws (non-None, non-exception) means that client failed.
+        disconnected = [r for r in results if r is not None and not isinstance(r, BaseException)]
+
         # Remove disconnected clients
         if disconnected:
             async with self._lock:
