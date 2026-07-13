@@ -266,7 +266,7 @@ class MQTTService:
         """
         try:
             data = json.loads(payload)
-        except (json.JSONDecodeError, ValueError) as e:
+        except ValueError as e:
             logger.error(f"Invalid pump_status JSON from {node_id}: {e}")
             with self._lock:
                 st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
@@ -275,6 +275,10 @@ class MQTTService:
             return
         if not isinstance(data, dict):
             logger.error(f"pump_status payload not an object from {node_id}")
+            with self._lock:
+                st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
+                st["last_heartbeat"] = datetime.utcnow()  # glitchy-but-alive != offline
+                self.node_states[node_id] = st
             return
 
         with self._lock:

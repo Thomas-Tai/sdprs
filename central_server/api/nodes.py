@@ -157,7 +157,7 @@ async def list_nodes(
             snapshot_timestamp=snapshot_timestamp,
             battery_voltage=db_row.get("battery_voltage"),
             power_source=db_row.get("power_source"),
-            snoozed_until=db_row.get("snoozed_until"),
+            snoozed_until=_ts_to_iso(db_row.get("snoozed_until")),
         )
 
         result.append(node_status)
@@ -174,7 +174,7 @@ async def list_nodes(
             location=row.get("location"),
             battery_voltage=row.get("battery_voltage"),
             power_source=row.get("power_source"),
-            snoozed_until=row.get("snoozed_until"),
+            snoozed_until=_ts_to_iso(row.get("snoozed_until")),
         ))
 
     logger.debug(f"Returning {len(result)} nodes")

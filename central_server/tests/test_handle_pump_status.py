@@ -39,3 +39,13 @@ def test_malformed_payload_still_bumps_last_seen():
     svc._handle_pump_status("pump_node_01", "{not json")
     assert "pump_node_01" in svc.node_states
     assert svc.node_states["pump_node_01"]["last_heartbeat"] is not None
+
+
+def test_non_dict_payload_still_bumps_last_seen():
+    """Valid JSON that isn't an object (e.g. a bare array) must still refresh
+    last_heartbeat, symmetric with the unparseable-JSON branch above — a
+    glitchy-but-alive node must not trip the 30s false-offline (spec §8#1)."""
+    svc = make_service()
+    svc._handle_pump_status("pump_node_01", json.dumps([1, 2, 3]))
+    assert "pump_node_01" in svc.node_states
+    assert svc.node_states["pump_node_01"]["last_heartbeat"] is not None
