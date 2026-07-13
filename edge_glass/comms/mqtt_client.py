@@ -127,6 +127,21 @@ class MQTTClient:
         """初始化 paho-mqtt 客戶端。"""
         self._client = mqtt.Client(client_id=f"sdprs-{self._node_id}")
 
+        # LWT: if this node drops ungracefully (crash / power loss), the broker
+        # publishes this offline marker to our heartbeat topic. The server's
+        # _handle_heartbeat treats `online: false` as an immediate OFFLINE,
+        # rather than waiting out the ~90s heartbeat timeout. retain=False so a
+        # stale will can't linger and flap the node offline on server restart.
+        try:
+            self._client.will_set(
+                topic_heartbeat(self._node_id),
+                json.dumps({"node_id": self._node_id, "status": "OFFLINE", "online": False}),
+                qos=0,
+                retain=False,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set MQTT LWT: {e}")
+
         # 設定自動重連
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
 

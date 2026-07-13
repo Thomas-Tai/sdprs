@@ -228,7 +228,15 @@ class MQTTService:
         """
         try:
             data = json.loads(payload)
-            
+
+            # LWT / offline marker: the edge node's Last-Will publishes to its own
+            # heartbeat topic when it drops ungracefully. Treat it as an immediate
+            # OFFLINE instead of a live heartbeat (which would wrongly mark ONLINE).
+            # This is an optimization on top of the ~90s heartbeat-timeout fallback.
+            if data.get("online") is False or data.get("status") == "OFFLINE":
+                self._handle_lwt_offline(node_id)
+                return
+
             with self._lock:
                 # Update node state in memory
                 self.node_states[node_id] = {
@@ -263,7 +271,44 @@ class MQTTService:
             
         except json.JSONDecodeError as e:
             logger.error(f"Invalid heartbeat JSON from {node_id}: {e}")
-    
+
+    def _handle_lwt_offline(self, node_id: str):
+        """Force a node OFFLINE from its Last-Will marker (ungraceful drop).
+        Unlike the heartbeat-timeout path this does NOT re-validate staleness —
+        an LWT means the node is definitively gone right now."""
+        with self._lock:
+            state = self.node_states.get(node_id)
+            node_type = (state or {}).get("type", "glass")
+            if state is None:
+                # Unknown node: create a minimal OFFLINE state.
+                self.node_states[node_id] = {"type": node_type, "status": "OFFLINE"}
+            elif state.get("status") == "OFFLINE":
+                return  # already offline — nothing to do
+            else:
+                state["status"] = "OFFLINE"
+
+        # DB update (mirror _mark_node_offline)
+        if self.db:
+            self.db.update_node_status(node_id, "OFFLINE")
+        else:
+            update_node_status(node_id, "OFFLINE")
+
+        if node_type == "pump":
+            logger.critical(f"Node {node_id} OFFLINE via Last-Will (ungraceful disconnect)")
+        else:
+            logger.warning(f"Node {node_id} OFFLINE via Last-Will (ungraceful disconnect)")
+
+        # WebSocket broadcast (mirror _mark_node_offline's exact idiom)
+        if self._loop is not None:
+            try:
+                from .websocket_service import broadcast_from_sync
+                broadcast_from_sync(self._loop, {
+                    "type": "node_status",
+                    "data": {"node_id": node_id, "status": "OFFLINE"}
+                })
+            except Exception as ws_err:
+                logger.debug(f"WebSocket broadcast for LWT offline failed: {ws_err}")
+
     def _handle_pump_status(self, node_id: str, payload: str):
         """
         Handle pump status message from edge node.
