@@ -1,9 +1,9 @@
 # SDPRS — Codebase Audit & Progress Ledger
 
 **Originally audited:** 2026-07-13 (evidence-based — every claim re-verified against the working tree)
-**Last updated:** 2026-07-13 — *after* the pump-merge merge/push, the Theme-6 glass-hardening + detector-health slices, the Theme-4 data-lifecycle slice, the Theme-2 auth-hardening slice, the Theme-5 observability slice, **and the Theme-3 glass-autonomy slice**.
+**Last updated:** 2026-07-13 — *after* all six theme slices + the non-blocking-capture impl, the `datetime.utcnow()` migration, **and a full verification audit** (which caught + fixed one doc-vs-code discrepancy: pump digital sensors were shipping ON despite the doc claiming OFF).
 **Repo:** `sdprs/` (its own git repo; parent folder is not versioned) · **Remote:** `github.com/Thomas-Tai/sdprs`
-**Current branch/commit:** `main` @ `3a61fef` (**1 ahead of `origin/main` @ `ae63e6e`** — `datetime.utcnow()` migration `3a61fef` not yet pushed; non-blocking-capture `34efdf6` + docs `ae63e6e` already pushed)
+**Current branch/commit:** `main` @ `71ec41a` (**1 ahead of `origin/main` @ `0e22538`** — pump sensor safe-default fix `71ec41a` not yet pushed; `utcnow` migration `3a61fef` + docs `0e22538` already pushed)
 
 > Canonical, living progress tracker for the `docs/superpowers` workstream.
 > Task-by-task execution detail for the pump-merge effort lives in
@@ -89,6 +89,7 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
     - **The trap:** `datetime.utcnow()` returns **naive** UTC; the codebase stores/compares naive-UTC timestamps and relies on `.isoformat()` having no tz suffix (retention delimiter logic, `last_heartbeat` math). A naive swap to `datetime.now(timezone.utc)` would add `+00:00` and silently break those paths — so the helper deliberately returns naive (`.replace(tzinfo=None)`), and `test_timeutil` locks that contract in.
     - All **32** production sites across 9 files migrated to `timeutil.utcnow()`. Pure refactor, zero behavior change (the pre-existing suite stayed green). Caught an aliased `_dt.utcnow()` in alerts.py that the name-based grep missed. Deprecation warnings **91 → 35** (remainder = test-file `utcnow` + Pydantic). Test files' `utcnow` left as-is (cosmetic, out of scope).
     - Tests: central_server **89 → 92** (+3 timeutil naive-UTC contract guards). Full repo **264 pass**.
+17. **Full verification audit (2026-07-13)** — independently re-verified every *shipped* claim in this doc against ground truth (git sync, 264-test run, per-fix symbol presence in production code, dead-code/negative/security claims, ESP32 deploy list, allowlist backward-compat). **All shipped features confirmed present + green.** One discrepancy found + fixed: **`edge_pump/config.py` shipped `FLOAT_ENABLED=True`/`RAIN_ENABLED=True`** while this doc claimed sensors "ship OFF / analog-only until commissioned" — an un-commissioned node could feed a miswired (valid-but-wrong) digital reading into `control_logic.decide()`. Defaulted both to **False** (`71ec41a`) so a fresh node runs analog-only until §6 bench polarity-verify; `sensors.py` None-degradation means zero logic change. (Also confirmed: `broadcast_node_status` genuinely dead, snapshot GET genuinely public [documented-open], no leaked WiFi pw / public broker in tracked non-doc files, 0 production `datetime.utcnow()`.)
 
 ---
 
@@ -159,7 +160,7 @@ All 11 tasks landed review-clean; the final whole-branch review + fixes are done
 **Remaining gates before FIELD-ENABLING the new sensors:**
 - ⚠️ **Hardware bench commissioning (spec §6)** — student sketch, wiring doc, and toolkit pinout disagree on pin/polarity. Bench-verify per-sensor polarity + raw ADC at known dry/full states. Manual rollout step, **not done**.
 - ⚠️ **No automated frontend test** for the pump-card indicators.
-- ✅ Safe incremental rollout is possible: sensors default OFF (`FLOAT_ENABLED`/`RAIN_ENABLED`), reproducing current analog-only behavior.
+- ✅ Sensors now genuinely ship OFF (`FLOAT_ENABLED=False`/`RAIN_ENABLED=False`, reconciled by the 2026-07-13 audit `71ec41a`), reproducing analog-only behavior until §6 bench commissioning flips them True for field use.
 
 ---
 
