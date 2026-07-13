@@ -318,6 +318,29 @@ async def logout(request: Request):
     return RedirectResponse(url="/login", status_code=303)
 
 
+def _js_safe_json(value) -> str:
+    """Serialize *value* as JSON safe for embedding inside an inline <script>.
+
+    ``json.dumps()`` alone is not safe inside a ``<script>`` block: a value
+    containing ``</script``, ``<!--``, or ``<script`` can break out of the
+    tag and inject arbitrary markup/script (e.g. a crafted dashboard
+    username reflected into the SPA shell). Escaping ``<``, ``>``, and ``&``
+    neutralizes tag breakout; escaping U+2028/U+2029 avoids the JS line
+    separator characters, which are otherwise illegal inside JS string
+    literals. The result is still valid JSON, and still valid JS.
+    """
+    import json as _json
+    encoded = _json.dumps(value)
+    return (
+        encoded
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
     """Serve the SDPRS V2 SPA shell.
@@ -332,10 +355,9 @@ async def dashboard_page(request: Request):
     user = request.session.get("user")
     if not user:
         return RedirectResponse(url="/login")
-    import json as _json
     spa_index = BASE_DIR / "static" / "spa" / "index.html"
     html = spa_index.read_text(encoding="utf-8")
-    html = html.replace("__SDPRS_USER__", _json.dumps(user))
+    html = html.replace("__SDPRS_USER__", _js_safe_json(user))
     return HTMLResponse(html)
 
 
