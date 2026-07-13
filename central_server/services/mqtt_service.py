@@ -50,15 +50,19 @@ class MQTTService:
     PUMP_OFFLINE_TIMEOUT = 30   # Pump node offline after 30 seconds (more critical)
     OFFLINE_CHECK_INTERVAL = 10 # Check for offline nodes every 10 seconds
     
-    def __init__(self, db_module=None):
+    def __init__(self, db_module=None, loop=None):
         """
         Initialize the MQTT service.
-        
+
         Args:
             db_module: Database module for node operations (optional, for testing)
+            loop: The asyncio event loop captured at FastAPI startup, used to
+                hand WebSocket broadcasts from this sync/thread service over
+                to the running event loop (optional, for testing)
         """
         self.settings = get_settings()
         self.db = db_module
+        self._loop = loop
         
         # Node states stored in memory
         self.node_states: Dict[str, Dict[str, Any]] = {}
@@ -262,63 +266,72 @@ class MQTTService:
         """
         try:
             data = json.loads(payload)
-            
-            with self._lock:
-                # Update node state in memory
-                self.node_states[node_id] = {
-                    "type": "pump",
-                    "status": "ONLINE",
-                    "last_heartbeat": datetime.utcnow(),
-                    "pump_state": data.get("pump_state", "UNKNOWN"),
-                    "water_level": data.get("water_level"),
-                }
-            
-            # Update database
-            metadata = {
-                "pump_state": data.get("pump_state"),
-                "water_level": data.get("water_level")
-            }
-            
-            if self.db:
-                self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
-            else:
-                upsert_node(node_id, "pump", "ONLINE", metadata)
-
-            # Persist time-series sample for history charts
-            try:
-                ts = data.get("timestamp") or datetime.utcnow().isoformat()
-                insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"))
-            except Exception as ts_err:
-                logger.warning(f"Failed to persist pump reading for {node_id}: {ts_err}")
-
-            logger.debug(f"Pump status from {node_id}: state={data.get('pump_state')}")
-            
-            # WebSocket broadcast to connected clients
-            try:
-                from .websocket_service import broadcast_from_sync
-                import asyncio
-                
-                # Get the event loop from app state or current
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.get_running_loop()
-                
-                if loop:
-                    broadcast_from_sync(loop, {
-                        "type": "pump_status",
-                        "data": {
-                            "node_id": node_id,
-                            "pump_state": data.get("pump_state"),
-                            "water_level": data.get("water_level"),
-                            "timestamp": data.get("timestamp", datetime.utcnow().isoformat())
-                        }
-                    })
-            except Exception as ws_error:
-                logger.warning(f"WebSocket broadcast failed: {ws_error}")
-            
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             logger.error(f"Invalid pump_status JSON from {node_id}: {e}")
+            with self._lock:
+                st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
+                st["last_heartbeat"] = datetime.utcnow()  # garbled-but-alive != offline
+                self.node_states[node_id] = st
+            return
+        if not isinstance(data, dict):
+            logger.error(f"pump_status payload not an object from {node_id}")
+            with self._lock:
+                st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
+                st["last_heartbeat"] = datetime.utcnow()  # glitchy-but-alive != offline
+                self.node_states[node_id] = st
+            return
+
+        with self._lock:
+            self.node_states[node_id] = {
+                "type": "pump", "status": "ONLINE",
+                "last_heartbeat": datetime.utcnow(),
+                "pump_state": data.get("pump_state", "UNKNOWN"),
+                "water_level": data.get("water_level"),
+                "raining": data.get("raining"),
+                "float_safe": data.get("float_safe"),
+                "high_water": data.get("high_water"),
+                "sensor_conflict": data.get("sensor_conflict"),
+                "dry_run_protect": data.get("dry_run_protect"),
+                "reason": data.get("reason"),
+            }
+
+        metadata = {"pump_state": data.get("pump_state"), "water_level": data.get("water_level"),
+                    "raining": data.get("raining"), "sensor_conflict": data.get("sensor_conflict")}
+        if self.db:
+            self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
+        else:
+            upsert_node(node_id, "pump", "ONLINE", metadata)
+
+        try:
+            ts = data.get("timestamp") or datetime.utcnow().isoformat()
+            insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"),
+                                raining=data.get("raining"), sensor_conflict=data.get("sensor_conflict"))
+        except Exception as ts_err:
+            logger.warning(f"Failed to persist pump reading for {node_id}: {ts_err}")
+
+        logger.debug(f"Pump status from {node_id}: state={data.get('pump_state')}")
+
+        self._broadcast_pump_status(node_id, data)  # see Task 10
+
+    def _broadcast_pump_status(self, node_id, data):
+        if self._loop is None:
+            return
+        try:
+            from .websocket_service import broadcast_from_sync
+            broadcast_from_sync(self._loop, {
+                "type": "pump_status",
+                "data": {
+                    "node_id": node_id,
+                    "pump_state": data.get("pump_state"),
+                    "water_level": data.get("water_level"),
+                    "raining": data.get("raining"),
+                    "sensor_conflict": data.get("sensor_conflict"),
+                    "dry_run_protect": data.get("dry_run_protect"),
+                    "timestamp": data.get("timestamp", datetime.utcnow().isoformat()),
+                },
+            })
+        except Exception as ws_error:
+            logger.warning(f"WebSocket broadcast failed: {ws_error}")
     
     def _handle_stream_status(self, node_id: str, payload: str):
         """
@@ -522,20 +535,15 @@ class MQTTService:
             logger.warning(f"Node {node_id} marked OFFLINE (no heartbeat for {elapsed:.0f}s)")
         
         # WebSocket broadcast for offline status
-        try:
-            from .websocket_service import broadcast_from_sync
-            import asyncio
+        if self._loop is not None:
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = None
-            if loop:
-                broadcast_from_sync(loop, {
+                from .websocket_service import broadcast_from_sync
+                broadcast_from_sync(self._loop, {
                     "type": "node_status",
                     "data": {"node_id": node_id, "status": "OFFLINE"}
                 })
-        except Exception as ws_err:
-            logger.debug(f"WebSocket broadcast for offline failed: {ws_err}")
+            except Exception as ws_err:
+                logger.debug(f"WebSocket broadcast for offline failed: {ws_err}")
 
 
 # Singleton instance
@@ -552,18 +560,20 @@ def get_mqtt_service() -> Optional[MQTTService]:
     return _mqtt_service
 
 
-def init_mqtt_service(db_module=None) -> MQTTService:
+def init_mqtt_service(db_module=None, loop=None) -> MQTTService:
     """
     Initialize and start the MQTT service.
-    
+
     Args:
         db_module: Database module for node operations
-        
+        loop: The asyncio event loop captured at FastAPI startup, used for
+            WebSocket broadcasts from the MQTT background thread
+
     Returns:
         The MQTTService instance
     """
     global _mqtt_service
-    _mqtt_service = MQTTService(db_module=db_module)
+    _mqtt_service = MQTTService(db_module=db_module, loop=loop)
     return _mqtt_service
 
 

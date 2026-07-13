@@ -49,5 +49,31 @@ WIFI_CONNECT_TIMEOUT = 3  # 單次 WiFi 連線等待（秒）
 WIFI_MAX_RETRIES = 10     # boot 時最大重試次數
 
 # ============ 看門狗 (WDT) ============
-WDT_ENABLED = False       # 開發階段設 False，部署生產時改為 True
+WDT_ENABLED = True       # 生產預設為 True；開發除錯時可暫時改為 False
 WDT_TIMEOUT = 30000       # WDT 逾時（毫秒）
+
+# ============ 新增數位感測器（學生示範合併） ============
+FLOAT_PIN = 32          # 底部防干燒浮球開關（dry = LOW，內部上拉）
+RAIN_PIN = 33           # 雨水模組 DO（下雨 = LOW；模組供電 3.3V）
+HIGH_WATER_PIN = 13     # 選用數位高水位感測器
+
+LEVEL_ENABLED = True
+FLOAT_ENABLED = True
+RAIN_ENABLED = True
+HIGH_WATER_ENABLED = False
+
+FLOAT_ACTIVE_LOW = True
+RAIN_ACTIVE_LOW = True
+HIGH_WATER_ACTIVE_LOW = False
+
+# ============ 控制參數 ============
+RAIN_ON_THRESHOLD = 60      # 確認下雨後降低開泵門檻（80 -> 60）
+RAIN_CONFIRM_MS = 30000
+DRY_OFF_DELAY_MS = 30000
+BURST_ON_MS = 60000
+BURST_COOLDOWN_MS = 30000
+CONFLICT_MAX_MS = 900000    # 15 分鐘後鎖定 OFF 並持續告警
+MAX_RUN_MS = 600000
+REST_MS = 60000
+DEBOUNCE_MS = 2500
+SOCKET_TIMEOUT_S = 3

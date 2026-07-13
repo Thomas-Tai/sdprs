@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+<meta charset="UTF-8">
+<title>SDPRS · 智能防災監測與自動響應系統</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!--
+  All assets are served locally from /static/spa — the dashboard must render
+  with zero external requests so it stays usable during a disaster when the
+  site's internet uplink may be down. Fonts fall back to the OS stack
+  (Microsoft JhengHei / Consolas) declared in the Tailwind config below.
+-->
+<script src="/static/spa/vendor/tailwind.min.js"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'Noto Sans TC', 'system-ui', '"Microsoft JhengHei"', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'Consolas', 'monospace'],
+        },
+        colors: {
+          'sev-critical': { DEFAULT: '#DC2626', fg: '#FFFFFF', dim: '#7f1d1d' },
+          'sev-warn':     { DEFAULT: '#F59E0B', fg: '#1F2937', dim: '#78350f' },
+          'sev-info':     { DEFAULT: '#3B82F6', fg: '#FFFFFF', dim: '#1e3a8a' },
+          'sev-ok':       { DEFAULT: '#10B981', fg: '#FFFFFF', dim: '#064e3b' },
+          'sev-stale':    { DEFAULT: '#94A3B8', fg: '#0F172A', dim: '#334155' },
+          surface: {
+            base: '#020617',
+            panel: '#0B1220',
+            elevated: '#111A2E',
+            overlay: '#1E293B',
+          },
+          border: {
+            subtle: '#1E293B',
+            strong: '#334155',
+          },
+          ink: {
+            primary: '#F8FAFC',
+            secondary: '#CBD5E1',
+            muted: '#64748B',
+            dim: '#475569',
+          },
+        },
+        keyframes: {
+          'pulse-critical': {
+            '0%, 100%': { boxShadow: 'inset 4px 0 0 0 #DC2626, 0 0 0 0 rgba(220,38,38,0.6)' },
+            '50%': { boxShadow: 'inset 4px 0 0 0 #DC2626, 0 0 0 8px rgba(220,38,38,0)' },
+          },
+          'live-blink': {
+            '0%, 100%': { opacity: 1 },
+            '50%': { opacity: 0.4 },
+          },
+          'spin-slow': { to: { transform: 'rotate(360deg)' } },
+        },
+        animation: {
+          'pulse-critical': 'pulse-critical 2s ease-in-out 0s 1',
+          'live-blink': 'live-blink 2s ease-in-out infinite',
+          'spin-slow': 'spin-slow 1.5s linear infinite',
+        },
+      },
+    },
+  };
+</script>
+<link rel="stylesheet" href="/static/spa/styles.css">
+<!-- Logged-in user, injected server-side by the dashboard route. -->
+<script>window.SDPRS_USER = __SDPRS_USER__;</script>
+<script src="/static/spa/vendor/react.production.min.js"></script>
+<script src="/static/spa/vendor/react-dom.production.min.js"></script>
+<script src="/static/spa/vendor/babel.min.js"></script>
+</head>
+<body class="bg-surface-base text-ink-primary font-sans antialiased">
+<div id="root">
+  <div style="height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#64748B;font-family:system-ui,'Microsoft JhengHei',sans-serif">
+    <div style="width:34px;height:34px;border:3px solid #1E293B;border-top-color:#3B82F6;border-radius:50%;animation:spin-slow 1s linear infinite"></div>
+    <div style="font-size:13px;letter-spacing:.05em">SDPRS · 載入中…</div>
+  </div>
+</div>
+<noscript><div style="padding:40px;color:#F8FAFC;font-family:sans-serif">此控制台需要啟用 JavaScript。</div></noscript>
+<script type="text/babel" src="/static/spa/icons.jsx"></script>
+<script type="text/babel" src="/static/spa/data.jsx"></script>
+<script type="text/babel" src="/static/spa/api.jsx"></script>
+<script type="text/babel" src="/static/spa/components.jsx"></script>
+<script type="text/babel" src="/static/spa/pages.jsx"></script>
+<script type="text/babel" src="/static/spa/tweaks-panel.jsx"></script>
+<script type="text/babel" src="/static/spa/app.jsx"></script>
+</body>
+</html>

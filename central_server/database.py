@@ -167,9 +167,20 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             node_id     TEXT NOT NULL,
             timestamp   DATETIME NOT NULL,
             water_level REAL,
-            pump_state  TEXT
+            pump_state  TEXT,
+            raining         INTEGER,
+            sensor_conflict INTEGER
         );
     """)
+    # Migration: add raining/sensor_conflict columns to existing pump_readings tables
+    try:
+        cursor.execute("ALTER TABLE pump_readings ADD COLUMN raining INTEGER")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE pump_readings ADD COLUMN sensor_conflict INTEGER")
+    except Exception:
+        pass
 
     # Operator audit log (item 15). Append-only; no foreign keys (target_id
     # may reference rows that get retention-deleted later).
@@ -296,9 +307,14 @@ def _create_tables_postgresql(conn):
             node_id     TEXT NOT NULL,
             timestamp   TIMESTAMP NOT NULL,
             water_level REAL,
-            pump_state  TEXT
+            pump_state  TEXT,
+            raining         INTEGER,
+            sensor_conflict INTEGER
         );
     """))
+    # Migration: add raining/sensor_conflict columns to existing pump_readings tables
+    conn.execute(sqlalchemy.text("ALTER TABLE pump_readings ADD COLUMN IF NOT EXISTS raining INTEGER;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE pump_readings ADD COLUMN IF NOT EXISTS sensor_conflict INTEGER;"))
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS operator_actions (
             id           SERIAL PRIMARY KEY,
@@ -724,8 +740,12 @@ def set_weather_config(site_lat: Optional[float], site_lon: Optional[float], sta
 
 
 def insert_pump_reading(node_id: str, timestamp: str, water_level: Optional[float],
-                        pump_state: Optional[str]) -> None:
+                        pump_state: Optional[str], raining: Optional[bool] = None,
+                        sensor_conflict: Optional[bool] = None) -> None:
     """Append one water-level / pump-state sample for time-series history."""
+    raining_val = int(raining) if raining is not None else None
+    sensor_conflict_val = int(sensor_conflict) if sensor_conflict is not None else None
+
     if _backend == "postgresql":
         import sqlalchemy
         database_url = os.environ.get("DATABASE_URL", "")
@@ -733,18 +753,19 @@ def insert_pump_reading(node_id: str, timestamp: str, water_level: Optional[floa
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text("""
-                    INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state)
-                    VALUES (:id, :ts, :wl, :ps)
+                    INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state, raining, sensor_conflict)
+                    VALUES (:id, :ts, :wl, :ps, :rn, :sc)
                 """),
-                {"id": node_id, "ts": timestamp, "wl": water_level, "ps": pump_state},
+                {"id": node_id, "ts": timestamp, "wl": water_level, "ps": pump_state,
+                 "rn": raining_val, "sc": sensor_conflict_val},
             )
             conn.commit()
         return
 
     with get_db_cursor() as cursor:
         cursor.execute(
-            "INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state) VALUES (?, ?, ?, ?)",
-            (node_id, timestamp, water_level, pump_state),
+            "INSERT INTO pump_readings (node_id, timestamp, water_level, pump_state, raining, sensor_conflict) VALUES (?, ?, ?, ?, ?, ?)",
+            (node_id, timestamp, water_level, pump_state, raining_val, sensor_conflict_val),
         )
 
 
@@ -753,7 +774,7 @@ def get_pump_readings(node_id: str, start: str, end: str,
     """Return rows in [start, end] ordered by timestamp ASC. ISO-8601 strings."""
     if _backend == "postgresql":
         return _pg_fetch_many_sync(
-            """SELECT timestamp, water_level, pump_state FROM pump_readings
+            """SELECT timestamp, water_level, pump_state, raining, sensor_conflict FROM pump_readings
                WHERE node_id = :id AND timestamp BETWEEN :s AND :e
                ORDER BY timestamp ASC LIMIT :lim""",
             {"id": node_id, "s": start, "e": end, "lim": limit},
@@ -762,7 +783,7 @@ def get_pump_readings(node_id: str, start: str, end: str,
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
-        """SELECT timestamp, water_level, pump_state FROM pump_readings
+        """SELECT timestamp, water_level, pump_state, raining, sensor_conflict FROM pump_readings
            WHERE node_id = ? AND timestamp BETWEEN ? AND ?
            ORDER BY timestamp ASC LIMIT ?""",
         (node_id, start, end, limit),

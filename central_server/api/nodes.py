@@ -42,8 +42,17 @@ class NodeStatus(BaseModel):
     stream_status: Optional[Dict[str, Any]] = None
     pump_state: Optional[str] = None
     water_level: Optional[float] = None
+    raining: Optional[bool] = None
+    sensor_conflict: Optional[bool] = None
+    dry_run_protect: Optional[bool] = None
     is_stale: bool = False
     snapshot_timestamp: Optional[str] = None
+    # Surfaced from the DB so the V2 dashboard can render pump health without
+    # extra round-trips. battery_voltage/power_source land here from the
+    # ESP32 firmware (Sprint B item 12); snoozed_until is set by /snooze.
+    battery_voltage: Optional[float] = None
+    power_source: Optional[str] = None
+    snoozed_until: Optional[str] = None
 
 
 class NodeListResponse(BaseModel):
@@ -57,12 +66,13 @@ class NodePatch(BaseModel):
     location: Optional[str] = Field(default=None, max_length=120)
 
 
-def _load_locations() -> Dict[str, Optional[str]]:
-    """Snapshot of node_id -> location from DB. Used to enrich in-memory states."""
+def _load_node_db() -> Dict[str, Dict[str, Any]]:
+    """Snapshot of node_id -> full DB row. Used to enrich in-memory states
+    with persistent fields (location, battery, snooze)."""
     try:
-        return {n["node_id"]: n.get("location") for n in get_all_nodes()}
+        return {n["node_id"]: dict(n) for n in (get_all_nodes() or [])}
     except Exception as e:
-        logger.warning(f"Failed to load node locations: {e}")
+        logger.warning(f"Failed to load nodes from DB: {e}")
         return {}
 
 
@@ -94,18 +104,24 @@ async def list_nodes(
     # Get snapshot timestamps from app state
     latest_snapshots = getattr(request.app.state, "latest_snapshots", {})
 
-    locations = _load_locations()
+    db_nodes = _load_node_db()
 
     result = []
     now = datetime.utcnow()
 
+    def _ts_to_iso(v):
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
+
     for node_id, state in node_states.items():
         node_type = state.get("type", "glass")
-        
+        db_row = db_nodes.get(node_id, {})
+
         # Check if snapshot is stale
         is_stale = False
         snapshot_timestamp = None
-        
+
         if node_type == "glass" and state.get("status") == "ONLINE":
             snapshot_data = latest_snapshots.get(node_id)
             if snapshot_data:
@@ -119,14 +135,14 @@ async def list_nodes(
             else:
                 # No snapshot data
                 is_stale = True
-        
+
         # Build response
         node_status = NodeStatus(
             node_id=node_id,
             node_type=node_type,
             status=state.get("status", "OFFLINE"),
-            location=locations.get(node_id),
-            last_heartbeat=state.get("last_heartbeat").isoformat() if isinstance(state.get("last_heartbeat"), datetime) else state.get("last_heartbeat"),
+            location=db_row.get("location"),
+            last_heartbeat=_ts_to_iso(state.get("last_heartbeat")),
             cpu_temp=state.get("cpu_temp"),
             memory_usage_percent=state.get("memory_usage_percent"),
             uptime_seconds=state.get("uptime_seconds"),
@@ -134,23 +150,31 @@ async def list_nodes(
             stream_status=state.get("stream_status"),
             pump_state=state.get("pump_state") if node_type == "pump" else None,
             water_level=state.get("water_level") if node_type == "pump" else None,
+            raining=state.get("raining") if node_type == "pump" else None,
+            sensor_conflict=state.get("sensor_conflict") if node_type == "pump" else None,
+            dry_run_protect=state.get("dry_run_protect") if node_type == "pump" else None,
             is_stale=is_stale,
-            snapshot_timestamp=snapshot_timestamp
+            snapshot_timestamp=snapshot_timestamp,
+            battery_voltage=db_row.get("battery_voltage"),
+            power_source=db_row.get("power_source"),
+            snoozed_until=_ts_to_iso(db_row.get("snoozed_until")),
         )
 
         result.append(node_status)
 
-    # Include nodes that exist in DB (have a location set) but no MQTT state yet
+    # Include nodes that exist in the DB but have no MQTT state yet
     seen = {n.node_id for n in result}
-    for nid, loc in locations.items():
+    for nid, row in db_nodes.items():
         if nid in seen:
             continue
-        db_node = get_node(nid) or {}
         result.append(NodeStatus(
             node_id=nid,
-            node_type=db_node.get("node_type", "glass"),
+            node_type=row.get("node_type", "glass"),
             status="OFFLINE",
-            location=loc,
+            location=row.get("location"),
+            battery_voltage=row.get("battery_voltage"),
+            power_source=row.get("power_source"),
+            snoozed_until=_ts_to_iso(row.get("snoozed_until")),
         ))
 
     logger.debug(f"Returning {len(result)} nodes")

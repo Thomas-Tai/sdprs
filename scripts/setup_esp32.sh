@@ -199,7 +199,7 @@ echo -e "${BLUE}[Step 6/6] 上傳水泵控制程式...${NC}"
 mpremote connect "$SERIAL_PORT" cp "$TMP_CONFIG" :config.py
 echo "  ✓ config.py"
 
-for file in main.py water_sensor.py pump_controller.py mqtt_client.py boot.py; do
+for file in main.py control_logic.py sensors.py pump_controller.py mqtt_client.py boot.py; do
     src="$PUMP_DIR/$file"
     if [[ -f "$src" ]]; then
         mpremote connect "$SERIAL_PORT" cp "$src" :"$file"

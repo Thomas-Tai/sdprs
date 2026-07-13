@@ -218,7 +218,8 @@ sdprs/
 |   |-- boot.py                      # WiFi 連線（開機自動執行）
 |   |-- main.py                      # 主迴圈（滯後控制）
 |   |-- config.py                    # WiFi/MQTT/GPIO 配置常數
-|   |-- water_sensor.py              # ADC 水位讀取（中值濾波）
+|   |-- control_logic.py             # 純安全決策階梯（純函式，可桌面測試）
+|   |-- sensors.py                   # 感測器 HAL（去彈跳數位 + ADC 中值）
 |   |-- pump_controller.py           # 繼電器 GPIO 控制 + LED
 |   +-- mqtt_client.py               # umqtt.simple 客戶端
 |
@@ -1021,7 +1022,7 @@ python -m esptool --chip esp32 --port COM8 --baud 460800 write_flash -z -fm dio 
 
 # 4. 上傳程式（boot.py 最後！）
 cd sdprs/edge_pump
-for %f in (config.py main.py water_sensor.py pump_controller.py mqtt_client.py boot.py) do mpremote connect COM8 cp %f :%f
+for %f in (config.py main.py control_logic.py sensors.py pump_controller.py mqtt_client.py boot.py) do mpremote connect COM8 cp %f :%f
 
 # 5. 改 WiFi/MQTT — 推薦 Thonny GUI，或 ampy 取下/編輯/上傳
 ampy --port COM8 --delay 2 get config.py config.local.py
@@ -1054,7 +1055,7 @@ config.py 中有以下開關：
 | WDT 導致反覆重啟                              | config.py 中設 `WDT_ENABLED = False`                                                                  |
 | `ampy put` 後仍用舊程式碼                   | 遠端路徑不加 `:` 前綴，正確：`ampy put file.py file.py`                                             |
 | NTP 顯示 `2000-01-01`                       | 確認 UDP 123 port 未被防火牆封鎖；NTP 在 WiFi 首次連線後自動嘗試（pool.ntp.org → time.cloudflare.com） |
-| 乾燥時雨量顯示 100%                           | 雨滴感測器 ADC 反相：需用 `100.0 - (median/4095.0)*100.0`（見 water_sensor.py）                       |
+| 乾燥時雨量顯示 100%                           | 雨滴感測器 ADC 反相：需用 `100.0 - (median/4095.0)*100.0`（見 sensors.py）                       |
 
 ### 監控牆整合（水泵節點）
 

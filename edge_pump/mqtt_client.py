@@ -9,16 +9,48 @@ Smart Disaster Prevention Response System - MQTT Client Module
 設計原則：WiFi/MQTT 失敗不影響本地水泵控制邏輯（離線自治）。
 """
 
-import network
 import time
 import json
-from umqtt.simple import MQTTClient
+
+# Device-only imports, guarded so this module still imports under desktop
+# CPython (pytest) for the pure build_payload(). network/umqtt are used only
+# inside methods that run on the ESP32.
+try:
+    import network
+except ImportError:
+    network = None
+try:
+    from umqtt.simple import MQTTClient
+except ImportError:
+    MQTTClient = None
 
 
 def format_timestamp():
     """返回 ISO 8601 格式的當前時間字串。"""
     t = time.localtime()
     return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (t[0], t[1], t[2], t[3], t[4], t[5])
+
+
+def build_payload(node_id, timestamp, pump_state, water_level, flags, reason,
+                  battery_voltage=None, power_source=None):
+    """Additive telemetry payload — never renames the original core fields."""
+    p = {
+        "node_id": node_id,
+        "timestamp": timestamp,
+        "pump_state": pump_state,
+        "water_level": round(water_level, 1),
+        "raining": flags.get("raining"),
+        "float_safe": flags.get("float_safe"),
+        "high_water": flags.get("high_water"),
+        "sensor_conflict": flags.get("sensor_conflict"),
+        "dry_run_protect": flags.get("dry_run_protect"),
+        "reason": reason,
+    }
+    if battery_voltage is not None:
+        p["battery_voltage"] = round(battery_voltage, 2)
+    if power_source is not None:
+        p["power_source"] = power_source
+    return p
 
 
 class PumpMQTTClient:
@@ -42,7 +74,8 @@ class PumpMQTTClient:
         self._wifi_connected = False
         self._mqtt_connected = False
         self._client = None
-        self._last_wifi_attempt = -(self._retry_interval + 1)  # Allow immediate first attempt
+        self._socket_timeout_s = 3
+        self._last_wifi_attempt = None  # ticks_ms of last attempt; None = never
 
         # 初始化 STA 模式並取消任何自動連線
         self._wlan = network.WLAN(network.STA_IF)
@@ -74,9 +107,10 @@ class PumpMQTTClient:
             self._wifi_connected = False
             self._mqtt_connected = False
 
-            now_sec = time.time()
-            if now_sec - self._last_wifi_attempt > self._retry_interval:
-                self._last_wifi_attempt = now_sec
+            now = time.ticks_ms()
+            if self._last_wifi_attempt is None or \
+                    time.ticks_diff(now, self._last_wifi_attempt) > self._retry_interval * 1000:
+                self._last_wifi_attempt = now
                 try:
                     print("[MQTT] Connecting to WiFi SSID: %s" % self._ssid)
                     # 先斷線清除狀態，避免 "sta is connecting" 錯誤
@@ -100,13 +134,29 @@ class PumpMQTTClient:
             try:
                 print("[MQTT] Connecting to broker %s:%d..." % (self._broker, self._port))
                 self._client = MQTTClient(
-                    client_id=self._node_id,
-                    server=self._broker,
-                    port=self._port,
+                    client_id=self._node_id, server=self._broker, port=self._port,
                     user=self._mqtt_user if self._mqtt_user else None,
-                    password=self._mqtt_pass if self._mqtt_pass else None
-                )
+                    password=self._mqtt_pass if self._mqtt_pass else None)
+                # LWT: broker publishes this if we drop ungracefully
+                self._client.set_last_will(
+                    self._topic,
+                    json.dumps({"node_id": self._node_id, "pump_state": "UNKNOWN", "online": False}),
+                    retain=True, qos=0)
+                # Bound the socket BEFORE connect() (spec §9) so a dead/unreachable
+                # broker raises OSError instead of hanging the 1s control loop.
+                # umqtt.simple creates .sock lazily inside connect() on stock builds
+                # (it is None beforehand), so this pre-connect call is best-effort;
+                # it is repeated once connect() returns to guarantee publish()/
+                # check_msg() stay bounded on that stock behavior too.
+                try:
+                    self._client.sock.settimeout(self._socket_timeout_s)
+                except Exception:
+                    pass
                 self._client.connect()
+                try:
+                    self._client.sock.settimeout(self._socket_timeout_s)
+                except Exception:
+                    pass
                 self._mqtt_connected = True
                 print("[MQTT] Connected to broker!")
             except OSError as e:
@@ -117,33 +167,17 @@ class PumpMQTTClient:
 
         return self._wifi_connected and self._mqtt_connected
 
-    def publish_status(self, pump_state, water_level, battery_voltage=None, power_source=None):
-        """發布水泵狀態到 MQTT。
-
-        Item 12: battery_voltage (V) and power_source ("mains" / "battery" / "unknown")
-        are optional but should be included when hardware supports them.
-        """
+    def publish_status(self, pump_state, water_level, flags, reason,
+                       battery_voltage=None, power_source=None):
         if not self.ensure_connection():
             return
         if self._client is None:
             return
         try:
-            timestamp = format_timestamp()
-            # Base payload
-            payload_dict = {
-                "node_id": self._node_id,
-                "timestamp": timestamp,
-                "pump_state": pump_state,
-                "water_level": round(water_level, 1)
-            }
-            # Item 12: add battery fields when available
-            if battery_voltage is not None:
-                payload_dict["battery_voltage"] = round(battery_voltage, 2)
-            if power_source is not None:
-                payload_dict["power_source"] = power_source
-            payload = json.dumps(payload_dict)
-            self._client.publish(self._topic, payload)
-            print("[MQTT] Published: %s" % payload)
+            payload = build_payload(
+                self._node_id, format_timestamp(), pump_state, water_level,
+                flags, reason, battery_voltage, power_source)
+            self._client.publish(self._topic, json.dumps(payload))
         except OSError as e:
             print("[MQTT] Publish error: %s" % str(e))
             self._mqtt_connected = False

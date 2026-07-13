@@ -1,0 +1,168 @@
+/* SDPRS — global styles */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-feature-settings: "cv11", "ss01";
+}
+
+body {
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Tabular numerics on everything tabular */
+.tnum, table, th, td, .num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbar — dark, slim */
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 4px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+/* Kbd chip */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  color: #94A3B8;
+  background: #0B1220;
+  border: 1px solid #334155;
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  letter-spacing: 0;
+}
+
+/* Severity left bar on rows — patterned so grayscale still distinguishes severity */
+.sev-bar { position: relative; }
+.sev-bar::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  pointer-events: none;
+}
+.sev-bar-critical::before { background: #DC2626; }
+.sev-bar-warn::before {
+  background: repeating-linear-gradient(to bottom, #F59E0B 0 6px, transparent 6px 10px);
+}
+.sev-bar-info::before {
+  background: repeating-linear-gradient(to bottom, #3B82F6 0 2px, transparent 2px 6px);
+}
+.sev-bar-ok::before { background: #10B981; }
+.sev-bar-stale::before {
+  background: repeating-linear-gradient(to bottom, #94A3B8 0 4px, transparent 4px 8px);
+  opacity: 0.6;
+}
+
+/* Selected row — right edge indicator, doesn't conflict with severity left bar */
+.row-selected {
+  background: #111A2E !important;
+  box-shadow: inset -3px 0 0 0 #3B82F6;
+}
+
+/* Striped placeholder for camera snapshots */
+.snapshot-placeholder {
+  background-image: repeating-linear-gradient(
+    45deg,
+    #1E293B 0px,
+    #1E293B 8px,
+    #111A2E 8px,
+    #111A2E 16px
+  );
+}
+
+.snapshot-frozen {
+  filter: grayscale(1) brightness(0.6);
+}
+
+/* Sparkline bars */
+.spark-bar {
+  background: linear-gradient(to top, #3B82F6, #60A5FA);
+  border-radius: 1px;
+}
+
+/* Pulse new alert */
+@keyframes row-flash {
+  0% { background-color: rgba(220, 38, 38, 0.25); }
+  100% { background-color: transparent; }
+}
+.row-flash { animation: row-flash 2s ease-out 1; }
+
+/* Light theme overrides */
+html.light {
+  color-scheme: light;
+}
+html.light body {
+  background: #F1F5F9;
+  color: #0F172A;
+}
+html.light .bg-surface-base { background: #F1F5F9 !important; }
+html.light .bg-surface-panel { background: #FFFFFF !important; }
+html.light .bg-surface-elevated { background: #F8FAFC !important; }
+html.light .bg-surface-overlay { background: #E2E8F0 !important; }
+html.light .border-border-subtle { border-color: #E2E8F0 !important; }
+html.light .border-border-strong { border-color: #CBD5E1 !important; }
+html.light .text-ink-primary { color: #0F172A !important; }
+html.light .text-ink-secondary { color: #334155 !important; }
+html.light .text-ink-muted { color: #64748B !important; }
+html.light .text-ink-dim { color: #94A3B8 !important; }
+html.light .kbd { background: #F8FAFC; color: #475569; border-color: #CBD5E1; }
+html.light .snapshot-placeholder {
+  background-image: repeating-linear-gradient(45deg, #E2E8F0 0, #E2E8F0 8px, #F1F5F9 8px, #F1F5F9 16px);
+}
+
+/* Focus rings */
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid #3B82F6;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* No-select for chrome */
+.noselect { user-select: none; -webkit-user-select: none; }
+
+/* Wall mode scaling */
+html.wall-mode .wall-hide { display: none !important; }
+html.wall-mode .wall-scale-up { font-size: 1.5em; }
+
+/* Focus mode — fatigue / low-noise mode */
+html.focus-mode .focus-dim {
+  opacity: 0.35 !important;
+  transition: opacity .2s;
+}
+html.focus-mode .focus-hide { display: none !important; }
+html.focus-mode body { background: #000 !important; }
+html.focus-mode .bg-surface-panel { background: #050a14 !important; }
+html.focus-mode .bg-surface-elevated { background: #0a1020 !important; }
+
+/* Command palette */
+.cmdk-shadow { box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(59,130,246,.2); }
+
+/* Sticky new-alert banner */
+@keyframes slide-down {
+  from { transform: translate(-50%, -120%); opacity: 0; }
+  to   { transform: translate(-50%, 0);     opacity: 1; }
+}
+.new-alert-banner { animation: slide-down .25s ease-out; }
