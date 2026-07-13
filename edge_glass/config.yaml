@@ -17,6 +17,13 @@ camera:
 buffer:
   duration_seconds: 10                # Buffer duration in seconds
 
+# Event capture settings (non-blocking async encode path)
+capture:
+  async_encode: false                 # false = legacy blocking encode (unchanged). true = non-blocking buffer+worker path.
+  pre_roll_seconds: 4                 # Seconds of pre-trigger footage (from the circular buffer)
+  post_roll_seconds: 5                # Seconds of post-trigger footage (from the buffer, once elapsed)
+  encode_queue_size: 2                # Bounded encode-worker queue; drop-newest + WARNING when full
+
 # Visual detection settings
 visual:
   edge_density_threshold: 1.5         # Multiplier relative to baseline

@@ -50,6 +50,7 @@ from detectors.audio_detector import AudioDetector
 from detectors.trigger_engine import Event, TriggerEngine
 from detectors.visual_detector import VisualDetector
 from utils.config_loader import load_config
+from utils.event_capture import PendingEventTracker, slice_window, clamp_capture_window, EncodeWorker
 from utils.logger import setup as setup_logger
 from utils.mp4_encoder import encode_mp4
 
@@ -376,6 +377,30 @@ def main():
     cooldown_until = 0
     fps_target = config["camera"]["fps"]
 
+    # ============ 非同步事件擷取設定 (Thread 7，預設關閉) ============
+    # async_encode=false 時完全維持傳統阻塞行為，以下僅做廉價讀取。
+    cap_cfg = config.get("capture", {})
+    async_encode = bool(cap_cfg.get("async_encode", False))
+    encode_worker = None
+    event_tracker = None
+    if async_encode:
+        pre_roll = float(cap_cfg.get("pre_roll_seconds", 4))
+        post_roll = float(cap_cfg.get("post_roll_seconds", 5))
+        buf_duration = float(config["buffer"]["duration_seconds"])
+        pre_roll, post_roll = clamp_capture_window(buf_duration, pre_roll, post_roll, margin=1.0)
+        event_tracker = PendingEventTracker(post_roll)
+        encode_worker = EncodeWorker(
+            encode_mp4,
+            event_queue,
+            config["node_id"],
+            events_dir,
+            maxsize=int(cap_cfg.get("encode_queue_size", 2)),
+        )
+        encode_worker.start()
+        logger.info(
+            f"Async encode ENABLED (pre={pre_roll}s post={post_roll}s) — Thread 7 EncodeWorker started"
+        )
+
     while _running:
       try:
         loop_start = time.time()
@@ -434,55 +459,77 @@ def main():
                 f"delta_db={event.audio_delta_db:.1f}"
             )
 
-            # 7. 凍結緩衝區
-            frozen_frames = buffer.freeze()
-            logger.info(f"Frozen {len(frozen_frames)} frames from buffer")
+            if async_encode:
+                # 非阻塞路徑：僅登記事件；緩衝區持續填充，待 post_roll 經過後
+                # （於下方 6b. due-drain 區塊）凍結、切片並交給編碼工作線程。
+                # 主迴圈不會被錄製或編碼阻塞。
+                event_tracker.add(event.timestamp, {
+                    "visual_confidence": event.visual_confidence,
+                    "audio_db_peak": event.audio_db_peak,
+                    "audio_freq_peak_hz": event.audio_freq_peak_hz,
+                })
+            else:
+                # ---- 傳統阻塞路徑（async_encode=false，行為不變）----
+                # 7. 凍結緩衝區
+                frozen_frames = buffer.freeze()
+                logger.info(f"Frozen {len(frozen_frames)} frames from buffer")
 
-            # 8. 後 5 秒錄製
-            logger.info("Recording post-trigger frames...")
-            post_frames = record_post_trigger(
-                camera,
-                seconds=5,
-                fps=int(thermal_monitor.current_fps),
-            )
-            logger.info(f"Recorded {len(post_frames)} post-trigger frames")
-
-            # 9. 合併幀
-            all_frames = frozen_frames + post_frames
-            logger.info(f"Total frames to encode: {len(all_frames)}")
-
-            # 10. 編碼 MP4
-            mp4_path = None
-            try:
-                mp4_path = encode_mp4(
-                    all_frames,
-                    node_id=config["node_id"],
-                    timestamp=event.timestamp,
-                    output_dir=events_dir,
+                # 8. 後 5 秒錄製
+                logger.info("Recording post-trigger frames...")
+                post_frames = record_post_trigger(
+                    camera,
+                    seconds=5,
+                    fps=int(thermal_monitor.current_fps),
                 )
-                logger.info(f"MP4 saved: {mp4_path}")
-            except Exception as e:
-                logger.error(f"MP4 encoding failed: {e}")
+                logger.info(f"Recorded {len(post_frames)} post-trigger frames")
 
-            # 11. 加入上傳佇列（Thread 4）
-            if mp4_path and event_queue is not None:
+                # 9. 合併幀
+                all_frames = frozen_frames + post_frames
+                logger.info(f"Total frames to encode: {len(all_frames)}")
+
+                # 10. 編碼 MP4
+                mp4_path = None
                 try:
-                    event_queue.enqueue(
+                    mp4_path = encode_mp4(
+                        all_frames,
                         node_id=config["node_id"],
-                        timestamp=datetime.fromtimestamp(event.timestamp).isoformat(),
-                        mp4_path=mp4_path,
-                        metadata={
-                            "visual_confidence": event.visual_confidence,
-                            "audio_db_peak": event.audio_db_peak,
-                            "audio_freq_peak_hz": event.audio_freq_peak_hz,
-                        }
+                        timestamp=event.timestamp,
+                        output_dir=events_dir,
                     )
-                    logger.info(f"Event enqueued for upload: {mp4_path}")
+                    logger.info(f"MP4 saved: {mp4_path}")
                 except Exception as e:
-                    logger.error(f"Failed to enqueue event: {e}")
+                    logger.error(f"MP4 encoding failed: {e}")
+
+                # 11. 加入上傳佇列（Thread 4）
+                if mp4_path and event_queue is not None:
+                    try:
+                        event_queue.enqueue(
+                            node_id=config["node_id"],
+                            timestamp=datetime.fromtimestamp(event.timestamp).isoformat(),
+                            mp4_path=mp4_path,
+                            metadata={
+                                "visual_confidence": event.visual_confidence,
+                                "audio_db_peak": event.audio_db_peak,
+                                "audio_freq_peak_hz": event.audio_freq_peak_hz,
+                            }
+                        )
+                        logger.info(f"Event enqueued for upload: {mp4_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to enqueue event: {e}")
 
             # 設定冷卻時間
             cooldown_until = timestamp + config["trigger"]["cooldown_seconds"]
+
+        # 6b. 非同步擷取：對 post-roll 視窗已到期的事件凍結、切片並提交編碼。
+        #     此區塊每次迭代皆執行（僅非同步模式）。
+        if async_encode and event_tracker is not None:
+            for ev in event_tracker.due(timestamp):
+                frames = slice_window(buffer.freeze(), ev.trigger_ts - pre_roll, ev.trigger_ts + post_roll)
+                submitted = encode_worker.submit(frames, ev.trigger_ts, ev.metadata)
+                if not submitted:
+                    logger.warning(f"Encode submit dropped (queue full) for event ts={ev.trigger_ts:.3f}")
+                else:
+                    logger.info(f"Event handed to encode worker: {len(frames)} frames, ts={ev.trigger_ts:.3f}")
 
         # 12. 快照推送（受熱管理控制）
         if timestamp - last_snapshot_time >= thermal_monitor.snapshot_interval:
@@ -531,6 +578,12 @@ def main():
 
     # ============ 關閉序列 ============
     logger.info("Shutting down...")
+
+    # 0. 排空並停止編碼工作線程 (Thread 7，僅非同步編碼模式)
+    if encode_worker is not None:
+        logger.info("Draining encode worker...")
+        encode_worker.stop(drain=True)
+        logger.info("Encode worker stopped")
 
     # 1. 停止快照推送線程
     if snapshot_pusher:
