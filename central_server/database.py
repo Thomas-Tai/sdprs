@@ -346,9 +346,11 @@ def _create_tables_postgresql(conn):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
-    # Migration: clear any existing lat/lon values to NULL (user should reconfigure)
-    conn.execute(sqlalchemy.text("UPDATE weather_config SET site_lat = NULL, site_lon = NULL, station_name = NULL WHERE id = 1;"))
-    # Don't insert default row - empty means SMG Macau only
+    # Don't insert default row - empty means SMG Macau only.
+    # NOTE: do NOT clear site_lat/site_lon/station_name here — this runs on
+    # every startup, so an unconditional UPDATE ... = NULL would wipe the
+    # operator's configured location on each restart (data-loss bug). New
+    # installs are already empty (columns DEFAULT NULL, no default row).
 
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))

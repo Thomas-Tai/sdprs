@@ -359,12 +359,17 @@ def get_events_for_retention(
     Returns:
         List of expired events
     """
+    # NOTE: currently unused by the live scheduled path
+    # (retention_service.run_retention_cleanup does the real cleanup); kept as
+    # exported API. datetime() on both sides normalizes SQLite's stored
+    # space-delimited "YYYY-MM-DD HH:MM:SS" against the T-delimited
+    # cutoff.isoformat(), avoiding a lexicographic ~24h boundary error.
     cursor = db.cursor()
     cursor.execute(
-        "SELECT id, mp4_path FROM events WHERE created_at < ?",
+        "SELECT id, mp4_path FROM events WHERE datetime(created_at) < datetime(?)",
         (cutoff_date.isoformat(),)
     )
-    
+
     return [dict(row) for row in cursor.fetchall()]
 
 
@@ -382,9 +387,13 @@ def delete_events_before_date(
     Returns:
         Number of deleted events
     """
+    # NOTE: currently unused by the live scheduled path
+    # (retention_service.run_retention_cleanup does the real cleanup); kept as
+    # exported API. datetime() on both sides makes the compare delimiter-robust
+    # (stored space delimiter vs. T-delimited cutoff.isoformat()).
     cursor = db.cursor()
     cursor.execute(
-        "DELETE FROM events WHERE created_at < ?",
+        "DELETE FROM events WHERE datetime(created_at) < datetime(?)",
         (cutoff_date.isoformat(),)
     )
     db.commit()
