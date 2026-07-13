@@ -57,9 +57,15 @@ FLOAT_PIN = 32          # 底部防干燒浮球開關（dry = LOW，內部上拉
 RAIN_PIN = 33           # 雨水模組 DO（下雨 = LOW；模組供電 3.3V）
 HIGH_WATER_PIN = 13     # 選用數位高水位感測器
 
-LEVEL_ENABLED = True
-FLOAT_ENABLED = True
-RAIN_ENABLED = True
+# Digital sensors ship OFF until bench-commissioned (spec §6). The student
+# sketch, wiring doc, and toolkit pinout disagree on pin assignment / polarity,
+# so an un-commissioned node runs ANALOG-ONLY (LEVEL): float/rain are ignored
+# until each is polarity-verified on the bench, then flipped True here for field
+# use. sensors.py degrades a disabled sensor to None and control_logic ignores
+# it — so this is the safe default that reproduces the original analog behavior.
+LEVEL_ENABLED = True          # analog water-level sensor — primary, always on
+FLOAT_ENABLED = False         # enable ONLY after §6 bench commissioning
+RAIN_ENABLED = False          # enable ONLY after §6 bench commissioning
 HIGH_WATER_ENABLED = False
 
 FLOAT_ACTIVE_LOW = True
