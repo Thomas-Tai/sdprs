@@ -3,7 +3,7 @@
 **Originally audited:** 2026-07-13 (evidence-based — every claim re-verified against the working tree)
 **Last updated:** 2026-07-13 — *after* the pump-merge merge/push, the Theme-2 security slice, **and the Theme-6 glass-detection hardening slice**.
 **Repo:** `sdprs/` (its own git repo; parent folder is not versioned) · **Remote:** `github.com/Thomas-Tai/sdprs`
-**Current branch/commit:** `main` @ `22e6084` (**1 ahead of `origin/main` @ `d7424bd`** — T6 slice `22e6084` not yet pushed; docs `d7424bd` already pushed)
+**Current branch/commit:** `main` @ `3c110a2` (**1 ahead of `origin/main` @ `1fb4902`** — detector-health consume-side `3c110a2` not yet pushed; T6 slice + its docs already pushed)
 
 > Canonical, living progress tracker for the `docs/superpowers` workstream.
 > Task-by-task execution detail for the pump-merge effort lives in
@@ -14,7 +14,7 @@
 
 ## 0. Current status (headline)
 
-**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The first Theme-6 slice (glass detection hardening) is now committed** (`22e6084`, local-only). **188 tests pass** (edge_pump 48 · central_server 44 · edge_glass 96).
+**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The Theme-6 glass-hardening slice is pushed, and its detector-health telemetry is now wired end-to-end** — edge heartbeat → server `/api/nodes` → SPA — so a blinded-but-online camera shows 視覺/音訊 health + degraded status to operators (consume-side `3c110a2`, local-only). **191 tests pass** (edge_pump 48 · central_server 47 · edge_glass 96).
 
 The remaining work is the (now-advancing) open reconstruction themes plus one **hardware** gate: the pump sensors are **not yet bench-commissioned**, so they ship OFF / analog-only until spec §6 is done. No coding blocker remains on what shipped.
 
@@ -41,6 +41,10 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
    - **Observability (also feeds T5):** heartbeat now carries `visual_health`/`audio_health` (telemetry-only) via `set_detector_health()`; main loop emits it + a throttled WARNING when the node is in a can-never-alert state (audio disabled/stale, visual paused/blinded).
    - **Reliability:** camera reopen re-applies resolution/fps (was silently degrading detection); real-time audio ring-buffer write vectorized (overrun→dropped-audio risk) + `is_stale()` liveness.
    - Tests: edge_glass **63 → 96** (new `test_trigger_engine`, `test_mqtt_heartbeat`, `test_main_helpers`, + audio/visual recovery & staleness). Full repo **188 pass**.
+8. **Detector-health consume-side — 2 parallel subagents** (file-disjoint: backend Python vs SPA `.jsx`, coordinating via a frozen field contract), then orchestrator-run server suite + SPA review. — commit `3c110a2` (local-only). Closes the T6 observability loop: the edge was emitting `visual_health`/`audio_health` into the void.
+   - **Server:** `mqtt_service._handle_heartbeat` stores the two fields (node_states + `metadata` JSON — **no migration**); `NodeStatus` + both `/api/nodes` construction sites expose them. Mirrors the existing `buffer_health` REST path. (`broadcast_node_status` is dead code → WS left untouched.)
+   - **SPA:** `mapNode` normalizes + **folds detector health into node status** (online camera that is blinded/paused/disabled/stale → `warn`); new shared `<DetectorHealth>` atom renders 視覺/音訊 pills (camera-only) in NodeCard + NodeSidePanel; `detectorHealthMeta` labels (正常/已暫停/已致盲/訊號停滯/未啟用/未知).
+   - Tests: central_server **44 → 47** (heartbeat stores fields; `/api/nodes` surfaces them incl. a blinded/disabled node). Full repo **191 pass**. SPA has no JS harness → verified by review.
 
 ---
 
@@ -49,11 +53,11 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | Dimension | State |
 |---|---|
 | **Production MVP** | Deployed on LAN (Pi 5 central + Pi 5 glass edge), SQLite/WAL. See root `MEMORY.md`. |
-| **`main`** | @ `22e6084`, **1 ahead of `origin`** (T6 slice unpushed). Carries pump reconstruction + V2 SPA + all 2026-07-13 fixes + T6 hardening. |
+| **`main`** | @ `3c110a2`, **1 ahead of `origin`** (detector-health consume-side unpushed). Carries pump reconstruction + V2 SPA + all 2026-07-13 fixes + T6 hardening + detector-health end-to-end. |
 | **Pump-merge SDD effort** | ✅ **Complete, reviewed, merged, pushed.** ⚠️ **Not bench-commissioned on hardware** (spec §6). |
-| **V2 SPA dashboard** | ✅ On `main` (~4,900 LOC `.jsx`). Two security items fixed; perf (blanket-refresh) still open (Theme 5). |
-| **Theme-6 glass slice** | ✅ Silent-blinding, dead-simulate, stale-pairing, detector-health telemetry fixed (`22e6084`, local). Remainder open (single-sensor fallback, blocking encode, buffer arithmetic, server surfacing of health). |
-| **Tests** | **188 passing** (48 pump + 44 server + 96 glass). Zero failures. |
+| **V2 SPA dashboard** | ✅ On `main` (~4,900 LOC `.jsx`). Two security items fixed; detector-health pills added; perf (blanket-refresh) still open (Theme 5). |
+| **Theme-6 glass slice** | ✅ Silent-blinding, dead-simulate, stale-pairing, detector-health telemetry (`22e6084`, pushed) + **health now surfaced end-to-end in server/dashboard** (`3c110a2`, local). Remainder open (single-sensor fallback, blocking encode, buffer arithmetic). |
+| **Tests** | **191 passing** (48 pump + 47 server + 96 glass). Zero failures. |
 | **Biggest remaining risk** | **Hardware commissioning gate** for pump sensors (spec §6) + **Theme 1** (PG data-access 500s) if/when cloud cutover happens. Neither affects the deployed SQLite LAN MVP. |
 
 **One-line status:** Pump-merge is shipped and green on `main`; the next work is the open reconstruction themes and the pump hardware bench pass — not fixing what shipped.
@@ -65,9 +69,9 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | Suite | Command | Result |
 |---|---|---|
 | edge_pump | `cd edge_pump && python -m pytest tests -q` | **48 passed** |
-| central_server | `cd central_server && python -m pytest tests -q` | **44 passed** (50 deprecation warnings) |
+| central_server | `cd central_server && python -m pytest tests -q` | **47 passed** (53 deprecation warnings) |
 | edge_glass | `cd edge_glass && python -m pytest tests -q` | **96 passed** |
-| **Total** | | **188 passed, 0 failed** |
+| **Total** | | **191 passed, 0 failed** |
 
 Environment: Python **3.14.3**, pytest **9.0.2**, FastAPI **0.135.1**. (+33 edge_glass tests from the T6 slice: vectorized-ring + staleness, anomaly recovery, trigger_engine correlation/reset, heartbeat detector-health, main-loop health helpers.)
 
@@ -121,8 +125,8 @@ The pump-merge spec's Appendix decomposed a full audit into six themes. Pump-mer
 | 2 | **Close the trust boundary** | 🟡 **Advancing** | ✅ `SECRET_KEY`/`EDGE_API_KEY`/dashboard creds `required=True` (fail-closed). ✅ **NEW 2026-07-13:** SPA inline-script injection fixed (`55b351a`), spoofable `resolved_by` fixed (`4a8bdc2`). 🔴 Still open: placeholder detection warn-only, shared static `EDGE_API_KEY` (no per-node creds), MQTT ACL, path-traversal via unvalidated `node_id`, public snapshot leak, login throttle, cookie `Secure`/`SameSite`, constant-time compare. |
 | 3 | **Harden edge offline-autonomy** | 🟡 **Pump done, glass open** | ✅ Pump slice delivered (WDT, bounded I/O, guarded init, LWT). ⚠️ Truly bounding `umqtt connect()` needs a socket-factory/library change + hardware (deferred). 🔴 Glass slice open: blocking initial `connect()`; event data destroyed when MP4 cleanup deletes pending files then marks `UPLOADED`; 4xx → infinite tight-retry. |
 | 4 | **Data-lifecycle correctness** | 🔴 **Open** | Retention delimiter mismatch (~24h boundary error); `pump_readings` never pruned; `weather_config` wiped on every PG startup; orphaned MP4s; trusted client timestamps; unverified backups. |
-| 5 | **Make observability real** | 🟡 **Advancing** | ✅ MQTT-thread WS loop-capture fixed (pump card live). ✅ **NEW 2026-07-13:** glass heartbeat now emits `visual_health`/`audio_health` + throttled can-never-alert WARNING (`22e6084`). 🔴 Remaining: **server/dashboard must consume the new health fields** (edge emits, server ignores today); SPA blanket-`refresh()` + N+1 fetch request storm; broadcast head-of-line blocking; offline-mark TOCTOU false alarm; LWT for glass. |
-| 6 | **Detection correctness (glass)** | 🟡 **Advancing** (`22e6084`) | ✅ **Fixed 2026-07-13:** silent permanent visual blinding (sustained-anomaly re-baseline + `blinded` flag); dead `--simulate`/`simulate_trigger` path (now fires a processed, cooldown-bypassing event); stale-pairing fusion (both-within-window-of-now + reset-after-fire); detector-health telemetry + audio ring-buffer vectorization + camera-reopen settings + audio staleness. 🔴 Remaining: AND-only fusion w/ no single-sensor fallback (design); post-crack persistent-visual + storm-audio phantom hardening beyond cooldown; blocking MP4 encode on the main loop; buffer-size arithmetic unconfirmed. |
+| 5 | **Make observability real** | 🟡 **Advancing** | ✅ MQTT-thread WS loop-capture fixed (pump card live). ✅ **2026-07-13:** glass heartbeat emits `visual_health`/`audio_health` + throttled can-never-alert WARNING (`22e6084`), and the **server/dashboard now consume + surface them** (`3c110a2`) — a blinded-but-online camera shows 視覺/音訊 pills + `warn` status. 🔴 Remaining: SPA blanket-`refresh()` + N+1 fetch request storm; broadcast head-of-line blocking; offline-mark TOCTOU false alarm; LWT for glass; `broadcast_node_status` is dead code (live node-health push not wired — REST-refresh only). |
+| 6 | **Detection correctness (glass)** | 🟡 **Advancing** (`22e6084`) | ✅ **Fixed 2026-07-13:** silent permanent visual blinding (sustained-anomaly re-baseline + `blinded` flag); dead `--simulate`/`simulate_trigger` path (now fires a processed, cooldown-bypassing event); stale-pairing fusion (both-within-window-of-now + reset-after-fire); detector-health telemetry + audio ring-buffer vectorization + camera-reopen settings + audio staleness; **detector health now surfaced operator-facing end-to-end** (`3c110a2` — see T5). 🔴 Remaining: AND-only fusion w/ no single-sensor fallback (design); post-crack persistent-visual + storm-audio phantom hardening beyond cooldown; blocking MP4 encode on the main loop; buffer-size arithmetic unconfirmed. |
 
 **Each open theme is its own spec → plan → implementation cycle.** Appendix severities assume the internet-exposed PostgreSQL/EMQX deployment; several drop a notch on the LAN + SQLite Pi deployed today.
 
@@ -153,7 +157,7 @@ The pump-merge spec's Appendix decomposed a full audit into six themes. Pump-mer
 
 1. ~~Merge `spec/pump-merge → main`~~ ✅ **DONE 2026-07-13** (merged + pushed).
 2. **Bench-commission the pump sensors** (spec §6) before enabling `FLOAT_ENABLED`/`RAIN_ENABLED`. Highest-value remaining pump action.
-3. ~~Theme 6 silent detector-blinding~~ ✅ **First slice DONE 2026-07-13** (`22e6084`). **Theme 4 (retention/pruning)** is now the top deployed-today correctness item (never-pruned `pump_readings`, retention delimiter ~24h boundary error, orphaned MP4s). Remaining T6 items (single-sensor fallback, blocking encode, buffer arithmetic) + **surfacing the new heartbeat health fields in the server/dashboard** are the natural follow-ups.
+3. ~~Theme 6 silent detector-blinding~~ ✅ **DONE 2026-07-13** (`22e6084`) — ~~+ surface health in server/dashboard~~ ✅ **DONE** (`3c110a2`). **Theme 4 (retention/pruning)** is now the top deployed-today correctness item (never-pruned `pump_readings`, retention delimiter ~24h boundary error, `weather_config` wiped on PG startup, orphaned MP4s). Remaining T6 items (single-sensor fallback design, blocking MP4 encode, buffer arithmetic) are lower-urgency follow-ups.
 4. **Theme 2 remainder** — the 2 highest-risk SPA/auth items are fixed; the rest (per-node creds, MQTT ACL, `node_id` allowlist, authenticated snapshot/storage, login throttle, cookie flags) as a focused auth-hardening cycle.
 5. **Theme 5 remainder** — SPA blanket-refresh request storm (24/7 dashboard load).
 6. **Gate any PostgreSQL/cloud cutover on Theme 1.** Fine to defer on SQLite LAN; must be first if cloud is on the roadmap.
