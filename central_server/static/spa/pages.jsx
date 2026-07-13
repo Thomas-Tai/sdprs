@@ -644,6 +644,12 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
           </div>
         )}
       </div>
+      {/* Detector health (camera only) */}
+      {node.type === 'camera' && (
+        <div className="px-2 pb-2">
+          <DetectorHealth node={node}/>
+        </div>
+      )}
     </div>
   );
 };

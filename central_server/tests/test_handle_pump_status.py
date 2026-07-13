@@ -49,3 +49,34 @@ def test_non_dict_payload_still_bumps_last_seen():
     svc._handle_pump_status("pump_node_01", json.dumps([1, 2, 3]))
     assert "pump_node_01" in svc.node_states
     assert svc.node_states["pump_node_01"]["last_heartbeat"] is not None
+
+
+def test_heartbeat_stores_visual_and_audio_health(monkeypatch):
+    """A glass heartbeat carrying the new visual_health/audio_health telemetry
+    fields must land them in node_states[node_id], alongside buffer_health, so
+    /api/nodes can surface an online-but-unable-to-alert node. Telemetry-only:
+    no command surface, just stored like buffer_health."""
+    svc = make_service()
+    monkeypatch.setattr("central_server.services.mqtt_service.upsert_node", lambda *a, **k: None)
+    payload = json.dumps({
+        "node_id": "glass_node_01",
+        "cpu_temp": 48.5,
+        "buffer_health": "ok",
+        "visual_health": "blinded",
+        "audio_health": "disabled",
+    })
+    svc._handle_heartbeat("glass_node_01", payload)
+    st = svc.node_states["glass_node_01"]
+    assert st["visual_health"] == "blinded"
+    assert st["audio_health"] == "disabled"
+
+
+def test_heartbeat_without_health_fields_stores_none(monkeypatch):
+    """A heartbeat that omits the new fields must store None for them (absent
+    == None, same contract as buffer_health) — never KeyError, never crash."""
+    svc = make_service()
+    monkeypatch.setattr("central_server.services.mqtt_service.upsert_node", lambda *a, **k: None)
+    svc._handle_heartbeat("glass_node_02", json.dumps({"node_id": "glass_node_02", "cpu_temp": 45.0}))
+    st = svc.node_states["glass_node_02"]
+    assert st["visual_health"] is None
+    assert st["audio_health"] is None

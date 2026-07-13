@@ -53,8 +53,11 @@ class FakeMqttService:
 
 @pytest.fixture
 def node_states():
-    """One live pump node with all pump-health flags set, as MQTTService
-    would report them in memory (see _handle_pump_status)."""
+    """One live pump node with all pump-health flags set, plus two glass
+    nodes exercising the new visual_health/audio_health telemetry fields —
+    one with them set ("blinded"/"disabled") and one without them at all
+    (must serialize to null, not crash), as MQTTService would report them in
+    memory (see _handle_pump_status / _handle_heartbeat)."""
     return {
         "pump_node_01": {
             "type": "pump",
@@ -65,7 +68,24 @@ def node_states():
             "raining": True,
             "sensor_conflict": False,
             "dry_run_protect": True,
-        }
+        },
+        "glass_node_01": {
+            "type": "glass",
+            "status": "ONLINE",
+            "last_heartbeat": datetime(2026, 7, 13, 9, 59, 30),
+            "cpu_temp": 48.5,
+            "buffer_health": "ok",
+            "visual_health": "blinded",
+            "audio_health": "disabled",
+        },
+        "glass_node_02": {
+            # No visual_health/audio_health keys at all — must come back null.
+            "type": "glass",
+            "status": "ONLINE",
+            "last_heartbeat": datetime(2026, 7, 13, 9, 59, 45),
+            "cpu_temp": 45.0,
+            "buffer_health": "ok",
+        },
     }
 
 
@@ -127,7 +147,8 @@ def test_list_nodes_serializes_pump_fields_and_snoozed_until(client):
     response = client.get("/api/nodes")
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    # pump_node_01 + glass_node_01 + glass_node_02 (live) + pump_node_02 (DB-only)
+    assert len(data) == 4
 
     by_id = {n["node_id"]: n for n in data}
 
@@ -141,6 +162,26 @@ def test_list_nodes_serializes_pump_fields_and_snoozed_until(client):
     db_only = by_id["pump_node_02"]
     assert isinstance(db_only["snoozed_until"], str)
     assert db_only["snoozed_until"].startswith("2026-07-13T11:30:00")
+
+
+def test_list_nodes_surfaces_visual_and_audio_health(client):
+    """The two new glass-health telemetry fields (visual_health/audio_health)
+    must travel through /api/nodes exactly like buffer_health: present when the
+    node reports them, and null (not a crash / not omitted) when it doesn't.
+    Mirrors the frozen contract the SPA agent depends on."""
+    response = client.get("/api/nodes")
+    assert response.status_code == 200
+    by_id = {n["node_id"]: n for n in response.json()}
+
+    # Node that reports the fields carries them through verbatim.
+    blinded = by_id["glass_node_01"]
+    assert blinded["visual_health"] == "blinded"
+    assert blinded["audio_health"] == "disabled"
+
+    # Node that never reported them yields null (field present, value None).
+    quiet = by_id["glass_node_02"]
+    assert "visual_health" in quiet and quiet["visual_health"] is None
+    assert "audio_health" in quiet and quiet["audio_health"] is None
 
 
 if __name__ == "__main__":

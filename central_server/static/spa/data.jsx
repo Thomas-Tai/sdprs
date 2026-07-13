@@ -128,7 +128,20 @@ const stateMeta = {
   snoozed: { label: '已延期', cls: 'bg-ink-dim/15 text-ink-muted border-ink-dim/30' },
 };
 
+// Detector health (camera nodes only) — maps the server-provided visual/audio
+// detector status to a Chinese label + Pill tone. "paused"=thermal throttle,
+// "blinded"=re-baseline in progress, "stale"=silent audio, "disabled"=mic
+// failed to start. Missing/unrecognised values fall back to "unknown".
+const detectorHealthMeta = {
+  ok:       { label: '正常',         tone: 'ok' },
+  paused:   { label: '已暫停(高溫)', tone: 'warn' },
+  blinded:  { label: '已致盲',       tone: 'critical' },
+  stale:    { label: '訊號停滯',     tone: 'warn' },
+  disabled: { label: '未啟用',       tone: 'critical' },
+  unknown:  { label: '未知',         tone: 'muted' },
+};
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
-  fmtAge, ageColor, sevMeta, alertTypeLabel, stateMeta,
+  fmtAge, ageColor, sevMeta, alertTypeLabel, stateMeta, detectorHealthMeta,
 });

@@ -238,6 +238,8 @@ class MQTTService:
                     "cpu_temp": data.get("cpu_temp"),
                     "memory_usage_percent": data.get("memory_usage_percent"),
                     "buffer_health": data.get("buffer_health", "ok"),
+                    "visual_health": data.get("visual_health"),
+                    "audio_health": data.get("audio_health"),
                     "uptime_seconds": data.get("uptime_seconds"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
@@ -247,6 +249,8 @@ class MQTTService:
                 "cpu_temp": data.get("cpu_temp"),
                 "memory_usage_percent": data.get("memory_usage_percent"),
                 "buffer_health": data.get("buffer_health"),
+                "visual_health": data.get("visual_health"),
+                "audio_health": data.get("audio_health"),
                 "uptime_seconds": data.get("uptime_seconds")
             }
             

@@ -53,6 +53,23 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
   );
 };
 
+// ---------- Detector Health — visual + audio detector status (cameras only) ----------
+// Surfaces an "online but unable to alert" camera: blinded/paused vision or a
+// dead/stale mic. Renders nothing for pump nodes.
+const DetectorHealth = ({ node }) => {
+  if (!node || node.type !== 'camera') return null;
+  const meta = window.detectorHealthMeta || {};
+  const fallback = meta.unknown || { label: '未知', tone: 'muted' };
+  const v = meta[node.visualHealth] || fallback;
+  const a = meta[node.audioHealth] || fallback;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <Pill tone={v.tone} dot><span className="text-ink-muted">視覺</span> {v.label}</Pill>
+      <Pill tone={a.tone} dot><span className="text-ink-muted">音訊</span> {a.label}</Pill>
+    </div>
+  );
+};
+
 // ---------- Drift Meter — segmented dot rail for live connection ----------
 
 const DriftMeter = ({ sec, max = 30 }) => {
@@ -518,7 +535,7 @@ const EmptyState = ({ icon: IconComp = Icon.ShieldCheck, title, hint }) => (
 );
 
 Object.assign(window, {
-  Kbd, SeverityBadge, StateBadge, AgeCell, Pill, DriftMeter,
+  Kbd, SeverityBadge, StateBadge, AgeCell, Pill, DetectorHealth, DriftMeter,
   StatusStrip, NavRail, Footer, Sparkline, ShortcutsModal, EmptyState, MuteDrawer,
   NAV_ITEMS,
 });
@@ -854,6 +871,14 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
               </>
             )}
           </div>
+
+          {/* Detector health (camera only) */}
+          {node.type === 'camera' && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1.5">偵測器狀態</div>
+              <DetectorHealth node={node}/>
+            </div>
+          )}
 
           {/* Open alerts on this node */}
           {nodeAlerts.length > 0 && (

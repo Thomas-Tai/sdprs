@@ -39,6 +39,8 @@ class NodeStatus(BaseModel):
     memory_usage_percent: Optional[float] = None
     uptime_seconds: Optional[int] = None
     buffer_health: Optional[str] = None
+    visual_health: Optional[str] = None
+    audio_health: Optional[str] = None
     stream_status: Optional[Dict[str, Any]] = None
     pump_state: Optional[str] = None
     water_level: Optional[float] = None
@@ -147,6 +149,8 @@ async def list_nodes(
             memory_usage_percent=state.get("memory_usage_percent"),
             uptime_seconds=state.get("uptime_seconds"),
             buffer_health=state.get("buffer_health"),
+            visual_health=state.get("visual_health"),
+            audio_health=state.get("audio_health"),
             stream_status=state.get("stream_status"),
             pump_state=state.get("pump_state") if node_type == "pump" else None,
             water_level=state.get("water_level") if node_type == "pump" else None,
@@ -310,6 +314,8 @@ async def get_node(
         memory_usage_percent=state.get("memory_usage_percent"),
         uptime_seconds=state.get("uptime_seconds"),
         buffer_health=state.get("buffer_health"),
+        visual_health=state.get("visual_health"),
+        audio_health=state.get("audio_health"),
         stream_status=state.get("stream_status"),
         pump_state=state.get("pump_state") if node_type == "pump" else None,
         water_level=state.get("water_level") if node_type == "pump" else None,

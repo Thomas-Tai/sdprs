@@ -149,11 +149,21 @@
 
     const offline = n.status !== 'ONLINE';
     const level = n.water_level != null ? Math.round(n.water_level) : null;
+    const visualHealth = n.visual_health || 'unknown';
+    const audioHealth = n.audio_health || 'unknown';
     let status = 'online';
     if (offline) status = 'offline';
     else if (type === 'pump' && level != null) {
       status = level >= 85 ? 'critical' : level >= 70 ? 'warn' : 'online';
     } else if (type === 'camera' && n.is_stale) {
+      status = 'warn';
+    }
+    // A camera that is online but cannot reliably alert — blinded/paused vision
+    // or a dead/stale mic — is degraded; surface it as a warning (never downgrade
+    // an already critical/offline state).
+    if (type === 'camera' && status === 'online' &&
+        (visualHealth === 'blinded' || visualHealth === 'paused' ||
+         audioHealth === 'disabled' || audioHealth === 'stale')) {
       status = 'warn';
     }
 
@@ -188,6 +198,8 @@
       trend: null,
       flow: null,
       snoozeMin: n.snoozed_until ? Math.max(0, Math.round((parseTs(n.snoozed_until) - Date.now()) / 60000)) : 0,
+      visualHealth,
+      audioHealth,
     };
   }
 
