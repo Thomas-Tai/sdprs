@@ -453,6 +453,28 @@ async def unsnooze_node(
     return {"node_id": node_id, "snoozed_until": None}
 
 
+# Cycle-count threshold (item 12 spec): more than this many ON->OFF
+# transitions in the window is an operator-worthy signal.
+PUMP_CYCLE_ALERT_THRESHOLD = 20
+
+# window -> seconds. Defined once so the single-node and batch endpoints
+# agree on how each label maps to a lookback span. Unknown labels -> 1h.
+_PUMP_CYCLE_WINDOWS = {"15m": 900, "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600}
+
+
+def _count_pump_cycles(rows) -> int:
+    """Count ON->OFF pump transitions in a time-ordered readings list."""
+    transitions = 0
+    prev_state = None
+    for r in rows:
+        st = r.get("pump_state")
+        if prev_state == "ON" and st == "OFF":
+            transitions += 1
+        if st in ("ON", "OFF"):
+            prev_state = st
+    return transitions
+
+
 @router.get("/pump/{node_id}/cycles")
 async def pump_cycles(
     node_id: str,
@@ -466,25 +488,54 @@ async def pump_cycles(
     failing float switch.
     """
     from datetime import timedelta as _td
-    seconds = {"15m": 900, "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600}.get(window, 3600)
+    seconds = _PUMP_CYCLE_WINDOWS.get(window, 3600)
     end_dt = datetime.utcnow()
     start_dt = end_dt - _td(seconds=seconds)
     rows = get_pump_readings(node_id, start_dt.isoformat(), end_dt.isoformat(), 50000)
 
-    transitions = 0
-    prev_state = None
-    for r in rows:
-        st = r.get("pump_state")
-        if prev_state == "ON" and st == "OFF":
-            transitions += 1
-        if st in ("ON", "OFF"):
-            prev_state = st
+    count = _count_pump_cycles(rows)
     return {
         "node_id": node_id,
         "window": window,
-        "count": transitions,
-        "alert": transitions > 20,  # threshold from item 12 spec
+        "count": count,
+        "alert": count > PUMP_CYCLE_ALERT_THRESHOLD,  # threshold from item 12 spec
     }
+
+
+@router.get("/pumps/cycles")
+async def pump_cycles_batch(
+    window: str = "1h",
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Batch of /pump/{id}/cycles for EVERY pump node — one HTTP round-trip
+    instead of the dashboard's per-pump N+1. Same ON->OFF counting + >20 alert
+    threshold as the single-node endpoint (shared _count_pump_cycles).
+
+    Note: PLURAL "pumps" path with no node_id — does not collide with the
+    3-segment /pump/{node_id}/cycles route.
+    """
+    from datetime import timedelta as _td
+    seconds = _PUMP_CYCLE_WINDOWS.get(window, 3600)
+    end_dt = datetime.utcnow()
+    start_dt = end_dt - _td(seconds=seconds)
+    start_iso, end_iso = start_dt.isoformat(), end_dt.isoformat()
+
+    result: Dict[str, Any] = {}
+    for n in (get_all_nodes() or []):
+        row = dict(n)
+        # `node_type` is the canonical pump/glass discriminator (nodes table
+        # schema + get_all_nodes SELECT *); tolerate a legacy `type` alias.
+        ntype = row.get("node_type") or row.get("type")
+        if ntype != "pump":
+            continue
+        nid = row.get("node_id")
+        if not nid:
+            continue
+        rows = get_pump_readings(nid, start_iso, end_iso, 50000)
+        count = _count_pump_cycles(rows)
+        result[nid] = {"count": count, "alert": count > PUMP_CYCLE_ALERT_THRESHOLD}
+
+    return {"window": window, "nodes": result}
 
 
 # Export router

@@ -267,14 +267,21 @@
   async function loadNodes() {
     const rows = await apiFetch('/api/nodes');
     const list = Array.isArray(rows) ? rows : (rows.nodes || []);
-    // Cycle counts for pumps come from a separate endpoint; fetch in parallel.
     const pumps = list.filter((n) => n.node_type === 'pump');
-    await Promise.all(pumps.map(async (n) => {
+    if (pumps.length) {
+      // One batch call for every pump's cycle-count instead of one request per
+      // pump (was N+1). Degrades gracefully to all-zeros if the endpoint is
+      // missing (older server 404s) or errors.
+      let cycles = {};
       try {
-        const c = await apiFetch('/api/pump/' + encodeURIComponent(n.node_id) + '/cycles?window=1h');
-        n._cycles = c && c.count != null ? c.count : 0;
-      } catch (e) { n._cycles = 0; }
-    }));
+        const resp = await apiFetch('/api/pumps/cycles?window=1h');
+        cycles = (resp && resp.nodes) || {};
+      } catch (e) { cycles = {}; }
+      pumps.forEach((n) => {
+        const c = cycles[n.node_id];
+        n._cycles = (c && c.count != null) ? c.count : 0;
+      });
+    }
     return list.map(mapNode);
   }
 
