@@ -1,9 +1,9 @@
 # SDPRS — Codebase Audit & Progress Ledger
 
 **Originally audited:** 2026-07-13 (evidence-based — every claim re-verified against the working tree)
-**Last updated:** 2026-07-13 — *after* the pump-merge merge/push, the Theme-2 security slice, **and the Theme-6 glass-detection hardening slice**.
+**Last updated:** 2026-07-13 — *after* the pump-merge merge/push, the Theme-6 glass-hardening + detector-health slices, the Theme-4 data-lifecycle slice, **and the Theme-2 auth-hardening slice**.
 **Repo:** `sdprs/` (its own git repo; parent folder is not versioned) · **Remote:** `github.com/Thomas-Tai/sdprs`
-**Current branch/commit:** `main` @ `dddda76` (**1 ahead of `origin/main` @ `b3d3360`** — T4 data-lifecycle slice `dddda76` not yet pushed; everything through the detector-health consume-side already pushed)
+**Current branch/commit:** `main` @ `c4660d8` (**1 ahead of `origin/main` @ `b05d6f8`** — T2 auth-hardening slice `c4660d8` not yet pushed; T4 slice `dddda76` + its docs `b05d6f8` already pushed)
 
 > Canonical, living progress tracker for the `docs/superpowers` workstream.
 > Task-by-task execution detail for the pump-merge effort lives in
@@ -14,7 +14,7 @@
 
 ## 0. Current status (headline)
 
-**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The Theme-6 glass-hardening slice is pushed, and its detector-health telemetry is now wired end-to-end** — edge heartbeat → server `/api/nodes` → SPA — so a blinded-but-online camera shows 視覺/音訊 health + degraded status to operators. **Theme-4 data-lifecycle correctness (retention delimiter, pump_readings pruning, orphan-MP4 sweep, weather_config persistence) is now committed** (`dddda76`, local-only). **198 tests pass** (edge_pump 48 · central_server 54 · edge_glass 96).
+**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The Theme-6 glass-hardening slice is pushed, and its detector-health telemetry is now wired end-to-end** — edge heartbeat → server `/api/nodes` → SPA — so a blinded-but-online camera shows 視覺/音訊 health + degraded status to operators. **Theme-4 data-lifecycle correctness (retention delimiter, pump_readings pruning, orphan-MP4 sweep, weather_config persistence) is pushed** (`dddda76`). **Theme-2 auth-hardening (UTF-8-safe constant-time credential compares, per-IP login throttle, hardened session-cookie flags, edge node_id allowlist, MQTT auth+ACL deploy template) is now committed** (`c4660d8`, local-only). **216 tests pass** (edge_pump 48 · central_server 72 · edge_glass 96).
 
 The remaining work is the (now-advancing) open reconstruction themes plus one **hardware** gate: the pump sensors are **not yet bench-commissioned**, so they ship OFF / analog-only until spec §6 is done. No coding blocker remains on what shipped.
 
@@ -51,6 +51,14 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
    - **Orphaned MP4s** → fail-safe sweep (surviving-ref set built post-DELETE, path-normalized, mtime guard, any uncertainty keeps the file).
    - **`weather_config` wiped every PG startup** (`database.py` unconditional `UPDATE … NULL`) → removed; fresh installs still default empty; SQLite schema-guarded path untouched.
    - Tests: central_server **47 → 54** (delimiter boundary regression that fails on revert, pump prune + missing-table, orphan sweep, weather_config re-init persistence + PG-source guard). Full repo **198 pass**.
+10. **Theme-2 auth-hardening — 5 parallel subagents** (file-disjoint: `auth.py` · `main.py` · `config.py` · `alerts.py`+`snapshots.py` · `deploy/`), coordinating via a frozen contract (4 new config settings + `auth.verify_node_id()` + `authenticate_user()`), then orchestrator-run full suite + review of the two highest-risk files. — commit `c4660d8` (local-only).
+    - **Timing-safe credential compares:** every secret compare (`EDGE_API_KEY` ×3 sites, dashboard user+password) went through plain `==`/`!=`, leaking length/prefix timing. All routed through a new `_ct_equal()` that compares **UTF-8 bytes** via `secrets.compare_digest` — bytes form is deliberate: `compare_digest` on non-ASCII `str` raises `TypeError`, and this is a Traditional-Chinese deployment where `DASHBOARD_PASS` may be non-ASCII (would otherwise 500 a valid login). `authenticate_user` evaluates both fields unconditionally (no short-circuit) so timing can't reveal which was wrong.
+    - **Login brute-force throttle:** per-client-IP monotonic-clock failure counter (`LOGIN_MAX_ATTEMPTS`/`LOGIN_LOCKOUT_SECONDS`); on lockout returns 429 **without** checking creds; success clears the counter. Per-process/in-memory (documented; fine for the single-worker MVP). Login now flows through the constant-time `authenticate_user` instead of an inline `==`.
+    - **Session-cookie flags:** `same_site="lax"` (CSRF) + `https_only=COOKIE_SECURE` (default False keeps HTTP-LAN working; flip once TLS-fronted). `httponly` is Starlette's default.
+    - **Edge node_id allowlist (trust boundary):** `verify_node_id()` gates `POST /api/alerts` (client-supplied node_id) and `POST /api/edge/{node_id}/snapshot` (path). `ALLOWED_NODE_IDS` empty by default ⇒ allow-all ⇒ **backward compatible** with the current single-node deploy; set it to lock ingest to known nodes. Video-upload path left alone (node_id there is server-derived, already trusted).
+    - **MQTT broker hardening (deploy):** `mosquitto.conf` gains a loud secure-mode block (password_file + acl_file + `allow_anonymous false`, commented so the running anonymous-LAN MVP isn't broken); new `mosquitto_acl.conf` least-privilege template (server `readwrite sdprs/edge/#`; per-node write-own / read-cmd) + `MQTT_SECURITY.md` operator guide. **No secrets committed**; ACL topics grounded on `shared/mqtt_topics.py` but flagged as reconcile-before-enable.
+    - **Test-isolation catch (integration):** `test_node_allowlist.py` initially set `ALLOWED_NODE_IDS` at *import* scope, which pytest's collection phase leaked into sibling modules (broke `test_config_auth_settings`'s default-assert + an alerts test). Moved the env mutation into a module-scoped setup/teardown fixture (cache-cleared both ends) → isolation restored. Production code was never at fault.
+    - Tests: central_server **54 → 72** (+18: auth-hardening 6, login-throttle 4, config-settings 2, node-allowlist 6). Full repo **216 pass**.
 
 ---
 
@@ -63,8 +71,9 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | **Pump-merge SDD effort** | ✅ **Complete, reviewed, merged, pushed.** ⚠️ **Not bench-commissioned on hardware** (spec §6). |
 | **V2 SPA dashboard** | ✅ On `main` (~4,900 LOC `.jsx`). Two security items fixed; detector-health pills added; perf (blanket-refresh) still open (Theme 5). |
 | **Theme-6 glass slice** | ✅ Silent-blinding, dead-simulate, stale-pairing, detector-health telemetry (`22e6084`, pushed) + **health now surfaced end-to-end in server/dashboard** (`3c110a2`, local). Remainder open (single-sensor fallback, blocking encode, buffer arithmetic). |
-| **Theme-4 data-lifecycle** | ✅ Retention delimiter (~24h boundary), `pump_readings` pruning, orphan-MP4 sweep, `weather_config` PG-startup wipe all fixed (`dddda76`, local). Remainder: retention PG-portability, unverified backups. |
-| **Tests** | **198 passing** (48 pump + 54 server + 96 glass). Zero failures. |
+| **Theme-4 data-lifecycle** | ✅ Retention delimiter (~24h boundary), `pump_readings` pruning, orphan-MP4 sweep, `weather_config` PG-startup wipe all fixed (`dddda76`, pushed). Remainder: retention PG-portability, unverified backups. |
+| **Theme-2 auth-hardening** | ✅ UTF-8-safe constant-time compares, per-IP login throttle, session-cookie flags, edge node_id allowlist, MQTT auth+ACL deploy template (`c4660d8`, local). Remainder: per-node API keys, auth'd snapshot/storage endpoints, WS-session tightening. |
+| **Tests** | **216 passing** (48 pump + 72 server + 96 glass). Zero failures. |
 | **Biggest remaining risk** | **Hardware commissioning gate** for pump sensors (spec §6) + **Theme 1** (PG data-access 500s) if/when cloud cutover happens. Neither affects the deployed SQLite LAN MVP. |
 
 **One-line status:** Pump-merge is shipped and green on `main`; the next work is the open reconstruction themes and the pump hardware bench pass — not fixing what shipped.
@@ -76,11 +85,11 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | Suite | Command | Result |
 |---|---|---|
 | edge_pump | `cd edge_pump && python -m pytest tests -q` | **48 passed** |
-| central_server | `cd central_server && python -m pytest tests -q` | **54 passed** (deprecation warnings) |
+| central_server | `cd central_server && python -m pytest tests -q` | **72 passed** (deprecation warnings) |
 | edge_glass | `cd edge_glass && python -m pytest tests -q` | **96 passed** |
-| **Total** | | **198 passed, 0 failed** |
+| **Total** | | **216 passed, 0 failed** |
 
-Environment: Python **3.14.3**, pytest **9.0.2**, FastAPI **0.135.1**. (+33 edge_glass tests from the T6 slice: vectorized-ring + staleness, anomaly recovery, trigger_engine correlation/reset, heartbeat detector-health, main-loop health helpers.)
+Environment: Python **3.14.3**, pytest **9.0.2**, FastAPI **0.135.1**. (central_server +18 from the T2 auth slice: constant-time compares, login throttle, config settings, node_id allowlist; +7 earlier from T4. edge_glass +33 from T6.)
 
 > **pytest + `[Cloud]` path trap:** a bare `pytest` from `edge_glass/` fails with *"path cannot contain [] parametrization"* — pytest parses the `[Cloud]` in the rootdir as a test-id. Pass an explicit **relative** test path instead: `python -m pytest tests -q`.
 
@@ -129,7 +138,7 @@ The pump-merge spec's Appendix decomposed a full audit into six themes. Pump-mer
 | # | Theme | Status | Detail |
 |---|---|---|---|
 | 1 | **Unify data-access layer** | 🔴 **Open** (latent) | ✓ `_init_postgresql()` sets `_pg_database` but never `_db_connection`; `get_db()` raises when `None`. **16 call sites** → cloud alert-response (ack/resolve/bulk/handover/audit) **500s in PG mode**. **SQLite LAN MVP unaffected.** Gate any PG/cloud cutover on this. |
-| 2 | **Close the trust boundary** | 🟡 **Advancing** | ✅ `SECRET_KEY`/`EDGE_API_KEY`/dashboard creds `required=True` (fail-closed). ✅ **NEW 2026-07-13:** SPA inline-script injection fixed (`55b351a`), spoofable `resolved_by` fixed (`4a8bdc2`). 🔴 Still open: placeholder detection warn-only, shared static `EDGE_API_KEY` (no per-node creds), MQTT ACL, path-traversal via unvalidated `node_id`, public snapshot leak, login throttle, cookie `Secure`/`SameSite`, constant-time compare. |
+| 2 | **Close the trust boundary** | 🟡 **Advancing** (`c4660d8`) | ✅ `SECRET_KEY`/`EDGE_API_KEY`/dashboard creds `required=True` (fail-closed). ✅ SPA inline-script injection fixed (`55b351a`), spoofable `resolved_by` fixed (`4a8bdc2`). ✅ **NEW 2026-07-13 (`c4660d8`):** UTF-8-safe **constant-time** compares (`_ct_equal`) for API key + dashboard creds; **login throttle** (per-IP, 429 lockout); cookie **`SameSite=Lax` + `Secure` (COOKIE_SECURE)**; **`node_id` allowlist** on alert/snapshot ingest (`ALLOWED_NODE_IDS`, empty=allow-all); **MQTT auth+ACL** deploy template (`mosquitto_acl.conf` + `MQTT_SECURITY.md`, secure-mode block in `mosquitto.conf`). 🔴 Still open: placeholder detection warn-only, shared static `EDGE_API_KEY` (no **per-node** creds), authenticated snapshot/storage endpoints (snapshot GET still public for `<img>`), storage-path traversal review, WS-session tightening. |
 | 3 | **Harden edge offline-autonomy** | 🟡 **Pump done, glass open** | ✅ Pump slice delivered (WDT, bounded I/O, guarded init, LWT). ⚠️ Truly bounding `umqtt connect()` needs a socket-factory/library change + hardware (deferred). 🔴 Glass slice open: blocking initial `connect()`; event data destroyed when MP4 cleanup deletes pending files then marks `UPLOADED`; 4xx → infinite tight-retry. |
 | 4 | **Data-lifecycle correctness** | 🟡 **Advancing** (`dddda76`) | ✅ **Fixed 2026-07-13:** retention delimiter ~24h boundary error (`datetime()`-normalized both sides in retention_service + event_service helpers); `pump_readings` now pruned (was unbounded); orphaned-MP4 fail-safe sweep added; `weather_config` no longer wiped on every PG startup. 🔴 Remaining: retention is SQLite-only (`datetime()` — PG portability, ties to T1); "trusted client timestamps" = non-issue for event retention (uses server `created_at`) but `pump_readings` prunes by edge-supplied `timestamp` (edge-clock trust, accepted); unverified backups. |
 | 5 | **Make observability real** | 🟡 **Advancing** | ✅ MQTT-thread WS loop-capture fixed (pump card live). ✅ **2026-07-13:** glass heartbeat emits `visual_health`/`audio_health` + throttled can-never-alert WARNING (`22e6084`), and the **server/dashboard now consume + surface them** (`3c110a2`) — a blinded-but-online camera shows 視覺/音訊 pills + `warn` status. 🔴 Remaining: SPA blanket-`refresh()` + N+1 fetch request storm; broadcast head-of-line blocking; offline-mark TOCTOU false alarm; LWT for glass; `broadcast_node_status` is dead code (live node-health push not wired — REST-refresh only). |
@@ -164,12 +173,12 @@ The pump-merge spec's Appendix decomposed a full audit into six themes. Pump-mer
 
 1. ~~Merge `spec/pump-merge → main`~~ ✅ **DONE 2026-07-13** (merged + pushed).
 2. **Bench-commission the pump sensors** (spec §6) before enabling `FLOAT_ENABLED`/`RAIN_ENABLED`. Highest-value remaining pump action.
-3. ~~Theme 6 silent detector-blinding~~ ✅ **DONE** (`22e6084`+`3c110a2`). ~~Theme 4 retention/pruning~~ ✅ **DONE 2026-07-13** (`dddda76` — delimiter, pump_readings, orphans, weather_config). **Next deployed-today candidates:** Theme 5 remainder (SPA blanket-`refresh()` + N+1 fetch request storm on the 24/7 dashboard) and Theme 6 remainder (single-sensor fallback design, blocking MP4 encode, buffer arithmetic). Theme 2 auth-hardening remains for a security-focused cycle.
-4. **Theme 2 remainder** — the 2 highest-risk SPA/auth items are fixed; the rest (per-node creds, MQTT ACL, `node_id` allowlist, authenticated snapshot/storage, login throttle, cookie flags) as a focused auth-hardening cycle.
+3. ~~Theme 6 silent detector-blinding~~ ✅ **DONE** (`22e6084`+`3c110a2`). ~~Theme 4 retention/pruning~~ ✅ **DONE** (`dddda76`). ~~Theme 2 auth-hardening (bulk)~~ ✅ **DONE 2026-07-13** (`c4660d8` — constant-time compares, login throttle, cookie flags, `node_id` allowlist, MQTT ACL template). **Next deployed-today candidates:** Theme 5 remainder (SPA blanket-`refresh()` + N+1 fetch request storm on the 24/7 dashboard) and Theme 6 remainder (single-sensor fallback design, blocking MP4 encode, buffer arithmetic).
+4. **Theme 2 remainder** — bulk auth-hardening shipped (`c4660d8`); what's left is the heavier/coupled work: **per-node** API keys (registry + edge coordination, breaks single-key deploy), authenticated snapshot/storage endpoints (snapshot GET is still public for `<img>` tags), storage-path traversal review, WS-session tightening.
 5. **Theme 5 remainder** — SPA blanket-refresh request storm (24/7 dashboard load).
 6. **Gate any PostgreSQL/cloud cutover on Theme 1.** Fine to defer on SQLite LAN; must be first if cloud is on the roadmap.
 7. **Housekeeping:** normalize the test harness (edge_glass imports → one repo-root `pytest`); migrate `datetime.utcnow()` before a Python bump.
 
 ---
 
-*Method: directory + LOC census, live `pytest` runs, `git` divergence analysis, direct source re-verification, and a 9-subagent final whole-branch review + a 2-subagent security slice. Findings marked ✓ were confirmed by reading current code.*
+*Method: directory + LOC census, live `pytest` runs, `git` divergence analysis, direct source re-verification, and a 9-subagent final whole-branch review + file-disjoint parallel-subagent slices (T2 security ×2, T6 glass ×5, detector-health ×2, T4 lifecycle ×2, T2 auth-hardening ×5). Findings marked ✓ were confirmed by reading current code.*
