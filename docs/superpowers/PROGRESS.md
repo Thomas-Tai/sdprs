@@ -3,7 +3,7 @@
 **Originally audited:** 2026-07-13 (evidence-based — every claim re-verified against the working tree)
 **Last updated:** 2026-07-13 — *after* the pump-merge merge/push, the Theme-6 glass-hardening + detector-health slices, the Theme-4 data-lifecycle slice, the Theme-2 auth-hardening slice, the Theme-5 observability slice, **and the Theme-3 glass-autonomy slice**.
 **Repo:** `sdprs/` (its own git repo; parent folder is not versioned) · **Remote:** `github.com/Thomas-Tai/sdprs`
-**Current branch/commit:** `main` @ `34efdf6` (**1 ahead of `origin/main` @ `3fde30e`** — non-blocking-capture impl `34efdf6` not yet pushed; glass-LWT `461c0ed` + docs + the design-proposal `3fde30e` already pushed)
+**Current branch/commit:** `main` @ `3a61fef` (**1 ahead of `origin/main` @ `ae63e6e`** — `datetime.utcnow()` migration `3a61fef` not yet pushed; non-blocking-capture `34efdf6` + docs `ae63e6e` already pushed)
 
 > Canonical, living progress tracker for the `docs/superpowers` workstream.
 > Task-by-task execution detail for the pump-merge effort lives in
@@ -14,7 +14,7 @@
 
 ## 0. Current status (headline)
 
-**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The Theme-6 glass-hardening slice is pushed, and its detector-health telemetry is now wired end-to-end** — edge heartbeat → server `/api/nodes` → SPA — so a blinded-but-online camera shows 視覺/音訊 health + degraded status to operators. **Theme-4 data-lifecycle correctness (retention delimiter, pump_readings pruning, orphan-MP4 sweep, weather_config persistence) is pushed** (`dddda76`). **Theme-2 auth-hardening (UTF-8-safe constant-time credential compares, per-IP login throttle, hardened session-cookie flags, edge node_id allowlist, MQTT auth+ACL deploy template) is pushed** (`c4660d8`). **Theme-5 observability (dashboard request-storm coalescing, WS broadcast head-of-line-blocking fix, offline-mark TOCTOU false-alarm fix) is pushed** (`9d3f063`). **Theme-3 glass offline-autonomy (upload gives up on 4xx / after max retries instead of retrying forever, MP4-missing marks FAILED not false-UPLOADED, non-blocking MQTT connect at boot) is pushed** (`73b5af0`). **The dashboard's last per-refresh N+1 (`/pump/{id}/cycles` per pump) is collapsed to a single `/api/pumps/cycles` batch call** (`525452e`). **Glass MQTT Last-Will now marks a crashed node OFFLINE instantly** (`461c0ed`). **The non-blocking glass event-capture redesign is implemented and shipped DORMANT** behind `capture.async_encode` (default off) — a triggered event no longer stalls the capture loop with a 5s camera-blocking record + inline ffmpeg; post-frames come from the circular buffer and encoding runs on a worker thread (`34efdf6`, local-only). Flag stays off until the §8 hardware-validation gate. **261 tests pass** (edge_pump 48 · central_server 89 · edge_glass 124).
+**The pump-merge reconstruction + the entire V2 SPA are merged to `main` and pushed to origin.** `main` had been idle since 2026-05-09; it is now the live line again. The two security defects that rode in with the SPA baseline have been fixed. **The Theme-6 glass-hardening slice is pushed, and its detector-health telemetry is now wired end-to-end** — edge heartbeat → server `/api/nodes` → SPA — so a blinded-but-online camera shows 視覺/音訊 health + degraded status to operators. **Theme-4 data-lifecycle correctness (retention delimiter, pump_readings pruning, orphan-MP4 sweep, weather_config persistence) is pushed** (`dddda76`). **Theme-2 auth-hardening (UTF-8-safe constant-time credential compares, per-IP login throttle, hardened session-cookie flags, edge node_id allowlist, MQTT auth+ACL deploy template) is pushed** (`c4660d8`). **Theme-5 observability (dashboard request-storm coalescing, WS broadcast head-of-line-blocking fix, offline-mark TOCTOU false-alarm fix) is pushed** (`9d3f063`). **Theme-3 glass offline-autonomy (upload gives up on 4xx / after max retries instead of retrying forever, MP4-missing marks FAILED not false-UPLOADED, non-blocking MQTT connect at boot) is pushed** (`73b5af0`). **The dashboard's last per-refresh N+1 (`/pump/{id}/cycles` per pump) is collapsed to a single `/api/pumps/cycles` batch call** (`525452e`). **Glass MQTT Last-Will now marks a crashed node OFFLINE instantly** (`461c0ed`). **The non-blocking glass event-capture redesign is implemented and shipped DORMANT** behind `capture.async_encode` (default off) — a triggered event no longer stalls the capture loop with a 5s camera-blocking record + inline ffmpeg; post-frames come from the circular buffer and encoding runs on a worker thread (`34efdf6`, local-only). Flag stays off until the §8 hardware-validation gate. **The `datetime.utcnow()` deprecation debt is cleared** — all 32 production sites migrated to a naive-UTC helper (`3a61fef`). **264 tests pass** (edge_pump 48 · central_server 92 · edge_glass 124).
 
 The remaining work is the (now-advancing) open reconstruction themes plus one **hardware** gate: the pump sensors are **not yet bench-commissioned**, so they ship OFF / analog-only until spec §6 is done. No coding blocker remains on what shipped.
 
@@ -85,6 +85,10 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
     - **Rollout:** `async_encode=false` is byte-for-byte the legacy blocking path (verified by diff review); the new path ships dormant until the spec §8 hardware-validation gate (bench Pi + camera) flips it on. `record_post_trigger` retained for the legacy path.
     - **Verification:** the new module is fully unit-tested; the main-loop wiring (not unit-testable) is diff-reviewed + a runtime smoke test replicated main()'s exact async sequence (clamp→add→due→slice→submit→enqueue) against the real module.
     - Tests: edge_glass **109 → 124** (+15: tracker due-boundaries, slice_window, clamp invariant, EncodeWorker enqueue/encode-fail-survives/drop-newest). Full repo **261 pass**.
+16. **`datetime.utcnow()` deprecation migration — 3 parallel subagents** (file-disjoint: `services/*` · `api/*` · root `database.py`+`main.py`), consuming a helper I created first (`central_server/timeutil.py`), then orchestrator-run suite + a broad aliased-call sweep + a fix. — commit `3a61fef` (local-only). Clears the tracked debt before a Python bump (`utcnow()` is deprecated 3.12+, slated for removal).
+    - **The trap:** `datetime.utcnow()` returns **naive** UTC; the codebase stores/compares naive-UTC timestamps and relies on `.isoformat()` having no tz suffix (retention delimiter logic, `last_heartbeat` math). A naive swap to `datetime.now(timezone.utc)` would add `+00:00` and silently break those paths — so the helper deliberately returns naive (`.replace(tzinfo=None)`), and `test_timeutil` locks that contract in.
+    - All **32** production sites across 9 files migrated to `timeutil.utcnow()`. Pure refactor, zero behavior change (the pre-existing suite stayed green). Caught an aliased `_dt.utcnow()` in alerts.py that the name-based grep missed. Deprecation warnings **91 → 35** (remainder = test-file `utcnow` + Pydantic). Test files' `utcnow` left as-is (cosmetic, out of scope).
+    - Tests: central_server **89 → 92** (+3 timeutil naive-UTC contract guards). Full repo **264 pass**.
 
 ---
 
@@ -101,7 +105,7 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | **Theme-2 auth-hardening** | ✅ UTF-8-safe constant-time compares, per-IP login throttle, session-cookie flags, edge node_id allowlist, MQTT auth+ACL deploy template (`c4660d8`, pushed). Remainder: per-node API keys, auth'd snapshot/storage endpoints, WS-session tightening. |
 | **Theme-5 observability** | ✅ Request-storm coalescing, WS HOL-blocking fix, offline-mark TOCTOU fix (`9d3f063`), `/cycles` N+1 → batch (`525452e`), **glass MQTT Last-Will → instant offline** (`461c0ed`, local). Remainder: live node-health WS *push* (`broadcast_node_status` dead code; health currently flows via REST-refresh-on-event, which works). |
 | **Theme-3 glass autonomy** | ✅ Upload gives up on 4xx / after max retries, MP4-missing → FAILED, non-blocking MQTT connect at boot (`73b5af0`). ✅ **blocking MP4 encode + buffer arithmetic → non-blocking capture implemented** (`34efdf6`, dormant behind `capture.async_encode`, awaiting §8 hardware gate). No open code items — pump sensors still need the hardware bench (spec §6). |
-| **Tests** | **261 passing** (48 pump + 89 server + 124 glass). Zero failures. |
+| **Tests** | **264 passing** (48 pump + 92 server + 124 glass). Zero failures. |
 | **Biggest remaining risk** | **Hardware commissioning gate** for pump sensors (spec §6) + **Theme 1** (PG data-access 500s) if/when cloud cutover happens. Neither affects the deployed SQLite LAN MVP. |
 
 **One-line status:** Pump-merge is shipped and green on `main`; the next work is the open reconstruction themes and the pump hardware bench pass — not fixing what shipped.
@@ -113,9 +117,9 @@ The remaining work is the (now-advancing) open reconstruction themes plus one **
 | Suite | Command | Result |
 |---|---|---|
 | edge_pump | `cd edge_pump && python -m pytest tests -q` | **48 passed** |
-| central_server | `cd central_server && python -m pytest tests -q` | **89 passed** (deprecation warnings) |
+| central_server | `cd central_server && python -m pytest tests -q` | **92 passed** (35 warnings, was 91 — utcnow migrated) |
 | edge_glass | `cd edge_glass && python -m pytest tests -q` | **124 passed** |
-| **Total** | | **261 passed, 0 failed** |
+| **Total** | | **264 passed, 0 failed** |
 
 Environment: Python **3.14.3**, pytest **9.0.2**, FastAPI **0.135.1**. (edge_glass +15 from non-blocking capture, +2 from glass-LWT, +11 from T3, +33 from T6. central_server +4 glass-LWT, +4 batch-cycles, +9 T5, +18 T2 auth, +7 T4. The SPA `app.jsx`/`api.jsx` changes + the `edge_glass_main.py` async wiring have no automated test — verified by diff review + a runtime integration smoke test.)
 
@@ -123,7 +127,7 @@ Environment: Python **3.14.3**, pytest **9.0.2**, FastAPI **0.135.1**. (edge_gla
 
 **Caveats worth fixing (unchanged):**
 1. **edge_glass import convention diverges** — bare imports (`from utils…`, `from detectors…`) only collect when `edge_glass/` is the CWD; `pytest` from repo root fails collection. CI/portability trap; normalize so one command runs all three suites.
-2. **`datetime.utcnow()` deprecation** — 29 call sites in `central_server`; scheduled for removal. Migrate to `datetime.now(datetime.UTC)` before a Python bump.
+2. ~~**`datetime.utcnow()` deprecation** — 29 call sites in `central_server`~~ ✅ **DONE** (`3a61fef`) — all 32 production sites → `central_server/timeutil.utcnow()` (naive-UTC helper). Test-file `utcnow` intentionally left (cosmetic).
 
 ---
 
@@ -205,8 +209,8 @@ The pump-merge spec's Appendix decomposed a full audit into six themes. Pump-mer
 4. **Theme 2 remainder** — bulk auth-hardening shipped (`c4660d8`); what's left is the heavier/coupled work: **per-node** API keys (registry + edge coordination, breaks single-key deploy), authenticated snapshot/storage endpoints (snapshot GET is still public for `<img>` tags), storage-path traversal review, WS-session tightening.
 5. **Theme 5 remainder** — only live node-health WS *push* left (`broadcast_node_status` is dead code; health already rides REST-refresh-on-event). (✅ done: `/cycles` batch `525452e`, glass LWT `461c0ed`.) Low value vs. the shipped debounce/HOL/TOCTOU/batch/LWT fixes.
 6. **Gate any PostgreSQL/cloud cutover on Theme 1.** Fine to defer on SQLite LAN; must be first if cloud is on the roadmap.
-7. **Housekeeping:** normalize the test harness (edge_glass imports → one repo-root `pytest`); migrate `datetime.utcnow()` before a Python bump.
+7. **Housekeeping:** normalize the test harness (edge_glass imports → one repo-root `pytest`). (~~migrate `datetime.utcnow()`~~ ✅ done `3a61fef`.)
 
 ---
 
-*Method: directory + LOC census, live `pytest` runs, `git` divergence analysis, direct source re-verification, and a 9-subagent final whole-branch review + file-disjoint parallel-subagent slices (T2 security ×2, T6 glass ×5, detector-health ×2, T4 lifecycle ×2, T2 auth-hardening ×5, T5 observability ×3, T3 glass-autonomy ×2, T5 batch-cycles ×2, T5 glass-LWT ×2, non-blocking-capture ×2). Findings marked ✓ were confirmed by reading current code.*
+*Method: directory + LOC census, live `pytest` runs, `git` divergence analysis, direct source re-verification, and a 9-subagent final whole-branch review + file-disjoint parallel-subagent slices (T2 security ×2, T6 glass ×5, detector-health ×2, T4 lifecycle ×2, T2 auth-hardening ×5, T5 observability ×3, T3 glass-autonomy ×2, T5 batch-cycles ×2, T5 glass-LWT ×2, non-blocking-capture ×2, utcnow-migration ×3). Findings marked ✓ were confirmed by reading current code.*
