@@ -76,6 +76,13 @@ class VisualDetector:
         # [3] 異常幀排除
         self._baseline_brightness: Optional[float] = None
 
+        # [3] 持續性異常復原（避免偵測器被日夜/燈光/移位永久致盲）
+        self._anomaly_recovery_seconds = config.get("anomaly_recovery_seconds", 3)
+        self._anomaly_recovery_frames = max(1, int(fps * self._anomaly_recovery_seconds))
+        self._consecutive_anomaly_count = 0
+        # 公開旗標：持續性異常導致視覺偵測實質失效時為 True
+        self.blinded = False
+
         # [4] 自適應基線
         baseline_maxlen = fps * self._baseline_window_seconds
         self._baseline_frames: Deque[np.ndarray] = collections.deque(maxlen=baseline_maxlen)
@@ -222,11 +229,38 @@ class VisualDetector:
         diff = abs(mean_brightness - self._baseline_brightness)
 
         if diff > threshold:
+            # 異常幀：累計連續異常次數
+            self._consecutive_anomaly_count += 1
+
+            if self._consecutive_anomaly_count > self._anomaly_recovery_frames:
+                # 持續性異常（日夜轉換、燈光切換、相機重新定位）：
+                # 重新建立基線，避免視覺偵測被永久致盲、無法復原
+                self._baseline_brightness = mean_brightness
+                self._consecutive_anomaly_count = 0
+                # 清空視覺基線，讓其重新乾淨建立
+                self._baseline_frames.clear()
+                self._baseline_image = None
+                self._baseline_edge_density = 0.0
+                self._frame_count = 0
+                self.blinded = False
+                logger.warning(
+                    "Visual re-baselined after sustained anomaly (%d frames)",
+                    self._anomaly_recovery_frames,
+                )
+                # 接受此幀作為新的正常基準
+                return True
+
+            # 尚未達到重建門檻：視覺偵測暫時致盲
             logger.debug(
                 f"Anomaly frame detected: brightness={mean_brightness:.1f}, "
                 f"baseline={self._baseline_brightness:.1f}, diff={diff:.1f}"
             )
+            self.blinded = True
             return False
+
+        # 正常幀：重置連續異常計數與致盲旗標
+        self._consecutive_anomaly_count = 0
+        self.blinded = False
 
         # 更新亮度基線（滾動平均）
         alpha = 0.05

@@ -93,8 +93,6 @@ def start_audio_stream(
         pa = pyaudio.PyAudio()
         # Store pa reference for proper cleanup
         start_audio_stream._pa = pa
-        # Store pa reference for proper cleanup
-        start_audio_stream._pa = pa
 
         def audio_callback(in_data, frame_count, time_info, status):
             samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
@@ -149,6 +147,52 @@ def record_post_trigger(
     return frames
 
 
+def open_camera(cam_config: dict) -> "cv2.VideoCapture":
+    """
+    開啟攝像頭並套用解析度／幀率設定。
+
+    初次開啟與失敗後重開皆使用此函式，確保重開後攝像頭參數一致，
+    避免尺寸改變導致偵測器失效。
+
+    Args:
+        cam_config: 攝像頭配置（source / resolution / fps）
+
+    Returns:
+        已套用設定的 OpenCV VideoCapture 實例
+    """
+    cam = cv2.VideoCapture(cam_config["source"])
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, cam_config["resolution"][0])
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_config["resolution"][1])
+    cam.set(cv2.CAP_PROP_FPS, cam_config["fps"])
+    return cam
+
+
+def compute_audio_health(audio_stream_present: bool, audio_stale: bool) -> str:
+    """
+    計算音訊偵測器健康狀態。
+
+    優先順序：disabled（無串流）> stale（資料過舊）> ok。
+    """
+    if not audio_stream_present:
+        return "disabled"
+    if audio_stale:
+        return "stale"
+    return "ok"
+
+
+def compute_visual_health(thermal_paused: bool, visual_blinded: bool) -> str:
+    """
+    計算視覺偵測器健康狀態。
+
+    優先順序：blinded（畫面遮蔽）> paused（熱管理暫停）> ok。
+    """
+    if visual_blinded:
+        return "blinded"
+    if thermal_paused:
+        return "paused"
+    return "ok"
+
+
 def main():
     """主函式。"""
     global _running
@@ -189,16 +233,11 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # 初始化攝像頭
-    camera = cv2.VideoCapture(config["camera"]["source"])
+    # 初始化攝像頭（套用解析度／幀率設定）
+    camera = open_camera(config["camera"])
     if not camera.isOpened():
         logger.error("Failed to open camera")
         sys.exit(1)
-
-    # 設定攝像頭參數
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, config["camera"]["resolution"][0])
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config["camera"]["resolution"][1])
-    camera.set(cv2.CAP_PROP_FPS, config["camera"]["fps"])
 
     # 初始化組件
     buffer = CircularBuffer(
@@ -279,6 +318,9 @@ def main():
     # 啟動音訊串流 (Thread 2)
     audio_stream = start_audio_stream(audio_detector, config["audio"])
 
+    # 模擬觸發請求標誌（供 MQTT simulate_trigger 指令設定，主迴圈讀取）
+    sim_request = [False]
+
     # 啟動 MQTT 客戶端 (Thread 3)
     if mqtt_client:
         # 註冊指令回調
@@ -299,6 +341,7 @@ def main():
             """處理 simulate_trigger 指令。"""
             logger.info(f"Simulate trigger command received: {payload}")
             # 設定一個標誌讓主迴圈觸發測試事件
+            sim_request[0] = True
 
         mqtt_client.register_command_handler("update", handle_update)
         mqtt_client.register_command_handler("simulate_trigger", handle_simulate_trigger)
@@ -328,6 +371,8 @@ def main():
 
     # 初始化熱管理共享變數（來自 Thread 6）
     last_snapshot_time = time.time()
+    last_health_time = time.time()       # 偵測器健康上報節流計時器（約每 5 秒）
+    last_degraded_warn_time = 0.0        # 降級警告節流計時器（約每 30 秒）
     cooldown_until = 0
     fps_target = config["camera"]["fps"]
 
@@ -348,7 +393,7 @@ def main():
                 break
             time.sleep(backoff)
             camera.release()
-            camera = cv2.VideoCapture(config["camera"]["source"])
+            camera = open_camera(config["camera"])
             if not camera.isOpened():
                 continue
             continue
@@ -375,8 +420,15 @@ def main():
         # 5. 融合判定
         event = trigger_engine.evaluate(visual_result, audio_result, current_time=timestamp)
 
-        # 6. 觸發處理
-        if event and timestamp > cooldown_until:
+        # 5b. 模擬觸發（--simulate 旗標或 MQTT simulate_trigger 指令）
+        if simulate_trigger or sim_request[0]:
+            simulate_trigger = False
+            sim_request[0] = False
+            event = trigger_engine.force_trigger(current_time=timestamp)
+            logger.info("Simulation event created")
+
+        # 6. 觸發處理（模擬事件不受冷卻時間限制）
+        if event and (getattr(event, "is_simulation", False) or timestamp > cooldown_until):
             logger.info(
                 f"EVENT TRIGGERED: confidence={event.visual_confidence:.2f}, "
                 f"delta_db={event.audio_delta_db:.1f}"
@@ -443,12 +495,28 @@ def main():
                 except Exception as e:
                     logger.error(f"Failed to push snapshot: {e}")
 
-        # 13. 模擬觸發（來自 MQTT 命令）
-        if simulate_trigger:
-            logger.info("Simulation mode: triggering test event...")
-            simulate_trigger = False
-            event = trigger_engine.force_trigger()
-            logger.info(f"Simulation event created: {event}")
+        # 13. 偵測器健康上報（節流：約每 5 秒）
+        if timestamp - last_health_time >= 5.0:
+            last_health_time = timestamp
+            audio_health = compute_audio_health(
+                audio_stream is not None, audio_detector.is_stale(5.0)
+            )
+            visual_health = compute_visual_health(
+                thermal_monitor.visual_paused,
+                getattr(visual_detector, "blinded", False),
+            )
+            if mqtt_client:
+                mqtt_client.set_detector_health(visual=visual_health, audio=audio_health)
+
+            # 降級警告（節流：約每 30 秒）—— 節點可能無法告警
+            if audio_health != "ok" or visual_health != "ok":
+                if timestamp - last_degraded_warn_time >= 30.0:
+                    last_degraded_warn_time = timestamp
+                    logger.warning(
+                        "Detector degraded: audio=%s visual=%s — node may be unable to alert",
+                        audio_health,
+                        visual_health,
+                    )
 
         # 14. 動態 FPS 控制（受熱管理影響）
         elapsed = time.time() - loop_start

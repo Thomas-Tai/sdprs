@@ -146,6 +146,11 @@ class TriggerEngine:
         # 更新上次事件時間
         self._last_event_time = current_time
 
+        # 重置觸發時間戳：下一次事件必須由兩個「新鮮」觸發重新配對，
+        # 避免陳舊時間戳殘留造成後續誤觸發。
+        self._last_visual_trigger_time = None
+        self._last_audio_trigger_time = None
+
         logger.info(
             f"EVENT TRIGGERED: confidence={event.visual_confidence:.2f}, "
             f"delta_db={event.audio_delta_db:.1f}, "
@@ -156,7 +161,13 @@ class TriggerEngine:
 
     def _check_correlation(self, current_time: float) -> bool:
         """
-        檢查視覺和音訊是否在相關窗口內同時觸發。
+        檢查視覺和音訊是否「當前皆處於觸發狀態」。
+
+        僅當偵測器的最後觸發時間戳存在，且距今仍在相關窗口內
+        （current_time - last_trigger_time <= window）時，該偵測器才算
+        「當前觸發」。唯有視覺與音訊「雙方都當前觸發」才回傳 True。
+
+        此定義天然排除陳舊觸發：久遠的視覺觸發不會與新鮮的音訊觸發配對。
 
         Args:
             current_time: 當前時間
@@ -164,21 +175,22 @@ class TriggerEngine:
         Returns:
             是否滿足相關條件
         """
-        if self._last_visual_trigger_time is None:
-            return False
-
-        if self._last_audio_trigger_time is None:
-            return False
-
-        # 計算兩次觸發的時間差
-        time_diff = abs(
-            self._last_visual_trigger_time - self._last_audio_trigger_time
+        # 視覺是否當前觸發（時間戳存在且仍在窗口內）
+        visual_active = (
+            self._last_visual_trigger_time is not None
+            and current_time - self._last_visual_trigger_time
+            <= self._correlation_window
         )
 
-        if time_diff <= self._correlation_window:
-            logger.debug(
-                f"Correlation check passed: time_diff={time_diff:.3f}s"
-            )
+        # 音訊是否當前觸發（時間戳存在且仍在窗口內）
+        audio_active = (
+            self._last_audio_trigger_time is not None
+            and current_time - self._last_audio_trigger_time
+            <= self._correlation_window
+        )
+
+        if visual_active and audio_active:
+            logger.debug("Correlation check passed: visual and audio both active")
             return True
 
         return False
@@ -219,6 +231,10 @@ class TriggerEngine:
         )
 
         logger.info(f"SIMULATION EVENT TRIGGERED at {current_time:.3f}")
+
+        # 重置觸發時間戳：與 evaluate() 一致，避免陳舊時間戳殘留。
+        self._last_visual_trigger_time = None
+        self._last_audio_trigger_time = None
 
         return event
 

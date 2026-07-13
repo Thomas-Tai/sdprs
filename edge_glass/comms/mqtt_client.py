@@ -106,6 +106,9 @@ class MQTTClient:
 
         # 共享狀態（由主迴圈設定）
         self._buffer_health = "ok"
+        # 偵測器健康狀態（telemetry-only，由主迴圈設定）
+        self._visual_health = "unknown"
+        self._audio_health = "unknown"
 
         # 啟動時間
         self._start_time = time.monotonic()
@@ -264,6 +267,8 @@ class MQTTClient:
             "status": "online",
             "cpu_temp": self._get_cpu_temp(),
             "buffer_health": self._buffer_health,
+            "visual_health": self._visual_health,
+            "audio_health": self._audio_health,
             "uptime_seconds": int(time.monotonic() - self._start_time),
             "memory_usage_percent": self._get_memory_usage(),
         }
@@ -336,6 +341,13 @@ class MQTTClient:
             status: 健康狀態（"ok", "warning", "error"）
         """
         self._buffer_health = status
+
+    def set_detector_health(self, visual: Optional[str] = None, audio: Optional[str] = None) -> None:
+        """設定偵測器健康狀態（telemetry-only）。visual/audio 例：ok/paused/blinded/disabled/stale。"""
+        if visual is not None:
+            self._visual_health = visual
+        if audio is not None:
+            self._audio_health = audio
 
     def publish_stream_status(self, status_data: dict):
         """

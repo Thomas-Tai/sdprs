@@ -25,6 +25,7 @@
 
 import collections
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -77,6 +78,12 @@ class AudioDetector:
         self._audio_buffer = np.zeros(self._window_size, dtype=np.float32)
         self._write_index = 0
         self._buffer_filled = False
+        self._samples_written = 0  # 累計已寫入樣本數（用於判定緩衝區填充）
+
+        # 音訊活性追蹤：最後一次收到 chunk 的 monotonic 時間戳。
+        # 初始化為誕生時間，作為啟動寬限期（避免剛啟動即被判為 stale），
+        # 同時涵蓋「stream 中途假死」與「從未啟動」兩種情況。
+        self._last_chunk_monotonic = time.monotonic()
 
         # RMS 滾動基線（最近 30 秒的 RMS dB 值）
         # 分析頻率 ≈ 每 50ms 一次 → 30s / 0.05s = 600 個值
@@ -102,21 +109,47 @@ class AudioDetector:
         接收音訊樣本寫入環形緩衝區。
         由 PyAudio 回調調用（~512 samples per chunk）。
 
+        使用向量化 numpy slice 寫入（取代逐樣本 Python 迴圈），
+        避免即時回調處理過慢導致回調逾時、音訊掉幀。
+        語意與舊的逐元素環形寫入完全等價：
+        `self._write_index` 為下一個寫入位置，
+        `_get_current_samples()` 以 np.roll 線性化。
+
         Args:
             samples: float32 numpy array（正規化後的音訊樣本）
         """
+        # 更新最後一次收到 chunk 的時間戳（音訊活性追蹤）
+        self._last_chunk_monotonic = time.monotonic()
+
         # 轉換為 float32
         if samples.dtype != np.float32:
             samples = samples.astype(np.float32)
 
-        # 寫入環形緩衝區
         n = len(samples)
-        for i in range(n):
-            self._audio_buffer[self._write_index] = samples[i]
-            self._write_index = (self._write_index + 1) % self._window_size
+        if n == 0:
+            return
 
-        # 標記緩衝區已填充
-        if not self._buffer_filled and self._write_index >= self._window_size // 2:
+        window = self._window_size
+
+        if n >= window:
+            # chunk 大於窗口：只保留最後 window 個樣本，write_index 歸零
+            self._audio_buffer[:] = samples[-window:]
+            self._write_index = 0
+        else:
+            end = self._write_index + n
+            if end <= window:
+                # 不跨越邊界：單一 slice 寫入
+                self._audio_buffer[self._write_index:end] = samples
+            else:
+                # 跨越邊界：拆成兩段寫入（環形 wraparound）
+                first = window - self._write_index
+                self._audio_buffer[self._write_index:] = samples[:first]
+                self._audio_buffer[: n - first] = samples[first:]
+            self._write_index = end % window
+
+        # 累計已寫入樣本數，標記緩衝區已填充
+        self._samples_written += n
+        if not self._buffer_filled and self._samples_written >= window // 2:
             self._buffer_filled = True
 
     def _get_current_samples(self) -> np.ndarray:
@@ -128,6 +161,35 @@ class AudioDetector:
         """
         # 使用 roll 將環形緩衝區展平
         return np.roll(self._audio_buffer, -self._write_index)
+
+    # ============================================================
+    # 音訊活性 / 假死偵測
+    # ============================================================
+    def seconds_since_last_chunk(self) -> float:
+        """
+        距離上一次收到音訊 chunk 的秒數。
+
+        使用 monotonic 時鐘（不受系統時間調整影響）。
+
+        Returns:
+            自上次 process_chunk 以來經過的秒數
+        """
+        return time.monotonic() - self._last_chunk_monotonic
+
+    def is_stale(self, max_age_seconds: float) -> bool:
+        """
+        判定音訊 stream 是否假死（過久未收到 chunk）。
+
+        由於誕生時間在 __init__ 即初始化，此方法同時涵蓋
+        「stream 中途假死」與「stream 從未啟動」兩種情況。
+
+        Args:
+            max_age_seconds: 容許的最大無資料秒數
+
+        Returns:
+            若超過 max_age_seconds 未收到 chunk 則為 True
+        """
+        return self.seconds_since_last_chunk() > max_age_seconds
 
     # ============================================================
     # 步驟 [1] RMS 計算

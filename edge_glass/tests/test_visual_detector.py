@@ -174,3 +174,62 @@ class TestVisualDetectorROI:
         assert detector._roi_mask[100, 200] == 255  # 內部點
         # 檢查外部點應為 0
         assert detector._roi_mask[10, 10] == 0  # 外部點（左上角）
+
+
+class TestVisualDetectorAnomalyRecovery:
+    """測試持續性異常復原（避免偵測器被永久致盲）。"""
+
+    def test_single_anomaly_sets_blinded(self, detector):
+        """建立基線後，單一異常幀返回 None 且致盲旗標為 True。"""
+        normal_frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
+
+        # Feed ~10 幀正常灰色幀建立亮度基線
+        for _ in range(10):
+            detector.analyze(normal_frame)
+
+        # 傳入一幀全白（異常）幀
+        white_frame = np.full((720, 1280, 3), 255, dtype=np.uint8)
+        result = detector.analyze(white_frame)
+
+        # 單一異常幀仍返回 None，且此時偵測器致盲
+        assert result is None
+        assert detector.blinded is True
+
+    def test_sustained_anomaly_recovers(self, detector):
+        """持續餵入超過 fps*3 幀的白幀 → 偵測器重新建立基線並復原。"""
+        normal_frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
+
+        # 建立基線
+        for _ in range(10):
+            detector.analyze(normal_frame)
+
+        white_frame = np.full((720, 1280, 3), 255, dtype=np.uint8)
+
+        # 連續餵入白幀（多於 fps*3 = 45 幀），追蹤是否發生復原
+        recovered = False
+        recovered_at = None
+        for i in range(50):
+            result = detector.analyze(white_frame)
+            if result is not None:
+                # 出現非 None 結果代表重新建立基線（復原）
+                recovered = True
+                recovered_at = i
+                break
+
+        assert recovered, "持續性異常後偵測器應重新建立基線並復原"
+        assert isinstance(result, VisualResult)
+        # 復原時致盲旗標應回到 False
+        assert detector.blinded is False
+
+        # 復原後繼續餵入白幀（現在的新「正常」）不應每次都返回 None
+        none_count = 0
+        non_none_count = 0
+        for _ in range(20):
+            post = detector.analyze(white_frame)
+            if post is None:
+                none_count += 1
+            else:
+                non_none_count += 1
+
+        assert non_none_count > 0, "復原後白幀已成為新的正常基準，不應持續返回 None"
+        assert detector.blinded is False

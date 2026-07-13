@@ -304,3 +304,145 @@ class TestAudioDetectorSpectralFlatness:
         assert result is not None
         # 正弦波 flatness 應很低
         assert result.flatness < 0.3, f"Sine wave flatness should be low, got {result.flatness}"
+
+
+def _reference_ring(chunks, window_size):
+    """
+    參考模型：以逐元素環形寫入模擬環形緩衝區，
+    回傳與 _get_current_samples() 等價的線性化結果。
+
+    這是舊版 process_chunk 的行為（純 Python 逐樣本迴圈），
+    用來驗證向量化寫入的正確性。
+    """
+    buf = np.zeros(window_size, dtype=np.float32)
+    write_index = 0
+    for chunk in chunks:
+        chunk = chunk.astype(np.float32)
+        for i in range(len(chunk)):
+            buf[write_index] = chunk[i]
+            write_index = (write_index + 1) % window_size
+    # 與 _get_current_samples() 相同的線性化方式
+    return np.roll(buf, -write_index), write_index
+
+
+class TestAudioDetectorVectorizedRing:
+    """測試向量化環形緩衝區寫入的正確性。"""
+
+    def test_ring_matches_reference_across_wraparound(self):
+        """
+        餵入已知 ramp（跨越 wraparound 邊界），
+        _get_current_samples() 應與逐元素參考模型完全一致。
+        """
+        detector = AudioDetector(AUDIO_CONFIG)
+        window = detector._window_size
+
+        # 建構會跨越邊界的多個 chunk。
+        # 使用不整除 window 的 chunk 大小，確保寫入指標會 wraparound。
+        chunk_size = 513
+        # 餵入約 3 個 window 的樣本量，保證多次跨越邊界
+        total = window * 3 + 777
+        ramp = np.arange(total, dtype=np.float32)
+
+        chunks = [
+            ramp[i : i + chunk_size] for i in range(0, len(ramp), chunk_size)
+        ]
+
+        for chunk in chunks:
+            detector.process_chunk(chunk)
+
+        ref_samples, ref_write_index = _reference_ring(chunks, window)
+
+        # write_index 與參考模型一致
+        assert detector._write_index == ref_write_index
+        # 線性化後的樣本與參考模型完全一致
+        np.testing.assert_array_equal(detector._get_current_samples(), ref_samples)
+
+    def test_ring_single_wraparound_chunk(self):
+        """單一 chunk 恰好跨越邊界時的正確性。"""
+        detector = AudioDetector(AUDIO_CONFIG)
+        window = detector._window_size
+
+        # 先寫入接近末端的樣本，使下一個 chunk 必跨越邊界
+        prefill = np.arange(window - 100, dtype=np.float32)
+        detector.process_chunk(prefill)
+        assert detector._write_index == window - 100
+
+        # 這個 chunk (300 samples) 會跨越邊界
+        crossing = np.arange(1000, 1000 + 300, dtype=np.float32)
+        detector.process_chunk(crossing)
+
+        ref_samples, ref_write_index = _reference_ring(
+            [prefill, crossing], window
+        )
+        assert detector._write_index == ref_write_index
+        np.testing.assert_array_equal(detector._get_current_samples(), ref_samples)
+
+    def test_chunk_larger_than_window(self):
+        """chunk 大於窗口時，只保留最後 window 個樣本，write_index=0。"""
+        detector = AudioDetector(AUDIO_CONFIG)
+        window = detector._window_size
+
+        big = np.arange(window * 2 + 50, dtype=np.float32)
+        detector.process_chunk(big)
+
+        assert detector._write_index == 0
+        # 只保留最後 window 個樣本
+        np.testing.assert_array_equal(
+            detector._get_current_samples(), big[-window:]
+        )
+
+    def test_buffer_filled_flips_only_after_half_window(self):
+        """_buffer_filled 應僅在累計樣本數 >= window//2 後才為 True。"""
+        detector = AudioDetector(AUDIO_CONFIG)
+        window = detector._window_size
+        half = window // 2
+
+        chunk_size = 512
+        written = 0
+        while written < half - chunk_size:
+            detector.process_chunk(np.zeros(chunk_size, dtype=np.float32))
+            written += chunk_size
+            # 尚未達到半個窗口 → 不應填充
+            assert detector._buffer_filled is False, (
+                f"buffer_filled 過早翻轉，已寫入 {written} < {half}"
+            )
+
+        # 再餵入足量樣本跨過 window//2 門檻
+        while detector._samples_written < half:
+            detector.process_chunk(np.zeros(chunk_size, dtype=np.float32))
+
+        assert detector._samples_written >= half
+        assert detector._buffer_filled is True
+
+
+class TestAudioDetectorStaleness:
+    """測試音訊活性 / 假死偵測。"""
+
+    def test_not_stale_immediately_after_chunk(self, detector):
+        """process_chunk 之後立即檢查，不應為 stale。"""
+        detector.process_chunk(np.zeros(512, dtype=np.float32))
+
+        assert detector.is_stale(5.0) is False
+        assert detector.seconds_since_last_chunk() < 5.0
+
+    def test_stale_after_time_passes(self, detector):
+        """模擬時間流逝後，應判為 stale。"""
+        detector.process_chunk(np.zeros(512, dtype=np.float32))
+
+        # 手動回撥最後 chunk 時間 10 秒，模擬 stream 假死
+        detector._last_chunk_monotonic -= 10
+
+        assert detector.is_stale(5.0) is True
+        # seconds_since_last_chunk 應約為 10 秒
+        assert detector.seconds_since_last_chunk() == pytest.approx(10.0, abs=1.0)
+
+    def test_never_started_is_stale(self):
+        """從未收到 chunk（僅誕生時間）在超過門檻後應判為 stale。"""
+        detector = AudioDetector(AUDIO_CONFIG)
+
+        # 剛建立 → 誕生寬限期內，不應 stale
+        assert detector.is_stale(5.0) is False
+
+        # 回撥誕生時間，模擬啟動後長時間未收到任何 chunk
+        detector._last_chunk_monotonic -= 10
+        assert detector.is_stale(5.0) is True
