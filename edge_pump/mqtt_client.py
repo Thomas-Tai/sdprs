@@ -142,6 +142,16 @@ class PumpMQTTClient:
                     self._topic,
                     json.dumps({"node_id": self._node_id, "pump_state": "UNKNOWN", "online": False}),
                     retain=True, qos=0)
+                # Bound the socket BEFORE connect() (spec §9) so a dead/unreachable
+                # broker raises OSError instead of hanging the 1s control loop.
+                # umqtt.simple creates .sock lazily inside connect() on stock builds
+                # (it is None beforehand), so this pre-connect call is best-effort;
+                # it is repeated once connect() returns to guarantee publish()/
+                # check_msg() stay bounded on that stock behavior too.
+                try:
+                    self._client.sock.settimeout(self._socket_timeout_s)
+                except Exception:
+                    pass
                 self._client.connect()
                 try:
                     self._client.sock.settimeout(self._socket_timeout_s)

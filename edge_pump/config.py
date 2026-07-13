@@ -49,7 +49,7 @@ WIFI_CONNECT_TIMEOUT = 3  # 單次 WiFi 連線等待（秒）
 WIFI_MAX_RETRIES = 10     # boot 時最大重試次數
 
 # ============ 看門狗 (WDT) ============
-WDT_ENABLED = True       # 開發階段設 False，部署生產時改為 True
+WDT_ENABLED = True       # 生產預設為 True；開發除錯時可暫時改為 False
 WDT_TIMEOUT = 30000       # WDT 逾時（毫秒）
 
 # ============ 新增數位感測器（學生示範合併） ============
