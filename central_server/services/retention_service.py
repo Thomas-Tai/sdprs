@@ -16,6 +16,8 @@ from typing import Any, Dict, List
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from ..timeutil import utcnow
+
 # Configure logging
 logger = logging.getLogger("retention_service")
 
@@ -47,7 +49,7 @@ def run_retention_cleanup(
         - deleted_dirs: Number of deleted empty directories
         - errors: List of error messages
     """
-    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    cutoff = utcnow() - timedelta(days=retention_days)
     cutoff_str = cutoff.isoformat()
 
     logger.info(f"Starting retention cleanup: cutoff={cutoff_str}, retention_days={retention_days}")

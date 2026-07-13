@@ -17,9 +17,10 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .timeutil import utcnow
 
 logger = logging.getLogger("database")
 
@@ -504,7 +505,7 @@ def update_event_status(
             updates.append("resolved_by = ?")
             params.append(resolved_by)
             updates.append("resolved_at = ?")
-            params.append(datetime.utcnow().isoformat())
+            params.append(utcnow().isoformat())
         if notes is not None:
             updates.append("notes = ?")
             params.append(notes)
@@ -529,7 +530,7 @@ def _pg_update_event_sync(alert_id, status, mp4_path, resolved_by, notes) -> boo
         sets.append("resolved_by = :resolved_by")
         sets.append("resolved_at = :resolved_at")
         params["resolved_by"] = resolved_by
-        params["resolved_at"] = datetime.utcnow().isoformat()
+        params["resolved_at"] = utcnow().isoformat()
     if notes is not None:
         sets.append("notes = :notes")
         params["notes"] = notes
@@ -586,7 +587,7 @@ def upsert_node(
 ) -> bool:
     """Insert or update a node record. Preserves existing location field."""
     metadata_json = json.dumps(metadata) if metadata else None
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     if _backend == "postgresql":
         import sqlalchemy
@@ -647,7 +648,7 @@ def touch_node_upload(node_id: str) -> None:
     """Item 13: stamp last_upload_at = now. Auto-creates the node row if missing
     so a snapshot from a never-seen node still gets recorded.
     Never raises (data-quality column, not load-bearing for ingest)."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     try:
         if _backend == "postgresql":
             import sqlalchemy
@@ -796,7 +797,7 @@ def get_pump_readings(node_id: str, start: str, end: str,
 def update_node_heartbeat(node_id: str, metadata: Optional[Dict[str, Any]] = None):
     """Update node last heartbeat timestamp."""
     metadata_json = json.dumps(metadata) if metadata else None
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     if _backend == "postgresql":
         import sqlalchemy

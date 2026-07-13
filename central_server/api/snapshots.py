@@ -9,13 +9,13 @@ This module provides REST API endpoints for snapshot management:
 """
 
 import logging
-from datetime import datetime
 from typing import Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
 
 from ..auth import verify_api_key, verify_node_id
+from ..timeutil import utcnow
 
 # Configure logging
 logger = logging.getLogger("snapshots_api")
@@ -148,7 +148,7 @@ async def receive_snapshot(
     # Store snapshot with timestamp
     snapshots[node_id] = {
         "jpeg": jpeg_bytes,
-        "timestamp": datetime.utcnow()
+        "timestamp": utcnow()
     }
 
     # Item 13: track last successful upload (separate from heartbeat). A node

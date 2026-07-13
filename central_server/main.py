@@ -40,6 +40,7 @@ from .services.event_service import get_event_counts, list_events
 import time as _time
 from .config import get_settings
 from .auth import authenticate_user
+from .timeutil import utcnow
 
 # Configure logging
 logging.basicConfig(
@@ -188,7 +189,7 @@ async def health_check():
     """
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utcnow().isoformat(),
         "service": "sdprs-central-server"
     }
 
@@ -250,7 +251,7 @@ def _get_dashboard_context(request: Request) -> dict:
                     ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00").replace(" ", "T"))
                     if ts.tzinfo is not None:
                         ts = ts.replace(tzinfo=None)
-                    expired = (datetime.utcnow() - ts) > _td(hours=24)
+                    expired = (utcnow() - ts) > _td(hours=24)
                 except ValueError:
                     expired = False
             if not expired:
@@ -334,7 +335,7 @@ async def login(request: Request):
         with _login_attempts_lock:
             _login_attempts.pop(ip, None)
         request.session["user"] = username
-        request.session["login_at"] = datetime.utcnow().isoformat()  # item 18
+        request.session["login_at"] = utcnow().isoformat()  # item 18
         from .services.audit_service import log_action, ACTION_LOGIN
         log_action(username, ACTION_LOGIN)
         return RedirectResponse(url="/", status_code=303)
@@ -356,7 +357,7 @@ async def extend_session(request: Request):
     user = request.session.get("user")
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    request.session["login_at"] = datetime.utcnow().isoformat()
+    request.session["login_at"] = utcnow().isoformat()
     return {"ok": True, "login_at": request.session["login_at"]}
 
 

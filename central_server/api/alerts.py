@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id
 from ..database import get_db, insert_event, get_event, update_event_status
 from ..config import get_settings
+from ..timeutil import utcnow
 from ..services.websocket_service import ws_manager
 from ..services.event_service import (
     resolve_event as resolve_event_db,
@@ -223,7 +224,7 @@ async def upload_video(
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S") + ".mp4"
     except (ValueError, TypeError):
         # Fallback to current time if parsing fails
-        filename = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S") + ".mp4"
+        filename = utcnow().strftime("%Y-%m-%d_%H-%M-%S") + ".mp4"
     
     # Build full path
     node_dir = storage_path / "events" / node_id
@@ -499,8 +500,7 @@ async def alert_rate(
     db = get_db()
     cur = db.cursor()
     from datetime import timedelta as _td
-    from datetime import datetime as _dt
-    end = _dt.utcnow()
+    end = utcnow()
     start = end - _td(seconds=window_s)
     cur.execute(
         "SELECT created_at FROM events WHERE created_at >= ? ORDER BY created_at ASC;",

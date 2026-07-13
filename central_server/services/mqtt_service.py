@@ -33,6 +33,7 @@ except ImportError:
 from ..database import (
     upsert_node, update_node_heartbeat, update_node_status, insert_pump_reading
 )
+from ..timeutil import utcnow
 
 # Configure logging
 logger = logging.getLogger("mqtt_service")
@@ -242,7 +243,7 @@ class MQTTService:
                 self.node_states[node_id] = {
                     "type": "glass",
                     "status": "ONLINE",
-                    "last_heartbeat": datetime.utcnow(),
+                    "last_heartbeat": utcnow(),
                     "cpu_temp": data.get("cpu_temp"),
                     "memory_usage_percent": data.get("memory_usage_percent"),
                     "buffer_health": data.get("buffer_health", "ok"),
@@ -319,21 +320,21 @@ class MQTTService:
             logger.error(f"Invalid pump_status JSON from {node_id}: {e}")
             with self._lock:
                 st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
-                st["last_heartbeat"] = datetime.utcnow()  # garbled-but-alive != offline
+                st["last_heartbeat"] = utcnow()  # garbled-but-alive != offline
                 self.node_states[node_id] = st
             return
         if not isinstance(data, dict):
             logger.error(f"pump_status payload not an object from {node_id}")
             with self._lock:
                 st = self.node_states.get(node_id, {"type": "pump", "status": "ONLINE"})
-                st["last_heartbeat"] = datetime.utcnow()  # glitchy-but-alive != offline
+                st["last_heartbeat"] = utcnow()  # glitchy-but-alive != offline
                 self.node_states[node_id] = st
             return
 
         with self._lock:
             self.node_states[node_id] = {
                 "type": "pump", "status": "ONLINE",
-                "last_heartbeat": datetime.utcnow(),
+                "last_heartbeat": utcnow(),
                 "pump_state": data.get("pump_state", "UNKNOWN"),
                 "water_level": data.get("water_level"),
                 "raining": data.get("raining"),
@@ -352,7 +353,7 @@ class MQTTService:
             upsert_node(node_id, "pump", "ONLINE", metadata)
 
         try:
-            ts = data.get("timestamp") or datetime.utcnow().isoformat()
+            ts = data.get("timestamp") or utcnow().isoformat()
             insert_pump_reading(node_id, ts, data.get("water_level"), data.get("pump_state"),
                                 raining=data.get("raining"), sensor_conflict=data.get("sensor_conflict"))
         except Exception as ts_err:
@@ -376,7 +377,7 @@ class MQTTService:
                     "raining": data.get("raining"),
                     "sensor_conflict": data.get("sensor_conflict"),
                     "dry_run_protect": data.get("dry_run_protect"),
-                    "timestamp": data.get("timestamp", datetime.utcnow().isoformat()),
+                    "timestamp": data.get("timestamp", utcnow().isoformat()),
                 },
             })
         except Exception as ws_error:
@@ -397,7 +398,7 @@ class MQTTService:
                     self.node_states[node_id] = {
                         "type": "glass",
                         "status": "ONLINE",
-                        "last_heartbeat": datetime.utcnow(),
+                        "last_heartbeat": utcnow(),
                         "stream_status": data
                     }
             
@@ -469,7 +470,7 @@ class MQTTService:
             True if command was sent successfully
         """
         topic = f"sdprs/edge/{node_id}/cmd/{command}"
-        payload = {"timestamp": datetime.utcnow().isoformat()}
+        payload = {"timestamp": utcnow().isoformat()}
         
         logger.info(f"Sending {command} command to {node_id}")
         return self.publish(topic, payload, qos=1)
@@ -500,7 +501,7 @@ class MQTTService:
         payload = {
             "snooze_until": snooze_until,
             "snooze_reason": snooze_reason,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utcnow().isoformat()
         }
         logger.info(f"Sending snooze config to {node_id}: until={snooze_until}")
         return self.publish(topic, payload, qos=1)
@@ -533,7 +534,7 @@ class MQTTService:
         """
         Check for nodes that have not sent a heartbeat recently.
         """
-        now = datetime.utcnow()
+        now = utcnow()
         
         with self._lock:
             nodes_to_update = []
@@ -596,7 +597,7 @@ class MQTTService:
             if last_heartbeat is None:
                 # No heartbeat recorded — can't confirm staleness; skip.
                 return
-            elapsed = (datetime.utcnow() - last_heartbeat).total_seconds()
+            elapsed = (utcnow() - last_heartbeat).total_seconds()
             if elapsed <= timeout:
                 # A fresh heartbeat arrived in the gap — abort the false offline.
                 logger.debug(

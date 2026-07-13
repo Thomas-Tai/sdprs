@@ -11,6 +11,8 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ..timeutil import utcnow
+
 # Configure logging
 logger = logging.getLogger("event_service")
 
@@ -206,7 +208,7 @@ def acknowledge_event(
         logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
         return None
 
-    acked_at = datetime.utcnow().isoformat()
+    acked_at = utcnow().isoformat()
     cursor.execute("""
         UPDATE events SET
             status = 'ACKNOWLEDGED',
@@ -258,7 +260,7 @@ def resolve_event(
         return False
 
     # Update
-    resolved_at = datetime.utcnow().isoformat()
+    resolved_at = utcnow().isoformat()
     cursor.execute("""
         UPDATE events SET 
             status = 'RESOLVED',

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
 from ..database import get_db_cursor
+from ..timeutil import utcnow
 from ..services.audit_service import log_action, ACTION_HANDOVER_EDIT
 
 logger = logging.getLogger("api.handover")
@@ -45,7 +46,7 @@ def _is_expired(updated_at: Optional[str]) -> bool:
         return False
     if ts.tzinfo is not None:
         ts = ts.replace(tzinfo=None)
-    return datetime.utcnow() - ts > timedelta(hours=NOTE_TTL_HOURS)
+    return utcnow() - ts > timedelta(hours=NOTE_TTL_HOURS)
 
 
 @router.get("/handover/note")

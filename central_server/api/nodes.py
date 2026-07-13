@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ..database import get_all_nodes, get_node, set_node_location, get_pump_readings
 from ..services.mqtt_service import get_mqtt_service
+from ..timeutil import utcnow
 
 # Configure logging
 logger = logging.getLogger("nodes_api")
@@ -109,7 +110,7 @@ async def list_nodes(
     db_nodes = _load_node_db()
 
     result = []
-    now = datetime.utcnow()
+    now = utcnow()
 
     def _ts_to_iso(v):
         if isinstance(v, datetime):
@@ -287,7 +288,7 @@ async def get_node(
     # Check if snapshot is stale
     is_stale = False
     snapshot_timestamp = None
-    now = datetime.utcnow()
+    now = utcnow()
     
     if node_type == "glass" and state.get("status") == "ONLINE":
         latest_snapshots = getattr(request.app.state, "latest_snapshots", {})
@@ -417,7 +418,7 @@ async def snooze_node(
         from ..database import upsert_node as _upsert
         _upsert(node_id, "glass", "OFFLINE", None)
 
-    until = (datetime.utcnow() + _td(minutes=body.minutes)).isoformat()
+    until = (utcnow() + _td(minutes=body.minutes)).isoformat()
     ok = set_node_snooze(node_id, until, body.reason)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to set snooze")
@@ -489,7 +490,7 @@ async def pump_cycles(
     """
     from datetime import timedelta as _td
     seconds = _PUMP_CYCLE_WINDOWS.get(window, 3600)
-    end_dt = datetime.utcnow()
+    end_dt = utcnow()
     start_dt = end_dt - _td(seconds=seconds)
     rows = get_pump_readings(node_id, start_dt.isoformat(), end_dt.isoformat(), 50000)
 
@@ -516,7 +517,7 @@ async def pump_cycles_batch(
     """
     from datetime import timedelta as _td
     seconds = _PUMP_CYCLE_WINDOWS.get(window, 3600)
-    end_dt = datetime.utcnow()
+    end_dt = utcnow()
     start_dt = end_dt - _td(seconds=seconds)
     start_iso, end_iso = start_dt.isoformat(), end_dt.isoformat()
 
