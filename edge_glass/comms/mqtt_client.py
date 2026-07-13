@@ -216,15 +216,17 @@ class MQTTClient:
 
         self._running = True
 
-        # 連線 broker
+        # 使用非阻塞 connect_async：broker 在開機時暫時無法連線也不會卡住啟動；
+        # loop_start() 會執行實際連線並在斷線時依 reconnect_delay_set 自動重連。
         try:
-            self._client.connect(self._broker, self._port, keepalive=60)
-            logger.info(f"Connecting to MQTT broker: {self._broker}:{self._port}")
+            self._client.connect_async(self._broker, self._port, keepalive=60)
+            logger.info(f"Connecting (async) to MQTT broker: {self._broker}:{self._port}")
         except Exception as e:
-            logger.error(f"Failed to connect to MQTT broker: {e}")
-            return
+            # connect_async only records host/port; failure is unexpected but must
+            # NOT prevent loop_start() — the network loop is what retries.
+            logger.error(f"connect_async setup failed (will still start loop for retry): {e}")
 
-        # 啟動背景迴圈
+        # 啟動背景迴圈（負責實際連線 + 自動重連）
         self._client.loop_start()
 
         # 啟動心跳定時器
