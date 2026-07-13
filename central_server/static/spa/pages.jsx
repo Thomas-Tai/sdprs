@@ -781,7 +781,7 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
 
       {/* Sensor conflict — prominent critical banner, mirrors the glass-node critical alerts */}
       {node.sensorConflict && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-sev-critical/15 border-b border-sev-critical/40 text-sev-critical text-xs font-semibold">
+        <div role="alert" className="flex items-center gap-1.5 px-3 py-1.5 bg-sev-critical/15 border-b border-sev-critical/40 text-sev-critical text-xs font-semibold">
           <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
           <span>⚠ Sensor conflict — inspect float switch</span>
         </div>
@@ -832,7 +832,7 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
               <span className={`text-[10px] font-mono tnum ${cycleTone === 'critical' ? 'text-sev-critical' : cycleTone === 'warn' ? 'text-sev-warn' : 'text-ink-muted'}`}>{node.cycles}×/hr</span>
             </div>
             <div className={`text-base font-mono font-semibold tnum leading-tight ${cycleTone === 'critical' ? 'text-sev-critical' : cycleTone === 'warn' ? 'text-sev-warn' : 'text-ink-primary'}`}>
-              每 {(60/node.cycles).toFixed(1)}<span className="text-[10px] text-ink-muted ml-0.5">分</span>
+              每 {node.cycles > 0 ? (60/node.cycles).toFixed(1) : '—'}<span className="text-[10px] text-ink-muted ml-0.5">分</span>
             </div>
             {/* Cycle bar timeline — last 12 buckets */}
             {node.cycleHistory && (
@@ -1330,7 +1330,7 @@ const PumpsPage = () => {
 
               {/* Sensor conflict — prominent critical banner, mirrors the glass-node critical alerts */}
               {p.sensorConflict && (
-                <div className="flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded border border-sev-critical/40 bg-sev-critical/15 text-sev-critical text-xs font-semibold">
+                <div role="alert" className="flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded border border-sev-critical/40 bg-sev-critical/15 text-sev-critical text-xs font-semibold">
                   <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
                   <span>⚠ Sensor conflict — inspect float switch</span>
                 </div>
@@ -1375,7 +1375,7 @@ const PumpsPage = () => {
                 <div>
                   <div className="text-[10px] text-ink-muted">啟動頻率</div>
                   <div className={p.cycles > 20 ? 'text-sev-critical font-semibold' : p.cycles > 15 ? 'text-sev-warn' : 'text-ink-secondary'}>
-                    每 {(60/p.cycles).toFixed(1)} 分
+                    每 {p.cycles > 0 ? (60/p.cycles).toFixed(1) : '—'} 分
                   </div>
                   <div className="text-[10px] text-ink-dim">本時 {p.cycles}×</div>
                 </div>
