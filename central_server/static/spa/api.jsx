@@ -409,8 +409,11 @@
 
   const ackAlert = (id) => apiFetch('/api/alerts/' + id + '/acknowledge', { method: 'PATCH' });
 
+  // Attribution is derived server-side from the authenticated session
+  // (see central_server/api/alerts.py resolve_alert) — do not send
+  // resolved_by from the client, it would be spoofable.
   const resolveAlert = (id, note) => apiFetch('/api/alerts/' + id + '/resolve',
-    jsonBody('PATCH', { resolved_by: window.SDPRS_USER || 'operator', notes: note || null }));
+    jsonBody('PATCH', { notes: note || null }));
 
   const snoozeNode = (nodeId, minutes, reason) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
     jsonBody('POST', { minutes, reason: reason || '操作員延期' }));

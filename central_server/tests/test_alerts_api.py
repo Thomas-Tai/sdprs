@@ -342,5 +342,106 @@ class TestListAlerts:
         assert len(data) == 3
 
 
+class TestResolveAlert:
+    """Tests for PATCH /api/alerts/{alert_id}/resolve endpoint.
+
+    Regression guard for the spoofable-attribution defect (Theme 2, trust
+    boundary): the endpoint used to attribute a resolution to whatever
+    `resolved_by` the client sent in the request body, even though it
+    already authenticates the caller via get_current_user. Any
+    authenticated user could therefore forge who resolved an alert,
+    including in the tamper-evident audit log. Attribution must now
+    always be derived from the authenticated session user; a
+    client-supplied resolved_by is accepted (for backward compatibility
+    with the legacy template) but silently ignored.
+    """
+
+    @pytest.fixture
+    def authed_client(self, test_db):
+        """Alerts router with get_current_user overridden to "operator",
+        mirroring the session-auth bypass pattern in test_nodes_api.py."""
+        from fastapi import FastAPI
+        from starlette.middleware.sessions import SessionMiddleware
+        from central_server.api.alerts import router as alerts_router
+        from central_server.auth import get_current_user
+
+        app = FastAPI()
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key="test-secret-key-for-testing"
+        )
+        app.include_router(alerts_router, prefix="/api")
+        app.state.latest_snapshots = {}
+        app.dependency_overrides[get_current_user] = lambda: "operator"
+
+        with TestClient(app) as test_client:
+            yield test_client
+
+        app.dependency_overrides.clear()
+
+    def _create_resolvable_alert(self, authed_client, api_headers, sample_alert):
+        """Create an alert and upload its video so status == PENDING
+        (resolvable), returning the alert_id."""
+        create_response = authed_client.post(
+            "/api/alerts", json=sample_alert, headers=api_headers
+        )
+        assert create_response.status_code == 200
+        alert_id = create_response.json()["alert_id"]
+
+        fake_mp4 = io.BytesIO(b"fake mp4 content for testing")
+        upload_response = authed_client.put(
+            f"/api/alerts/{alert_id}/video",
+            files={"file": ("test.mp4", fake_mp4, "video/mp4")},
+            headers=api_headers,
+        )
+        assert upload_response.status_code == 204
+        return alert_id
+
+    def test_resolve_attributes_to_authenticated_user_not_body(
+        self, authed_client, api_headers, sample_alert
+    ):
+        """A malicious/careless client sends resolved_by="attacker" while
+        authenticated as "operator". Both the DB write and the audit log
+        must record "operator", never the spoofed value."""
+        alert_id = self._create_resolvable_alert(authed_client, api_headers, sample_alert)
+
+        with patch("central_server.services.audit_service.log_action") as mock_log_action:
+            resolve_response = authed_client.patch(
+                f"/api/alerts/{alert_id}/resolve",
+                json={"resolved_by": "attacker", "notes": "x"},
+            )
+
+        assert resolve_response.status_code == 200
+
+        # Audit log must be attributed to the authenticated user.
+        assert mock_log_action.called
+        first_call_args = mock_log_action.call_args_list[0][0]
+        assert first_call_args[0] == "operator"
+        assert first_call_args[0] != "attacker"
+
+        # DB write must also be attributed to the authenticated user.
+        from central_server.database import get_event
+        event = get_event(alert_id)
+        assert event["resolved_by"] == "operator"
+        assert event["resolved_by"] != "attacker"
+
+    def test_resolve_without_resolved_by_in_body_still_works(
+        self, authed_client, api_headers, sample_alert
+    ):
+        """resolved_by is now optional/ignored — omitting it must not 422,
+        and the resolution is still attributed to the authenticated user."""
+        alert_id = self._create_resolvable_alert(authed_client, api_headers, sample_alert)
+
+        resolve_response = authed_client.patch(
+            f"/api/alerts/{alert_id}/resolve",
+            json={"notes": "no resolved_by field at all"},
+        )
+        assert resolve_response.status_code == 200
+
+        from central_server.database import get_event
+        event = get_event(alert_id)
+        assert event["resolved_by"] == "operator"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -70,8 +70,16 @@ class AlertDetail(BaseModel):
 
 
 class ResolveRequest(BaseModel):
-    """Request model for resolving an alert."""
-    resolved_by: str = Field(..., description="Username who resolved the alert")
+    """Request model for resolving an alert.
+
+    `resolved_by` is accepted-but-ignored for backward compatibility with
+    the legacy Jinja template (templates/alert_detail.html) which still
+    sends it. Attribution is derived server-side from the authenticated
+    user (get_current_user) so a client cannot spoof who resolved an
+    alert in the DB, the WebSocket broadcast, or the tamper-evident audit
+    log. See Theme 2 (trust boundary) finding.
+    """
+    resolved_by: Optional[str] = Field(None, description="Deprecated/ignored: attribution is derived from the authenticated session")
     notes: Optional[str] = Field(None, description="Optional resolution notes")
 
 
@@ -379,10 +387,13 @@ async def resolve_alert(
     and mark an alert as handled.
     
     - **alert_id**: The alert ID to resolve
-    - **resolved_by**: Username who resolved the alert
     - **notes**: Optional resolution notes
+
+    Attribution (`resolved_by`) is always the authenticated session user;
+    any `resolved_by` in the request body is accepted for backward
+    compatibility but ignored.
     """
-    logger.info(f"Resolving alert {alert_id} by {body.resolved_by}")
+    logger.info(f"Resolving alert {alert_id} by {user}")
     
     # Get database connection
     db = get_db()
@@ -422,25 +433,25 @@ async def resolve_alert(
         success = resolve_event_db(
             db=db,
             alert_id=alert_id,
-            resolved_by=body.resolved_by,
+            resolved_by=user,
             notes=body.notes
         )
-        
+
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to resolve alert"
             )
-        
-        logger.info(f"Alert {alert_id} resolved by {body.resolved_by}")
-        
+
+        logger.info(f"Alert {alert_id} resolved by {user}")
+
         # WebSocket broadcast - notify all connected clients
         try:
             await ws_manager.broadcast({
                 "type": "alert_resolved",
                 "data": {
                     "alert_id": alert_id,
-                    "resolved_by": body.resolved_by
+                    "resolved_by": user
                 }
             })
         except Exception as ws_error:
@@ -448,7 +459,7 @@ async def resolve_alert(
 
         # Audit log (item 15)
         from ..services.audit_service import log_action, ACTION_RESOLVE
-        log_action(body.resolved_by, ACTION_RESOLVE, target_id=alert_id, details={"notes": body.notes})
+        log_action(user, ACTION_RESOLVE, target_id=alert_id, details={"notes": body.notes})
 
         return {"status": "ok", "alert_id": alert_id}
         
