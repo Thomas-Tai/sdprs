@@ -303,9 +303,6 @@ class UploadWorker(threading.Thread):
             # （FAILED 保留供鑑識，不在此清除）
             self._queue.delete_uploaded(row_id)
 
-            # 可選：刪除本地 MP4
-            # self._delete_local_mp4(mp4_path)
-
         return self._send(
             event,
             "Video upload",
@@ -313,15 +310,6 @@ class UploadWorker(threading.Thread):
             success_code=204,
             on_success=on_success,
         )
-
-    def _delete_local_mp4(self, mp4_path: str):
-        """刪除本地 MP4 檔案（上傳成功後）。"""
-        try:
-            if os.path.exists(mp4_path):
-                os.remove(mp4_path)
-                logger.debug(f"Deleted local MP4: {mp4_path}")
-        except Exception as e:
-            logger.warning(f"Failed to delete local MP4: {mp4_path}, error={e}")
 
 
 if __name__ == "__main__":

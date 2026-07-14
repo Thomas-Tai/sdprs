@@ -146,44 +146,6 @@ class WebSocketManager:
                     self._connections.discard(ws)
             logger.info(f"Removed {len(disconnected)} disconnected WebSockets")
     
-    async def broadcast_new_alert(self, alert_id: int, node_id: str, timestamp: str, status: str = "PENDING_VIDEO") -> None:
-        """
-        Broadcast a new alert notification.
-        
-        Args:
-            alert_id: The alert ID
-            node_id: The node that triggered the alert
-            timestamp: ISO 8601 timestamp
-            status: Alert status (default: PENDING_VIDEO)
-        """
-        await self.broadcast({
-            "type": "new_alert",
-            "data": {
-                "alert_id": alert_id,
-                "node_id": node_id,
-                "timestamp": timestamp,
-                "status": status
-            }
-        })
-        logger.debug(f"Broadcast new_alert: alert_id={alert_id}")
-    
-    async def broadcast_alert_updated(self, alert_id: int, status: str = "PENDING") -> None:
-        """
-        Broadcast an alert update notification.
-        
-        Args:
-            alert_id: The alert ID
-            status: New status (default: PENDING)
-        """
-        await self.broadcast({
-            "type": "alert_updated",
-            "data": {
-                "alert_id": alert_id,
-                "status": status
-            }
-        })
-        logger.debug(f"Broadcast alert_updated: alert_id={alert_id}")
-    
     async def broadcast_alert_acknowledged(
         self,
         alert_id: int,
@@ -205,48 +167,6 @@ class WebSocketManager:
             }
         })
         logger.debug(f"Broadcast alert_acknowledged: alert_id={alert_id} by {acknowledged_by}")
-
-    async def broadcast_alert_resolved(self, alert_id: int, resolved_by: str) -> None:
-        """
-        Broadcast an alert resolved notification.
-        
-        Args:
-            alert_id: The alert ID
-            resolved_by: Username who resolved the alert
-        """
-        await self.broadcast({
-            "type": "alert_resolved",
-            "data": {
-                "alert_id": alert_id,
-                "resolved_by": resolved_by
-            }
-        })
-        logger.debug(f"Broadcast alert_resolved: alert_id={alert_id}")
-    
-    async def broadcast_pump_status(
-        self,
-        node_id: str,
-        pump_state: str,
-        water_level: float
-    ) -> None:
-        """
-        Broadcast a pump status update notification.
-        
-        Args:
-            node_id: The pump node identifier
-            pump_state: Pump state (ON/OFF)
-            water_level: Water level percentage
-        """
-        await self.broadcast({
-            "type": "pump_status",
-            "data": {
-                "node_id": node_id,
-                "pump_state": pump_state,
-                "water_level": water_level
-            }
-        })
-        logger.debug(f"Broadcast pump_status: node_id={node_id}, state={pump_state}")
-
 
 # Global singleton instance
 ws_manager = WebSocketManager()

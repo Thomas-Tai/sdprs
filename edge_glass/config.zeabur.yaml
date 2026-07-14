@@ -22,6 +22,7 @@ visual:
   roi_polygon: [[100,50],[1180,50],[1180,670],[100,670]]
   canny_threshold1: 50
   canny_threshold2: 150
+  anomaly_recovery_seconds: 3          # 亮度異常後的恢復期（秒）
 
 audio:
   device_index: 0
@@ -34,7 +35,7 @@ audio:
   spectral_flatness_threshold: 0.3
   attack_time_ms: 10
   analysis_window_ms: 500
-  fixed_db_threshold: 90
+  fixed_db_threshold: -30              # dBFS（0 = 滿刻度），非 SPL——正值永遠無法觸發
   fixed_freq_threshold_hz: 3000
 
 trigger:
@@ -65,7 +66,6 @@ server:
 
 # ── 串流設定（雲端 MVP 停用 SSH 隧道）────────────────────────────────────────
 stream:
-  type: "hls"
   auto_stop_minutes: 5
   tunnel_port: 18554          # 保留欄位，雲端模式不使用
   cloud_mode: true            # 設為 true 時 StreamManager 跳過 SSH 隧道
@@ -81,5 +81,3 @@ snapshot:
 events:
   local_backup_dir: "./events"
   max_local_files: 20
-
-timezone: "Asia/Macau"

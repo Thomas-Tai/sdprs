@@ -95,10 +95,6 @@ class StreamManager:
             f"auto_stop={self._auto_stop_minutes}min"
         )
 
-    def is_active(self) -> bool:
-        """返回是否正在串流。"""
-        return self._is_active
-
     def start(self) -> bool:
         """
         啟動串流。
@@ -356,7 +352,6 @@ if __name__ == "__main__":
     manager = StreamManager(config, on_status)
 
     print("StreamManager test")
-    print(f"is_active: {manager.is_active()}")
 
     # 注意：需要安裝 mediamtx 和設定 SSH 才能完整測試
     # 這裡只測試基本結構

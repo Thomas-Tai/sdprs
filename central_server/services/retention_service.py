@@ -269,73 +269,7 @@ def setup_retention_scheduler(
     )
 
 
-def get_storage_stats(storage_dir: str) -> Dict[str, Any]:
-    """
-    Get storage statistics.
-    
-    Args:
-        storage_dir: Root storage directory
-        
-    Returns:
-        Dict with storage statistics:
-        - total_files: Total MP4 files
-        - total_size_bytes: Total size in bytes
-        - total_size_mb: Total size in MB
-        - nodes: Per-node statistics
-    """
-    events_dir = os.path.join(storage_dir, "events")
-    
-    if not os.path.exists(events_dir):
-        return {
-            "total_files": 0,
-            "total_size_bytes": 0,
-            "total_size_mb": 0.0,
-            "nodes": {}
-        }
-    
-    total_files = 0
-    total_size = 0
-    nodes = {}
-    
-    try:
-        for node_dir_name in os.listdir(events_dir):
-            node_path = os.path.join(events_dir, node_dir_name)
-            if os.path.isdir(node_path):
-                node_files = 0
-                node_size = 0
-                
-                for filename in os.listdir(node_path):
-                    if filename.endswith(".mp4"):
-                        file_path = os.path.join(node_path, filename)
-                        try:
-                            file_size = os.path.getsize(file_path)
-                            node_files += 1
-                            node_size += file_size
-                        except OSError:
-                            pass
-                
-                if node_files > 0:
-                    nodes[node_dir_name] = {
-                        "files": node_files,
-                        "size_bytes": node_size,
-                        "size_mb": round(node_size / (1024 * 1024), 2)
-                    }
-                    total_files += node_files
-                    total_size += node_size
-    
-    except Exception as e:
-        logger.error(f"Failed to get storage stats: {e}")
-    
-    return {
-        "total_files": total_files,
-        "total_size_bytes": total_size,
-        "total_size_mb": round(total_size / (1024 * 1024), 2),
-        "nodes": nodes
-    }
-
-
 __all__ = [
     "run_retention_cleanup",
     "setup_retention_scheduler",
-    "get_storage_stats",
 ]

@@ -47,7 +47,7 @@ This project merges the **concepts**, not the code.
 
 ## 3. Deployment assumption
 
-The pump publishes to the **project broker** (LAN Mosquitto or cloud EMQX), with credentials injected at flash time by `setup_esp32.sh` into `config.py` placeholders. The public `broker.emqx.io` and the student's hardcoded WiFi credentials (SSID `MSC-Person` / password `Msc@2333` — **leaked, must be rotated, must not enter production**) are explicitly excluded. TLS/auth posture follows whatever the project broker enforces; this node adds no new anonymous-publish surface.
+The pump publishes to the **project broker** (LAN Mosquitto or cloud EMQX), with credentials injected at flash time by `setup_esp32.sh` into `config.py` placeholders. The public `broker.emqx.io` and the student's hardcoded WiFi credentials (SSID `MSC-***` / password `Msc@***` — **leaked, must be rotated, must not enter production**) are explicitly excluded. TLS/auth posture follows whatever the project broker enforces; this node adds no new anonymous-publish surface.
 
 ## 4. Architecture — module decomposition
 

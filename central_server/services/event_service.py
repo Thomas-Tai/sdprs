@@ -9,7 +9,6 @@ This module provides CRUD operations for event/alert management.
 import logging
 import os
 import sqlite3
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..database import get_backend, get_db
@@ -151,98 +150,6 @@ def _list_events_pg(
         "page_size": page_size,
         "total_pages": total_pages,
     }
-
-
-def get_event(db: sqlite3.Connection, alert_id: int) -> Optional[Dict[str, Any]]:
-    """
-    Get a single event by ID.
-    
-    Args:
-        db: SQLite database connection
-        alert_id: The event/alert ID
-        
-    Returns:
-        Event dict or None if not found
-    """
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM events WHERE id = ?", (alert_id,))
-    row = cursor.fetchone()
-    
-    if row:
-        return dict(row)
-    return None
-
-
-def create_event(
-    db: sqlite3.Connection,
-    node_id: str,
-    timestamp: str,
-    visual_confidence: float,
-    audio_db_peak: float,
-    audio_freq_peak_hz: float
-) -> int:
-    """
-    Create a new event.
-    
-    Args:
-        db: SQLite database connection
-        node_id: The node identifier
-        timestamp: ISO 8601 timestamp
-        visual_confidence: Visual detection confidence score
-        audio_db_peak: Audio peak level in dB
-        audio_freq_peak_hz: Audio peak frequency in Hz
-        
-    Returns:
-        The auto-generated alert_id
-    """
-    cursor = db.cursor()
-    cursor.execute("""
-        INSERT INTO events (node_id, timestamp, status, visual_confidence, audio_db_peak, audio_freq_peak_hz)
-        VALUES (?, ?, 'PENDING_VIDEO', ?, ?, ?)
-    """, (node_id, timestamp, visual_confidence, audio_db_peak, audio_freq_peak_hz))
-    db.commit()
-    
-    alert_id = cursor.lastrowid
-    logger.info(f"Created event {alert_id} from node {node_id}")
-    
-    return alert_id
-
-
-def update_event_video(db: sqlite3.Connection, alert_id: int, mp4_path: str) -> bool:
-    """
-    Update event with video path and change status to PENDING.
-    
-    Args:
-        db: SQLite database connection
-        alert_id: The event/alert ID
-        mp4_path: Path to the MP4 file
-        
-    Returns:
-        True if successful, False if event not found or wrong status
-    """
-    cursor = db.cursor()
-    
-    # Check current status
-    cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
-    row = cursor.fetchone()
-    
-    if not row:
-        logger.warning(f"Event {alert_id} not found")
-        return False
-    
-    if row["status"] != "PENDING_VIDEO":
-        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING_VIDEO")
-        return False
-    
-    # Update
-    cursor.execute("""
-        UPDATE events SET mp4_path = ?, status = 'PENDING'
-        WHERE id = ?
-    """, (mp4_path, alert_id))
-    db.commit()
-    
-    logger.info(f"Updated event {alert_id} with video, status -> PENDING")
-    return True
 
 
 def acknowledge_event(
@@ -482,96 +389,9 @@ def get_event_counts(db: Optional[sqlite3.Connection] = None) -> Dict[str, int]:
     return counts
 
 
-def delete_event(db: sqlite3.Connection, alert_id: int) -> bool:
-    """
-    Delete an event from the database.
-    
-    Args:
-        db: SQLite database connection
-        alert_id: The event/alert ID
-        
-    Returns:
-        True if deleted, False if not found
-    """
-    cursor = db.cursor()
-    cursor.execute("DELETE FROM events WHERE id = ?", (alert_id,))
-    db.commit()
-    
-    deleted = cursor.rowcount > 0
-    if deleted:
-        logger.info(f"Deleted event {alert_id}")
-    
-    return deleted
-
-
-def get_events_for_retention(
-    db: sqlite3.Connection,
-    cutoff_date: datetime
-) -> List[Dict[str, Any]]:
-    """
-    Get events older than the cutoff date for retention cleanup.
-    
-    Args:
-        db: SQLite database connection
-        cutoff_date: Events created before this date will be returned
-        
-    Returns:
-        List of expired events
-    """
-    # NOTE: currently unused by the live scheduled path
-    # (retention_service.run_retention_cleanup does the real cleanup); kept as
-    # exported API. datetime() on both sides normalizes SQLite's stored
-    # space-delimited "YYYY-MM-DD HH:MM:SS" against the T-delimited
-    # cutoff.isoformat(), avoiding a lexicographic ~24h boundary error.
-    cursor = db.cursor()
-    cursor.execute(
-        "SELECT id, mp4_path FROM events WHERE datetime(created_at) < datetime(?)",
-        (cutoff_date.isoformat(),)
-    )
-
-    return [dict(row) for row in cursor.fetchall()]
-
-
-def delete_events_before_date(
-    db: sqlite3.Connection,
-    cutoff_date: datetime
-) -> int:
-    """
-    Delete all events created before the cutoff date.
-    
-    Args:
-        db: SQLite database connection
-        cutoff_date: Events created before this date will be deleted
-        
-    Returns:
-        Number of deleted events
-    """
-    # NOTE: currently unused by the live scheduled path
-    # (retention_service.run_retention_cleanup does the real cleanup); kept as
-    # exported API. datetime() on both sides makes the compare delimiter-robust
-    # (stored space delimiter vs. T-delimited cutoff.isoformat()).
-    cursor = db.cursor()
-    cursor.execute(
-        "DELETE FROM events WHERE datetime(created_at) < datetime(?)",
-        (cutoff_date.isoformat(),)
-    )
-    db.commit()
-    
-    deleted_count = cursor.rowcount
-    logger.info(f"Deleted {deleted_count} events before {cutoff_date.isoformat()}")
-    
-    return deleted_count
-
-
 __all__ = [
     "list_events",
-    "get_event",
-    "create_event",
-    "update_event_video",
     "acknowledge_event",
     "resolve_event",
     "get_event_counts",
-    "delete_event",
-    "get_events_for_retention",
-    "delete_events_before_date",
 ]

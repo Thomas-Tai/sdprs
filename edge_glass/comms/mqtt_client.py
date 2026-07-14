@@ -380,12 +380,6 @@ class MQTTClient:
             self._client.publish(topic, payload, qos=QOS_STREAM_STATUS)
             logger.info(f"Stream status published: {status_data}")
 
-    def is_connected(self) -> bool:
-        """檢查是否已連線。"""
-        if self._client:
-            return self._client.is_connected()
-        return False
-
 
 if __name__ == "__main__":
     import logging

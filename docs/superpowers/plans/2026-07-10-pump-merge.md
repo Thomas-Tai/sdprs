@@ -16,7 +16,7 @@
 - **Data structures are plain dicts** (Readings, Timing, CtrlState, Decision, Config) — portable, no `namedtuple`/dataclass dependency.
 - **Time enters `decide()` only as pre-computed elapsed-millisecond durations** (never absolute timestamps) so the pure function is wrap-around-safe; `time.ticks_diff` lives only in `pump_controller`.
 - **MQTT payload fields are additive only** — never rename or remove `node_id`, `timestamp`, `pump_state`, `water_level`, `battery_voltage`, `power_source`.
-- **No hardcoded WiFi/MQTT credentials** in committed code — flash-time placeholders only. The leaked student WiFi password (`Msc@2333`) must never appear. No public broker (`broker.emqx.io`).
+- **No hardcoded WiFi/MQTT credentials** in committed code — flash-time placeholders only. The leaked student WiFi password (`Msc@***`) must never appear. No public broker (`broker.emqx.io`).
 - **Parameter defaults (verbatim):** `HIGH_THRESHOLD=80`, `LOW_THRESHOLD=20`, `RAIN_ON_THRESHOLD=60`, `RAIN_CONFIRM_MS=30000`, `DRY_OFF_DELAY_MS=30000`, `BURST_ON_MS=60000`, `BURST_COOLDOWN_MS=30000`, `CONFLICT_MAX_MS=900000`, `MAX_RUN_MS=600000`, `REST_MS=60000`, `DEBOUNCE_MS=2500`, `SOCKET_TIMEOUT_S=3`.
 - **Pin map (verbatim, conflict-free):** existing `RELAY_PIN=26`, `LED_RED_PIN=27`, `LED_GREEN_PIN=25`, `ADC_PIN=34`, `BATTERY_ADC_PIN=35`, `POWER_SOURCE_PIN=21`; new `FLOAT_PIN=32`, `RAIN_PIN=33`, `HIGH_WATER_PIN=13`.
 - **Reason codes (verbatim):** `STANDBY`, `HYSTERESIS_ON`, `RAIN_TRIGGER`, `HIGH_WATER`, `HOLD`, `CONFLICT_BURST_ON`, `CONFLICT_BURST_REST`, `CONFLICT_LATCH_OFF`, `DRY_RUN_OFF`, `MAX_RUNTIME_REST`.

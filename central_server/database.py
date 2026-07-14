@@ -418,24 +418,6 @@ def get_db_cursor():
 
 
 # =============================================================================
-# PostgreSQL async connect / disconnect (called from FastAPI lifespan)
-# =============================================================================
-
-async def connect_pg():
-    """Connect the databases.Database pool (PostgreSQL only, called on startup)."""
-    if _backend == "postgresql" and _pg_database is not None:
-        await _pg_database.connect()
-        logger.info("PostgreSQL connection pool opened")
-
-
-async def disconnect_pg():
-    """Disconnect the databases.Database pool (PostgreSQL only, called on shutdown)."""
-    if _backend == "postgresql" and _pg_database is not None:
-        await _pg_database.disconnect()
-        logger.info("PostgreSQL connection pool closed")
-
-
-# =============================================================================
 # Event Operations  (unified SQLite / PostgreSQL)
 # =============================================================================
 

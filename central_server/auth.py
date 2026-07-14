@@ -15,7 +15,6 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
-from starlette.websockets import WebSocket
 
 from .config import get_settings
 
@@ -138,21 +137,6 @@ async def get_current_user(request: Request) -> str:
     return user
 
 
-async def get_current_user_optional(request: Request) -> Optional[str]:
-    """
-    Get the current user if authenticated, otherwise return None.
-    
-    Useful for routes that work differently for authenticated vs anonymous users.
-    
-    Args:
-        request: The FastAPI request object
-        
-    Returns:
-        The username if authenticated, None otherwise
-    """
-    return request.session.get("user")
-
-
 def authenticate_user(username: str, password: str) -> bool:
     """
     Authenticate a user with username and password.
@@ -176,139 +160,6 @@ def authenticate_user(username: str, password: str) -> bool:
     
     logger.warning(f"Failed authentication attempt for user '{username}'")
     return False
-
-
-# ===== WebSocket Authentication =====
-
-async def verify_ws_session(websocket: WebSocket) -> Optional[str]:
-    """
-    Verify WebSocket session authentication.
-    
-    Extracts session from WebSocket and validates the user.
-    
-    Args:
-        websocket: The WebSocket connection
-        
-    Returns:
-        The username if authenticated, None otherwise
-    """
-    # Access session from WebSocket
-    # Note: SessionMiddleware must be enabled for this to work
-    session = websocket.session if hasattr(websocket, "session") else {}
-    user = session.get("user")
-    
-    if not user:
-        logger.warning("WebSocket connection rejected - not authenticated")
-        await websocket.close(code=1008, reason="Not authenticated")
-        return None
-    
-    return user
-
-
-# ===== Path-based Authentication Helper =====
-
-def is_public_path(path: str) -> bool:
-    """
-    Check if a path should be publicly accessible.
-    
-    Args:
-        path: The request path
-        
-    Returns:
-        True if the path is public, False if it requires authentication
-    """
-    public_paths = [
-        "/login",
-        "/api/health",
-    ]
-    
-    # Static files are public
-    if path.startswith("/static/"):
-        return True
-
-    # NOTE: the GET snapshot/latest endpoint is NOT public. It now requires a
-    # session cookie or X-API-Key (dashboard <img> tags carry the same-origin
-    # session cookie automatically).
-
-    # Check exact matches
-    if path in public_paths:
-        return True
-    
-    return False
-
-
-def is_api_key_path(path: str) -> bool:
-    """
-    Check if a path requires API key authentication.
-    
-    Args:
-        path: The request path
-        
-    Returns:
-        True if the path requires API key, False otherwise
-    """
-    api_key_paths = [
-        "/api/alerts",
-        "/api/edge/",
-    ]
-    
-    # POST /api/alerts requires API key
-    # PUT /api/alerts/{id}/video requires API key
-    # POST /api/edge/{node_id}/snapshot requires API key
-    # GET /api/edge/{node_id}/snapshot/latest now requires session-or-API-key
-    # (verify_api_key_or_session), so it is no longer carved out here.
-
-    for api_path in api_key_paths:
-        if path.startswith(api_path):
-            return True
-
-    return False
-
-
-# ===== Combined Authentication Middleware Helper =====
-
-async def get_auth_context(request: Request) -> dict:
-    """
-    Get authentication context for a request.
-    
-    Determines the authentication type and returns relevant info.
-    
-    Args:
-        request: The FastAPI request object
-        
-    Returns:
-        Dict with authentication context:
-        - type: "api_key" | "session" | "anonymous"
-        - user: username (for session auth) or None
-        - api_key: validated API key or None
-    """
-    # Check for API key first
-    api_key = request.headers.get("X-API-Key")
-    if api_key:
-        settings = get_settings()
-        if _ct_equal(api_key, settings.EDGE_API_KEY):
-            return {
-                "type": "api_key",
-                "user": None,
-                "api_key": api_key
-            }
-    
-    # Check for session
-    user = request.session.get("user")
-    if user:
-        return {
-            "type": "session",
-            "user": user,
-            "api_key": None
-        }
-    
-    # Anonymous
-    return {
-        "type": "anonymous",
-        "user": None,
-        "api_key": None
-    }
-
 
 
 async def verify_api_key_or_session(
@@ -341,10 +192,5 @@ __all__ = [
     "verify_node_id",
     "verify_api_key_or_session",
     "get_current_user",
-    "get_current_user_optional",
     "authenticate_user",
-    "verify_ws_session",
-    "is_public_path",
-    "is_api_key_path",
-    "get_auth_context",
 ]

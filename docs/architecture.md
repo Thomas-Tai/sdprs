@@ -131,120 +131,143 @@ sdprs/
 |-- .env.example                     # 環境變數範本（複製為 .env 使用）
 |-- .gitignore
 |-- Dockerfile                       # 雲端部署映像（Zeabur / 任何 Docker 平台）
-|-- .dockerignore                    # Docker 建置忽略清單
-|-- README.md                        # <-- 本文件
+|-- .dockerignore
+|-- README.md                        # 專案首頁（front door）
+|-- zbpack.json                      # Zeabur 建置類型指令
 |
 |-- central_server/                  # ===== 中央伺服器應用 =====
 |   |-- __init__.py
-|   |-- main.py                      # FastAPI 入口 + 儀表板路由
+|   |-- main.py                      # FastAPI 入口 + SPA/舊 Jinja 路由 + login/logout
 |   |-- config.py                    # pydantic-settings 環境變數管理
-|   |-- auth.py                      # 三層認證 (API Key / Session / WS Cookie)
+|   |-- auth.py                      # 三層認證 (X-API-Key / Session / X-API-Key or Session)
 |   |-- database.py                  # 雙模資料庫：SQLite WAL（本地）/ PostgreSQL（雲端）
-|   |-- requirements.txt             # Python 依賴清單
-|   |-- api/                         # REST API 端點
+|   |-- timeutil.py                  # utcnow() 統一 naive-UTC helper
+|   |-- requirements.txt
+|   |-- .env.example
+|   |-- api/                         # REST API 路由
 |   |   |-- __init__.py
-|   |   |-- alerts.py                #   警報 CRUD + 影片上傳
-|   |   |-- nodes.py                 #   節點狀態 + 離線偵測
+|   |   |-- alerts.py                #   警報 CRUD + 影片 + 認領/解決/批次/rate
+|   |   |-- audit.py                 #   稽核紀錄（admin only）
+|   |   |-- handover.py              #   班次交接備註（單筆全域，24h TTL）
+|   |   |-- nodes.py                 #   節點狀態 + snooze + pump cycles
 |   |   |-- snapshots.py             #   監控快照上傳/讀取
-|   |   +-- stream.py                #   HLS 串流啟動/停止
+|   |   |-- stream.py                #   HLS 串流啟動/停止/health
+|   |   +-- weather.py               #   CWA + Open-Meteo（受 CWA_API_KEY 閘控）
 |   |-- services/                    # 背景服務
 |   |   |-- __init__.py
-|   |   |-- mqtt_service.py          #   MQTT 訂閱 + 離線偵測
-|   |   |-- websocket_service.py     #   WebSocket 即時推送
-|   |   |-- event_service.py         #   事件業務邏輯
-|   |   +-- retention_service.py     #   APScheduler 資料清理（每天凌晨3點）
-|   |-- templates/                   # Jinja2 HTML 模板（繁體中文）
-|   |   |-- base.html                #   基礎版面 + 導航 + WS 連線
-|   |   |-- dashboard.html           #   儀表板首頁
-|   |   |-- alert_detail.html        #   警報詳情 + 影片播放
-|   |   |-- monitor.html             #   連續監控牆
-|   |   |-- system_status.html       #   系統狀態頁
-|   |   +-- login.html               #   登入頁面
-|   |-- static/                      # 靜態資源
-|   |   |-- css/styles.css
-|   |   +-- js/
-|   |       |-- dashboard.js         #   WebSocket + 警報音效
-|   |       +-- monitor.js           #   監控牆自動刷新
+|   |   |-- audit_service.py         #   操作稽核寫入
+|   |   |-- event_service.py         #   事件業務邏輯（雙 backend dispatch）
+|   |   |-- mqtt_service.py          #   MQTT 訂閱 + 離線偵測 + LWT + cmd 發送
+|   |   |-- retention_service.py     #   APScheduler 資料清理（每天凌晨 3 點）
+|   |   |-- weather_service.py       #   CWA + Open-Meteo 快取
+|   |   +-- websocket_service.py     #   WebSocket 即時推送 + broadcast_from_sync
+|   |-- templates/                   # 舊版 Jinja 儀表板（/dashboard-legacy 等）
+|   |   |-- base.html · dashboard.html · alert_detail.html
+|   |   |-- monitor.html · system_status.html · audit.html · login.html
+|   |-- static/
+|   |   |-- css/styles.css           # 舊版樣式
+|   |   |-- js/
+|   |   |   |-- dashboard.js · monitor.js
+|   |   +-- spa/                     # V2 React SPA（/）
+|   |       |-- index.html · styles.css
+|   |       |-- app.jsx · api.jsx · components.jsx
+|   |       |-- pages.jsx · icons.jsx · data.jsx · tweaks-panel.jsx
+|   |       +-- vendor/              # React 18 + Tailwind + Babel（CDN 內嵌）
 |   |-- systemd/
-|   |   +-- sdprs-server.service     # systemd 服務定義
-|   +-- tests/                       # 單元測試
-|       |-- __init__.py
-|       |-- test_alerts_api.py
-|       |-- test_retention.py
-|       +-- test_snapshot_api.py
+|   |   +-- sdprs-server.service
+|   |-- storage/events/{node_id}/*.mp4   # 上傳的 MP4 落地（STORAGE_PATH 子樹）
+|   +-- tests/                       # 115 個測試（含 dual-backend、LWT、audit、rate）
 |
-|-- edge_glass/                      # ===== 玻璃偵測邊緣節點 (Pi 4) =====
+|-- edge_glass/                      # ===== 玻璃偵測邊緣節點 (Pi 4/5) =====
 |   |-- __init__.py
-|   |-- edge_glass_main.py           # 主程式（事件迴圈）
-|   |-- config.yaml                  # 節點配置
-|   |-- requirements.txt             # Python 依賴清單
-|   |-- detectors/                   # 偵測模組
-|   |   |-- __init__.py
-|   |   |-- visual_detector.py       #   OpenCV 10步管線
-|   |   |-- audio_detector.py        #   FFT 6步管線 + 自適應基線
-|   |   +-- trigger_engine.py        #   融合觸發引擎
-|   |-- buffer/                      # 環形緩衝
-|   |   |-- __init__.py
+|   |-- edge_glass_main.py           # 主程式（事件迴圈；含 async_encode 未啟用開關）
+|   |-- config.yaml                  # 節點配置（本地 LAN）
+|   |-- config.zeabur.yaml           # 雲端版配置（指向 Zeabur）
+|   |-- requirements.txt
+|   |-- detectors/
+|   |   |-- visual_detector.py       #   OpenCV 10 步管線 + anomaly_recovery
+|   |   |-- audio_detector.py        #   FFT 6 步管線 + 自適應基線（dBFS）
+|   |   +-- trigger_engine.py        #   融合觸發 + is_simulation 支援
+|   |-- buffer/
 |   |   +-- circular_buffer.py       #   RAM 環形緩衝 (~415MB)
-|   |-- comms/                       # 通訊模組
-|   |   |-- __init__.py
-|   |   |-- mqtt_client.py           #   MQTT 發布
+|   |-- comms/
+|   |   |-- mqtt_client.py           #   心跳 + LWT + cmd 訂閱
 |   |   |-- api_uploader.py          #   HTTP 上傳佇列
 |   |   +-- event_queue.py           #   事件排隊管理
-|   |-- stream/                      # 串流模組
-|   |   |-- __init__.py
+|   |-- stream/
 |   |   +-- rtsp_server.py           #   mediamtx 管理
-|   |-- utils/                       # 工具
-|   |   |-- __init__.py
-|   |   |-- config_loader.py         #   YAML 配置載入
-|   |   |-- logger.py                #   日誌格式化
-|   |   |-- mp4_encoder.py           #   MP4 編碼寫入
-|   |   |-- snapshot.py              #   快照擷取
-|   |   +-- thermal.py               #   CPU 溫度監控
-|   |-- config.zeabur.yaml           # 雲端版配置（指向 Zeabur 伺服器）
-|   |-- systemd/                     # systemd 服務定義
-|   |   |-- sdprs-edge.service       #   主偵測服務（本地 LAN 模式）
-|   |   |-- autossh-tunnel.service   #   SSH 反向隧道（本地 LAN 模式）
-|   |   +-- sdprs-edge-cloud.service #   雲端模式服務（無 autossh 依賴）
-|   +-- tests/                       # 單元測試
-|       |-- test_audio_detector.py
-|       |-- test_circular_buffer.py
-|       |-- test_event_queue.py
-|       |-- test_mp4_encoder.py
-|       +-- test_visual_detector.py
+|   |-- utils/
+|   |   |-- config_loader.py         #   YAML 載入 + DEFAULTS
+|   |   |-- logger.py
+|   |   |-- mp4_encoder.py
+|   |   |-- snapshot.py
+|   |   |-- thermal.py               #   CPU 溫度監控
+|   |   +-- event_capture.py         #   非同步事件擷取 (flag-gated OFF)
+|   |-- systemd/
+|   |   |-- sdprs-edge.service       #   本地 LAN 模式
+|   |   |-- autossh-tunnel.service   #   SSH 反向隧道
+|   |   +-- sdprs-edge-cloud.service #   雲端模式（無 autossh 依賴）
+|   +-- tests/                       # 124 個測試
 |
 |-- edge_pump/                       # ===== 水泵控制節點 (ESP32 MicroPython) =====
 |   |-- __init__.py
-|   |-- boot.py                      # WiFi 連線（開機自動執行）
-|   |-- main.py                      # 主迴圈（滯後控制）
+|   |-- boot.py                      # 開機啟動
+|   |-- main.py                      # 主迴圈（滯後控制 + WDT）
 |   |-- config.py                    # WiFi/MQTT/GPIO 配置常數
 |   |-- control_logic.py             # 純安全決策階梯（純函式，可桌面測試）
 |   |-- sensors.py                   # 感測器 HAL（去彈跳數位 + ADC 中值）
 |   |-- pump_controller.py           # 繼電器 GPIO 控制 + LED
-|   +-- mqtt_client.py               # umqtt.simple 客戶端
+|   |-- mqtt_client.py               # umqtt.simple + LWT + build_payload（publish-only）
+|   |-- conftest.py                  # pytest sys.path 修補
+|   +-- tests/                       # 48 個測試
 |
 |-- shared/                          # ===== 共用模組 =====
 |   |-- __init__.py
-|   +-- mqtt_topics.py               # 7個 MQTT 主題 + QoS 常數
+|   +-- mqtt_topics.py               # 主題常數 + QoS + 生成函式
+|
+|-- firmware/                        # MicroPython 韌體快取
+|   +-- micropython_esp32.bin        # setup_esp32.sh 首次刷寫時下載到此
 |
 |-- deploy/                          # ===== 部署配置 =====
 |   |-- Dockerfile                   # 中央伺服器容器映像
-|   |-- docker-compose.yml           # 三容器編排 (app+mosquitto+nginx)
-|   |-- nginx.conf                   # Nginx 反向代理 + HLS + WebSocket
-|   +-- mosquitto.conf               # MQTT Broker 配置
+|   |-- docker-compose.yml           # 三容器編排 (app + mosquitto + nginx)
+|   |-- nginx.conf
+|   |-- mosquitto.conf · mosquitto_acl.conf
+|   |-- MQTT_SECURITY.md
+|   +-- emqx/                        # Zeabur EMQX 建置
 |
-+-- scripts/                         # ===== 佈建腳本 =====
-    |-- setup_server.sh              # 中央伺服器一鍵佈建
-    |-- setup_pi.sh                  # 邊緣節點一鍵佈建
-    |-- setup_esp32.sh               # ESP32 韌體燒錄 + 程式上傳
-    |-- deploy_sync.sh               # rsync 增量部署到 Pi（開發用）
-    |-- gen_qrcode.sh                # WiFi/伺服器 QR Code 生成
-    |-- backup_from_zeabur.sh        # 從 Zeabur 拉取備份到 Pi（每日 cron）
-    +-- restore_to_zeabur.sh         # 從 Pi 本地備份還原到 Zeabur PostgreSQL
-
-|-- docs/
-    +-- zeabur_migration_report.md   # 雲端遷移可行性分析報告
+|-- scripts/                         # ===== 佈建與運維腳本 =====
+|   |-- setup_server.sh              # 中央伺服器一鍵佈建（Pi 5 / 一般 Linux）
+|   |-- setup_pi.sh                  # 邊緣節點一鍵佈建
+|   |-- setup_esp32.sh               # ESP32 韌體燒錄 + 程式上傳
+|   |-- deploy_sync.sh               # rsync 增量部署（開發用；SDPRS_* 環境變數）
+|   |-- gen_qrcode.sh                # WiFi/伺服器 QR Code 生成
+|   |-- backup_from_zeabur.sh        # 從 Zeabur 拉取備份（每日 cron）
+|   |-- micropython_esp32.bin        # ESP32 MicroPython 韌體（同 firmware/，供 setup_esp32.sh 就近取用）
+|   +-- restore_to_zeabur.sh         # 從備份還原到 Zeabur PostgreSQL
+|
+|-- storage/                         # ===== 執行時期本地事件儲存（根層） =====
+|   +-- events/{node_id}/            # 邊緣節點上傳的 MP4 落地目錄
+|
++-- docs/                            # 文件樹（本目錄）
+    |-- README.md · PROJECT_STATUS.md · architecture.md · hardware-network.md
+    |-- deployment/                  # 部署指南（README + 6 個方案／驗證清單）
+    |-- operations/                  # 運維文件（dashboard-guide, runbook, troubleshooting）
+    |-- reference/                   # 參考文件（configuration, api, mqtt-topics）
+    |-- archive/                     # 已封存文件
+    +-- superpowers/                 # 工程審計與規格工作流（PROGRESS.md 為權威進度）
 ```
+
+**新／改動要點：**
+
+- `central_server/api/` 現有 7 個路由檔（新增 `audit.py` / `handover.py` / `weather.py`）。
+- `central_server/services/` 新增 `audit_service.py`、`weather_service.py`。
+- `central_server/static/spa/` 為 V2 React SPA 主要載入路徑（`/` 直接載入）。
+- `central_server/timeutil.py` 為 `utcnow()` 統一 helper（見 `PROGRESS.md`）。
+- `edge_glass/utils/event_capture.py` 為非同步編碼工作管線（`capture.async_encode` 預設 OFF）。
+- `edge_glass/config.zeabur.yaml` 為雲端變體。
+- `edge_pump/tests/` 與 `edge_pump/conftest.py` 於 2026-07-13 合併補齊。
+- `firmware/micropython_esp32.bin` 為權威快取；`scripts/micropython_esp32.bin` 為歷史殘留（見腳本 §deploy 待清）。
 
 ---
 

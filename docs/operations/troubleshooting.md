@@ -50,24 +50,52 @@ ss -tlnp | grep 18554
 # 應該看到 LISTEN 狀態
 ```
 
-## 問題 4：WebSocket 斷連（儀表板右上角紅色圓點）
+## 問題 4：WebSocket 斷連（儀表板頂列 Live 秒數不再重置）
 
 - 確認你已經**登入**（WebSocket 需要 Session Cookie）
+- V2 SPA 會自動重連（指數退避，最長 15 秒），可先靜候
 - 重新整理頁面（按 F5）
 - 檢查 FastAPI 服務是否在運行
 
 ## 問題 5：水泵不動作
 
-```bash
-# 1. 檢查 ESP32 是否在線（監聽 MQTT）
-mosquitto_sub -h 192.168.1.100 -t "sdprs/edge/pump_node_01/pump_status" -v
-# 如果沒有資料，檢查 ESP32 WiFi 和 MQTT 配置
+> **重要澄清：** ESP32 水泵節點目前**只發佈狀態、不訂閱任何指令主題**
+> （見 `edge_pump/mqtt_client.py` — 純 publish-only）。
+> 因此無法透過 MQTT 遠端下達啟停命令；水泵完全由本地 `control_logic` 依水位／雨感／浮球
+> 自動決策（滯後 20%/80%）。以下為正確診斷路徑：
 
-# 2. 手動發送控制命令測試
-mosquitto_pub -h 192.168.1.100 \
-  -t "sdprs/edge/pump_node_01/cmd" \
-  -m '{"action":"ON"}'
+```bash
+# 1. 確認 ESP32 是否有發佈 pump_status（監聽 MQTT）
+mosquitto_sub -h <中央伺服器IP> -t "sdprs/edge/pump_node_01/pump_status" -v
+# 期望每 10 秒收到一筆 JSON（含 pump_state、water_level、raining、reason...）
+# 若完全無訊息 → 檢查 ESP32 WiFi 與 MQTT 連線（下述步驟 3）
+
+# 2. 從儀表板 / API 讀取水泵最新狀態
+curl -u admin:密碼 http://<中央伺服器>:8000/api/nodes | \
+    python3 -c "import json,sys; [print(n['node_id'],n['status'],n.get('pump_state'),n.get('water_level')) for n in json.load(sys.stdin)]"
+# 或直接在儀表板「監看牆／節點狀態」頁面查看 pump_state / water_level / reason
+
+# 3. 若無 pump_status → 檢查 broker 連通與 ESP32 REPL 記錄
+mpremote connect /dev/ttyUSB0 repl
+# 期望看到：
+#   [MQTT] WiFi connected: 192.168.x.x
+#   [MQTT] Connected to broker!
+#   [MQTT] Published: {...}
+# 若卡在 "[MQTT] WiFi timeout" → 檢查 SSID/密碼
+# 若卡在 "[MQTT] MQTT error" → 檢查 MQTT_BROKER IP 與帳密
+
+# 4. 現場實體排查（軟體無問題卻不動）：
+#    - 繼電器指示燈是否亮（GPIO 26 訊號到位？）
+#    - 水位感測器讀值是否 >= HIGH_THRESHOLD 但泵仍未啟動 → 檢查 sensor_conflict、dry_run_protect 旗標
+#    - 檢查 12V/24V 泵供電、保險絲、繼電器 NO/NC 接線
+
+# 5. 需要「重置」節點時只能物理斷電（無遠端重啟通道）
 ```
+
+> **備註：** MQTT 主題 `sdprs/edge/{node_id}/cmd/*` 目前僅由 **玻璃節點（edge_glass）** 訂閱
+> （用於 stream_start / stream_stop / simulate_trigger / snooze / update），
+> 水泵節點的 cmd 通道未來若要新增，需先在 `edge_pump/mqtt_client.py` 加入
+> `subscribe()` + `check_msg()` 排程；當前版本不支援。
 
 ## 問題 6：Pi 過熱重啟
 
