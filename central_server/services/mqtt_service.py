@@ -239,6 +239,10 @@ class MQTTService:
                 return
 
             with self._lock:
+                # Capture the prior status BEFORE overwriting so we can detect a
+                # transition (unknown-node first contact, or OFFLINE->ONLINE
+                # recovery). Steady-state heartbeats must NOT broadcast.
+                prev_status = self.node_states.get(node_id, {}).get("status")
                 # Update node state in memory
                 self.node_states[node_id] = {
                     "type": "glass",
@@ -252,7 +256,7 @@ class MQTTService:
                     "uptime_seconds": data.get("uptime_seconds"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
-            
+
             # Update database
             metadata = {
                 "cpu_temp": data.get("cpu_temp"),
@@ -262,13 +266,37 @@ class MQTTService:
                 "audio_health": data.get("audio_health"),
                 "uptime_seconds": data.get("uptime_seconds")
             }
-            
+
             if self.db:
                 self.db.upsert_node(node_id, "glass", "ONLINE", metadata)
             else:
                 upsert_node(node_id, "glass", "ONLINE", metadata)
-            
+
             logger.debug(f"Heartbeat from {node_id}: cpu_temp={data.get('cpu_temp')}°C")
+
+            # Recovery broadcast (mirror _mark_node_offline / _handle_lwt_offline
+            # idiom, inverse direction). ONLY on a transition to ONLINE — never on
+            # every heartbeat — so dashboards learn about recovery instantly instead
+            # of waiting for the next REST refresh. Best-effort: guarded by _loop and
+            # never allowed to break heartbeat processing.
+            if prev_status != "ONLINE" and self._loop is not None:
+                try:
+                    from .websocket_service import broadcast_from_sync
+                    ws_data = {"node_id": node_id, "status": "ONLINE"}
+                    # Include telemetry only when present (mirror the shape the old
+                    # broadcast_node_status method produced).
+                    cpu_temp = data.get("cpu_temp")
+                    if cpu_temp is not None:
+                        ws_data["cpu_temp"] = cpu_temp
+                    memory_usage_percent = data.get("memory_usage_percent")
+                    if memory_usage_percent is not None:
+                        ws_data["memory_usage_percent"] = memory_usage_percent
+                    broadcast_from_sync(self._loop, {
+                        "type": "node_status",
+                        "data": ws_data,
+                    })
+                except Exception as ws_err:
+                    logger.debug(f"WebSocket broadcast for online recovery failed: {ws_err}")
             
         except json.JSONDecodeError as e:
             logger.error(f"Invalid heartbeat JSON from {node_id}: {e}")
@@ -332,6 +360,9 @@ class MQTTService:
             return
 
         with self._lock:
+            # Capture prior status BEFORE overwriting to detect a transition to
+            # ONLINE (unknown-node first contact or OFFLINE->ONLINE recovery).
+            prev_status = self.node_states.get(node_id, {}).get("status")
             self.node_states[node_id] = {
                 "type": "pump", "status": "ONLINE",
                 "last_heartbeat": utcnow(),
@@ -351,6 +382,20 @@ class MQTTService:
             self.db.upsert_node(node_id, "pump", "ONLINE", metadata)
         else:
             upsert_node(node_id, "pump", "ONLINE", metadata)
+
+        # Recovery broadcast: only on transition to ONLINE (never every message).
+        # Pumps carry no cpu_temp/memory telemetry, so the payload is node_id +
+        # status only. This is distinct from the pump_status telemetry broadcast
+        # below. Best-effort; guarded by _loop and never fatal to processing.
+        if prev_status != "ONLINE" and self._loop is not None:
+            try:
+                from .websocket_service import broadcast_from_sync
+                broadcast_from_sync(self._loop, {
+                    "type": "node_status",
+                    "data": {"node_id": node_id, "status": "ONLINE"},
+                })
+            except Exception as ws_err:
+                logger.debug(f"WebSocket broadcast for online recovery failed: {ws_err}")
 
         try:
             ts = data.get("timestamp") or utcnow().isoformat()

@@ -7,10 +7,12 @@ This module provides CRUD operations for event/alert management.
 """
 
 import logging
+import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ..database import get_backend, get_db
 from ..timeutil import utcnow
 
 # Configure logging
@@ -18,7 +20,7 @@ logger = logging.getLogger("event_service")
 
 
 def list_events(
-    db: sqlite3.Connection,
+    db: Optional[sqlite3.Connection] = None,
     status_filter: Optional[str] = None,
     node_filter: Optional[str] = None,
     page: int = 1,
@@ -26,17 +28,23 @@ def list_events(
 ) -> Dict[str, Any]:
     """
     List events with optional filtering and pagination.
-    
+
     Args:
-        db: SQLite database connection
+        db: SQLite connection (optional; fetched via get_db() when None and the
+            active backend is SQLite). Ignored under PostgreSQL.
         status_filter: Filter by status (PENDING_VIDEO, PENDING, RESOLVED)
         node_filter: Filter by node_id
         page: Page number (1-indexed)
         page_size: Number of items per page
-        
+
     Returns:
         Dict with items, total, page, page_size
     """
+    if get_backend() == "postgresql":
+        return _list_events_pg(status_filter, node_filter, page, page_size)
+
+    if db is None:
+        db = get_db()
     cursor = db.cursor()
 
     # Build query
@@ -81,13 +89,67 @@ def list_events(
     items = [dict(row) for row in rows]
     
     total_pages = (total + page_size - 1) // page_size
-    
+
     return {
         "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages
+    }
+
+
+def _list_events_pg(
+    status_filter: Optional[str],
+    node_filter: Optional[str],
+    page: int,
+    page_size: int,
+) -> Dict[str, Any]:
+    """PostgreSQL branch of list_events (throwaway-engine idiom, :named params)."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+
+    conditions = []
+    params: Dict[str, Any] = {}
+    if status_filter:
+        statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
+        if len(statuses) == 1:
+            conditions.append("status = :status")
+            params["status"] = statuses[0]
+        elif len(statuses) > 1:
+            names = []
+            for i, s in enumerate(statuses):
+                key = f"status{i}"
+                params[key] = s
+                names.append(f":{key}")
+            conditions.append(f"status IN ({','.join(names)})")
+    if node_filter:
+        conditions.append("node_id = :node_id")
+        params["node_id"] = node_filter
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    offset = (page - 1) * page_size
+    with engine.connect() as conn:
+        total = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM events WHERE {where_clause}"),
+            params,
+        ).scalar() or 0
+        rows = conn.execute(
+            sqlalchemy.text(
+                f"SELECT * FROM events WHERE {where_clause} "
+                "ORDER BY timestamp DESC LIMIT :limit OFFSET :offset"
+            ),
+            {**params, "limit": page_size, "offset": offset},
+        ).mappings().fetchall()
+
+    items = [dict(r) for r in rows]
+    total_pages = (total + page_size - 1) // page_size
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
     }
 
 
@@ -184,7 +246,8 @@ def update_event_video(db: sqlite3.Connection, alert_id: int, mp4_path: str) -> 
 
 
 def acknowledge_event(
-    db: sqlite3.Connection,
+    db: Optional[sqlite3.Connection] = None,
+    *,
     alert_id: int,
     acknowledged_by: str,
 ) -> Optional[Dict[str, Any]]:
@@ -193,8 +256,16 @@ def acknowledge_event(
     Distinct from RESOLVED. Suppresses repeating audio (item 3) but keeps the event
     visible in the active list. Idempotent: re-ack by same operator is a no-op.
 
+    ``db`` is optional (fetched via get_db() when None under SQLite; ignored
+    under PostgreSQL). ``alert_id``/``acknowledged_by`` are keyword-only.
+
     Returns the updated event dict on success, or None if not found / wrong status.
     """
+    if get_backend() == "postgresql":
+        return _acknowledge_event_pg(alert_id, acknowledged_by)
+
+    if db is None:
+        db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
     row = cursor.fetchone()
@@ -226,26 +297,65 @@ def acknowledge_event(
     }
 
 
+def _acknowledge_event_pg(alert_id: int, acknowledged_by: str) -> Optional[Dict[str, Any]]:
+    """PostgreSQL branch of acknowledge_event (throwaway-engine idiom)."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    acked_at = utcnow().isoformat()
+    with engine.connect() as conn:
+        row = conn.execute(
+            sqlalchemy.text("SELECT status FROM events WHERE id = :id"),
+            {"id": alert_id},
+        ).mappings().fetchone()
+        if not row:
+            logger.warning(f"Event {alert_id} not found")
+            return None
+        if row["status"] != "PENDING":
+            logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
+            return None
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE events SET status = 'ACKNOWLEDGED', "
+                "acknowledged_by = :by, acknowledged_at = :at WHERE id = :id"
+            ),
+            {"by": acknowledged_by, "at": acked_at, "id": alert_id},
+        )
+        conn.commit()
+    logger.info(f"Event {alert_id} acknowledged by {acknowledged_by}")
+    return {
+        "alert_id": alert_id,
+        "acknowledged_by": acknowledged_by,
+        "acknowledged_at": acked_at,
+    }
+
+
 def resolve_event(
-    db: sqlite3.Connection,
+    db: Optional[sqlite3.Connection] = None,
+    *,
     alert_id: int,
     resolved_by: str,
     notes: Optional[str] = None
 ) -> bool:
     """
     Mark an event as resolved.
-    
+
     Args:
-        db: SQLite database connection
-        alert_id: The event/alert ID
-        resolved_by: Username who resolved the event
+        db: SQLite connection (optional; fetched via get_db() when None under
+            SQLite; ignored under PostgreSQL).
+        alert_id: The event/alert ID (keyword-only)
+        resolved_by: Username who resolved the event (keyword-only)
         notes: Optional resolution notes
-        
+
     Returns:
         True if successful, False if event not found or wrong status
     """
+    if get_backend() == "postgresql":
+        return _resolve_event_pg(alert_id, resolved_by, notes)
+
+    if db is None:
+        db = get_db()
     cursor = db.cursor()
-    
+
     # Check current status
     cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
     row = cursor.fetchone()
@@ -275,27 +385,74 @@ def resolve_event(
     return True
 
 
-def get_event_counts(db: sqlite3.Connection) -> Dict[str, int]:
+def _resolve_event_pg(alert_id: int, resolved_by: str, notes: Optional[str]) -> bool:
+    """PostgreSQL branch of resolve_event (throwaway-engine idiom)."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        row = conn.execute(
+            sqlalchemy.text("SELECT status FROM events WHERE id = :id"),
+            {"id": alert_id},
+        ).mappings().fetchone()
+        if not row:
+            logger.warning(f"Event {alert_id} not found")
+            return False
+        if row["status"] not in ("PENDING", "ACKNOWLEDGED"):
+            logger.warning(
+                f"Event {alert_id} status is {row['status']}, expected PENDING or ACKNOWLEDGED"
+            )
+            return False
+        resolved_at = utcnow().isoformat()
+        result = conn.execute(
+            sqlalchemy.text(
+                "UPDATE events SET status = 'RESOLVED', resolved_by = :by, "
+                "resolved_at = :at, notes = COALESCE(:notes, notes) WHERE id = :id"
+            ),
+            {"by": resolved_by, "at": resolved_at, "notes": notes, "id": alert_id},
+        )
+        conn.commit()
+    logger.info(f"Event {alert_id} resolved by {resolved_by}")
+    return result.rowcount > 0
+
+
+def _event_counts_rows_pg() -> List[Dict[str, Any]]:
+    """PostgreSQL branch of get_event_counts: grouped (status, count) rows."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sqlalchemy.text("SELECT status, COUNT(*) AS count FROM events GROUP BY status")
+        )
+        return [dict(r) for r in result.mappings().fetchall()]
+
+
+def get_event_counts(db: Optional[sqlite3.Connection] = None) -> Dict[str, int]:
     """
     Get counts of events by status.
-    
+
     Args:
-        db: SQLite database connection
-        
+        db: SQLite connection (optional; fetched via get_db() when None under
+            SQLite; ignored under PostgreSQL).
+
     Returns:
         Dict with pending_video, pending, resolved, total counts
     """
-    cursor = db.cursor()
-    
-    # Get counts by status
-    cursor.execute("""
-        SELECT 
-            status,
-            COUNT(*) as count
-        FROM events
-        GROUP BY status
-    """)
-    
+    if get_backend() == "postgresql":
+        rows = _event_counts_rows_pg()
+    else:
+        if db is None:
+            db = get_db()
+        cursor = db.cursor()
+        # Get counts by status
+        cursor.execute("""
+            SELECT
+                status,
+                COUNT(*) as count
+            FROM events
+            GROUP BY status
+        """)
+        rows = cursor.fetchall()
+
     counts = {
         "pending_video": 0,
         "pending": 0,
@@ -304,7 +461,7 @@ def get_event_counts(db: sqlite3.Connection) -> Dict[str, int]:
         "total": 0
     }
 
-    for row in cursor.fetchall():
+    for row in rows:
         status = row["status"].lower()
         if status == "pending_video":
             counts["pending_video"] = row["count"]

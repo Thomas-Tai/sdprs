@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id
-from ..database import get_db, insert_event, get_event, update_event_status
+from ..database import insert_event, get_event, update_event_status, get_event_created_ats
 from ..config import get_settings
 from ..timeutil import utcnow
 from ..services.websocket_service import ws_manager
@@ -325,7 +325,6 @@ async def acknowledge_alert(
     """
     logger.info(f"Acknowledging alert {alert_id} by {user}")
 
-    db = get_db()
     event = get_event(alert_id)
 
     if event is None:
@@ -355,7 +354,7 @@ async def acknowledge_alert(
             detail=f"Cannot acknowledge alert in status {event['status']}"
         )
 
-    result = acknowledge_event_db(db=db, alert_id=alert_id, acknowledged_by=user)
+    result = acknowledge_event_db(alert_id=alert_id, acknowledged_by=user)
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -399,10 +398,7 @@ async def resolve_alert(
     compatibility but ignored.
     """
     logger.info(f"Resolving alert {alert_id} by {user}")
-    
-    # Get database connection
-    db = get_db()
-    
+
     try:
         # Check if alert exists
         event = get_event(alert_id)
@@ -436,7 +432,6 @@ async def resolve_alert(
         
         # Resolve the event
         success = resolve_event_db(
-            db=db,
             alert_id=alert_id,
             resolved_by=user,
             notes=body.notes
@@ -497,16 +492,10 @@ async def alert_rate(
     bucket_s = bucket_map.get(bucket, 900)
     window_s = window_map.get(window, 4 * 3600)
 
-    db = get_db()
-    cur = db.cursor()
     from datetime import timedelta as _td
     end = utcnow()
     start = end - _td(seconds=window_s)
-    cur.execute(
-        "SELECT created_at FROM events WHERE created_at >= ? ORDER BY created_at ASC;",
-        (start.isoformat(),),
-    )
-    rows = cur.fetchall()
+    rows = get_event_created_ats(start.isoformat())
 
     # Pre-build buckets so empty windows render as 0 (gives the sparkline the
     # full timeline shape; a zero-rate moment is itself information).
@@ -520,10 +509,12 @@ async def alert_rate(
         t = t + _td(seconds=bucket_s)
 
     if buckets:
-        b0 = _dt.fromisoformat(buckets[0]["bucket_start"].rstrip("Z"))
+        # NOTE: get_event_created_ats returns a list of raw created_at strings,
+        # so each `r` is the timestamp string itself (not a row mapping).
+        b0 = datetime.fromisoformat(buckets[0]["bucket_start"].rstrip("Z"))
         for r in rows:
             try:
-                ts = _dt.fromisoformat(str(r["created_at"]).replace("Z", "").replace(" ", "T"))
+                ts = datetime.fromisoformat(str(r).replace("Z", "").replace(" ", "T"))
             except (ValueError, TypeError):
                 continue
             idx = int((ts - b0).total_seconds() // bucket_s)
@@ -557,7 +548,6 @@ async def bulk_resolve_alerts(
     Audit log records both the bulk umbrella action and per-id actions so
     a later review can reconstruct exactly what was processed.
     """
-    db = get_db()
     succeeded: list[int] = []
     failures: list[dict] = []
     for alert_id in body.ids:
@@ -569,7 +559,7 @@ async def bulk_resolve_alerts(
             if ev["status"] not in ("PENDING", "ACKNOWLEDGED"):
                 failures.append({"id": alert_id, "reason": f"status={ev['status']}"})
                 continue
-            ok = resolve_event_db(db=db, alert_id=alert_id, resolved_by=user, notes=body.notes)
+            ok = resolve_event_db(alert_id=alert_id, resolved_by=user, notes=body.notes)
             if not ok:
                 failures.append({"id": alert_id, "reason": "db_error"})
                 continue

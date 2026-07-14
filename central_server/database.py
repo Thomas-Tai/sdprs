@@ -365,6 +365,17 @@ def _create_tables_postgresql(conn):
 # Connection helpers
 # =============================================================================
 
+def get_backend() -> str:
+    """Return the active backend ("sqlite" | "postgresql"), read at call time.
+
+    Other modules MUST call this rather than importing the private ``_backend``
+    global: an ``import`` binds the name to its value at import time (before
+    ``init_db`` runs, i.e. always "sqlite"), whereas this accessor reads the
+    live module state.
+    """
+    return _backend
+
+
 def get_db() -> sqlite3.Connection:
     """Return the SQLite connection (raises if not initialised or using PG)."""
     if _db_connection is None:
@@ -889,6 +900,63 @@ def get_all_nodes() -> List[Dict[str, Any]]:
             except (json.JSONDecodeError, TypeError):
                 pass
     return rows
+
+
+# =============================================================================
+# Dashboard read helpers  (unified SQLite / PostgreSQL)
+# =============================================================================
+
+def get_pending_alert_ids() -> List[int]:
+    """IDs of events still in PENDING status.
+
+    Seeds the dashboard audio-alert loop so an operator opening the page
+    mid-storm hears already-queued alerts. No ORDER BY (matches legacy SQL).
+    """
+    if get_backend() == "postgresql":
+        rows = _pg_fetch_many_sync("SELECT id FROM events WHERE status = 'PENDING'", {})
+        return [r["id"] for r in rows]
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM events WHERE status = 'PENDING'")
+    return [r[0] for r in cursor.fetchall()]
+
+
+def get_handover_note_row() -> Optional[Dict[str, Any]]:
+    """Item 16: raw handover_note singleton (id=1), or None if absent.
+
+    Returns {note, author, updated_at}; the caller applies its own TTL and
+    empty-string handling.
+    """
+    if get_backend() == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT note, author, updated_at FROM handover_note WHERE id = 1", {}
+        )
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT note, author, updated_at FROM handover_note WHERE id = 1;")
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_event_created_ats(since_iso: str) -> List[str]:
+    """Item 11: created_at values (ASC) for events at/after ``since_iso``.
+
+    Feeds the alert-rate sparkline. Returns the raw stored value coerced to
+    str (SQLite stores an ISO string; PostgreSQL returns a datetime).
+    """
+    if get_backend() == "postgresql":
+        rows = _pg_fetch_many_sync(
+            "SELECT created_at FROM events WHERE created_at >= :since ORDER BY created_at ASC",
+            {"since": since_iso},
+        )
+        return [str(r["created_at"]) for r in rows]
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT created_at FROM events WHERE created_at >= ? ORDER BY created_at ASC;",
+        (since_iso,),
+    )
+    return [str(r["created_at"]) for r in cursor.fetchall()]
 
 
 # =============================================================================

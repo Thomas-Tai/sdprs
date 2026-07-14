@@ -223,37 +223,6 @@ class WebSocketManager:
         })
         logger.debug(f"Broadcast alert_resolved: alert_id={alert_id}")
     
-    async def broadcast_node_status(
-        self,
-        node_id: str,
-        status: str,
-        cpu_temp: float = None,
-        memory_usage_percent: float = None
-    ) -> None:
-        """
-        Broadcast a node status change notification.
-        
-        Args:
-            node_id: The node identifier
-            status: Node status (ONLINE/OFFLINE)
-            cpu_temp: CPU temperature (optional)
-            memory_usage_percent: Memory usage percentage (optional)
-        """
-        data = {
-            "node_id": node_id,
-            "status": status
-        }
-        if cpu_temp is not None:
-            data["cpu_temp"] = cpu_temp
-        if memory_usage_percent is not None:
-            data["memory_usage_percent"] = memory_usage_percent
-        
-        await self.broadcast({
-            "type": "node_status",
-            "data": data
-        })
-        logger.debug(f"Broadcast node_status: node_id={node_id}, status={status}")
-    
     async def broadcast_pump_status(
         self,
         node_id: str,

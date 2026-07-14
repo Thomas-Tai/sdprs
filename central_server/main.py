@@ -33,8 +33,8 @@ from .services.retention_service import setup_retention_scheduler
 from .services.weather_service import init_weather_service, get_weather_service
 from .database import (
     init_db as db_init_db, close_db as db_close_db,
-    get_db, get_all_events, get_events_by_status, get_event,
-    get_all_nodes
+    get_all_events, get_events_by_status, get_event,
+    get_all_nodes, get_pending_alert_ids, get_handover_note_row,
 )
 from .services.event_service import get_event_counts, list_events
 import time as _time
@@ -225,25 +225,21 @@ def _get_dashboard_context(request: Request) -> dict:
         if s.get("type") == "pump" and s.get("pump_state") == "ON"
     )
 
-    db = get_db()
-    counts = get_event_counts(db)
+    counts = get_event_counts()
 
     # IDs of alerts currently demanding operator action (PENDING with no ack yet).
     # Used by item-3 audio loop to seed initial state — without this, an operator
     # opening the dashboard mid-storm would hear no audio for already-queued alerts.
-    cursor = db.cursor()
-    cursor.execute("SELECT id FROM events WHERE status = 'PENDING'")
-    unacked_alert_ids = [r[0] for r in cursor.fetchall()]
+    unacked_alert_ids = get_pending_alert_ids()
 
     # Item 16: handover note. Cheap to read on every page (single row).
     handover_note = {"note": "", "author": None, "updated_at": None}
     try:
         from datetime import timedelta as _td
-        cursor.execute("SELECT note, author, updated_at FROM handover_note WHERE id = 1;")
-        row = cursor.fetchone()
+        row = get_handover_note_row()
         if row:
-            note = row[0] or ""
-            updated_at = row[2]
+            note = row["note"] or ""
+            updated_at = row["updated_at"]
             # Auto-clear after 24hr (read-time check; no background job).
             expired = False
             if updated_at:
@@ -255,7 +251,7 @@ def _get_dashboard_context(request: Request) -> dict:
                 except ValueError:
                     expired = False
             if not expired:
-                handover_note = {"note": note, "author": row[1], "updated_at": updated_at}
+                handover_note = {"note": note, "author": row["author"], "updated_at": updated_at}
     except Exception as e:
         logger.debug(f"Handover note read failed (non-fatal): {e}")
 
@@ -435,8 +431,7 @@ async def dashboard_page_legacy(request: Request, status: str = None, node: str 
         effective_status = status
         display_status = status
 
-    db = get_db()
-    result = list_events(db, status_filter=effective_status, node_filter=node, page=page, page_size=20)
+    result = list_events(status_filter=effective_status, node_filter=node, page=page, page_size=20)
 
     ctx["events"] = result["items"]
     ctx["total"] = result["total"]

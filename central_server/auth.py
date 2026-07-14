@@ -225,11 +225,11 @@ def is_public_path(path: str) -> bool:
     # Static files are public
     if path.startswith("/static/"):
         return True
-    
-    # Snapshot latest endpoint is public (for dashboard img tags)
-    if "/snapshot/latest" in path:
-        return True
-    
+
+    # NOTE: the GET snapshot/latest endpoint is NOT public. It now requires a
+    # session cookie or X-API-Key (dashboard <img> tags carry the same-origin
+    # session cookie automatically).
+
     # Check exact matches
     if path in public_paths:
         return True
@@ -255,14 +255,13 @@ def is_api_key_path(path: str) -> bool:
     # POST /api/alerts requires API key
     # PUT /api/alerts/{id}/video requires API key
     # POST /api/edge/{node_id}/snapshot requires API key
-    
+    # GET /api/edge/{node_id}/snapshot/latest now requires session-or-API-key
+    # (verify_api_key_or_session), so it is no longer carved out here.
+
     for api_path in api_key_paths:
         if path.startswith(api_path):
-            # But not the GET snapshot/latest endpoint
-            if "/snapshot/latest" in path:
-                return False
             return True
-    
+
     return False
 
 

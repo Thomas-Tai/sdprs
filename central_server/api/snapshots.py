@@ -14,7 +14,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
 
-from ..auth import verify_api_key, verify_node_id
+from ..auth import verify_api_key, verify_api_key_or_session, verify_node_id
 from ..timeutil import utcnow
 
 # Configure logging
@@ -167,18 +167,23 @@ async def receive_snapshot(
 @router.get("/edge/{node_id}/snapshot/latest")
 async def get_latest_snapshot(
     node_id: str,
-    request: Request
+    request: Request,
+    auth: str = Depends(verify_api_key_or_session)
 ) -> Response:
     """
     Get the latest snapshot JPEG for a node.
-    
-    This endpoint is public (no authentication required) so that
-    dashboard <img> tags can load snapshots directly.
-    
+
+    Requires authentication (no longer public). Accepts either an
+    authenticated dashboard session cookie or an X-API-Key header:
+    - Dashboard <img> tags load snapshots via same-origin relative URLs, so
+      the browser attaches the session cookie automatically.
+    - Edge nodes / scripts can authenticate with the X-API-Key header.
+
     - **node_id**: The edge node identifier
-    
+
     Returns:
         - 200: JPEG image (either the latest snapshot or a placeholder)
+        - 401: Missing/invalid session cookie and API key
     """
     # Get the global snapshots dict from app state
     snapshots: Dict[str, Dict[str, Any]] = request.app.state.latest_snapshots

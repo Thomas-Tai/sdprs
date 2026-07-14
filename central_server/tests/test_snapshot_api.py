@@ -205,20 +205,24 @@ class TestGetSnapshot:
             headers={**api_headers, "Content-Type": "image/jpeg"}
         )
         assert post_response.status_code == 204
-        
-        # Get the snapshot
-        get_response = client.get(f"/api/edge/{node_id}/snapshot/latest")
-        
+
+        # Get the snapshot (GET now requires auth — use the API key)
+        get_response = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
+
         assert get_response.status_code == 200
         assert get_response.headers["content-type"] == "image/jpeg"
         assert get_response.content == FAKE_JPEG
     
-    def test_get_snapshot_no_data(self, client):
+    def test_get_snapshot_no_data(self, client, api_headers):
         """Test getting snapshot when none has been posted."""
         node_id = "glass_node_99"
-        
-        response = client.get(f"/api/edge/{node_id}/snapshot/latest")
-        
+
+        response = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
+
         # Should return placeholder image
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/jpeg"
@@ -245,8 +249,10 @@ class TestGetSnapshot:
         )
         
         # Get the snapshot - should be the second one
-        response = client.get(f"/api/edge/{node_id}/snapshot/latest")
-        
+        response = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
+
         assert response.content == second_jpeg
     
     def test_get_snapshot_different_nodes(self, client, api_headers):
@@ -263,11 +269,15 @@ class TestGetSnapshot:
         )
         
         # node_02 should return placeholder
-        response_02 = client.get(f"/api/edge/{node_02}/snapshot/latest")
+        response_02 = client.get(
+            f"/api/edge/{node_02}/snapshot/latest", headers=api_headers
+        )
         assert response_02.headers.get("x-snapshot-status") == "placeholder"
-        
+
         # node_01 should return posted snapshot
-        response_01 = client.get(f"/api/edge/{node_01}/snapshot/latest")
+        response_01 = client.get(
+            f"/api/edge/{node_01}/snapshot/latest", headers=api_headers
+        )
         assert response_01.content == jpeg_01
     
     def test_post_snapshot_updates_timestamp(self, client, api_headers):
@@ -286,8 +296,10 @@ class TestGetSnapshot:
         assert response.status_code == 204
         
         # Get snapshot and check timestamp header
-        get_response = client.get(f"/api/edge/{node_id}/snapshot/latest")
-        
+        get_response = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
+
         assert get_response.status_code == 200
         assert "x-snapshot-timestamp" in get_response.headers
         
@@ -298,6 +310,71 @@ class TestGetSnapshot:
             datetime.fromisoformat(timestamp_str)
         except ValueError:
             pytest.fail(f"Invalid timestamp format: {timestamp_str}")
+
+
+class TestGetSnapshotAuth:
+    """Auth tests for GET /api/edge/{node_id}/snapshot/latest.
+
+    The GET endpoint used to be fully public; it now requires either a valid
+    X-API-Key header (edge nodes / scripts) or an authenticated session cookie
+    (dashboard <img> tags, which carry the same-origin cookie automatically).
+    """
+
+    @pytest.fixture
+    def session_client(self, test_db):
+        """A client whose app also exposes a tiny login route that writes the
+        real session, so we can exercise the genuine session-cookie path of
+        verify_api_key_or_session (not a dependency override)."""
+        from fastapi import FastAPI, Request
+        from starlette.middleware.sessions import SessionMiddleware
+
+        app = FastAPI()
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key="test-secret-key-for-testing"
+        )
+
+        import central_server.database as db_module
+        original_get_db = db_module.get_db
+        db_module.get_db = lambda: test_db
+
+        from central_server.api.snapshots import router as snapshots_router
+        app.include_router(snapshots_router, prefix="/api")
+
+        @app.post("/test-login")
+        async def _test_login(request: Request):
+            request.session["user"] = "operator"
+            return {"ok": True}
+
+        app.state.latest_snapshots = {}
+
+        with TestClient(app) as test_client:
+            yield test_client
+
+        db_module.get_db = original_get_db
+
+    def test_get_snapshot_unauthenticated_returns_401(self, client):
+        """No API key and no session -> 401."""
+        response = client.get("/api/edge/glass_node_01/snapshot/latest")
+        assert response.status_code == 401
+
+    def test_get_snapshot_with_api_key_returns_200(self, client, api_headers):
+        """Valid X-API-Key -> 200 (placeholder when no snapshot stored)."""
+        response = client.get(
+            "/api/edge/glass_node_01/snapshot/latest", headers=api_headers
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+
+    def test_get_snapshot_with_session_returns_200(self, session_client):
+        """Valid session cookie (as a browser <img> would send) -> 200."""
+        # Establish the signed session cookie via the login route.
+        login = session_client.post("/test-login")
+        assert login.status_code == 200
+
+        response = session_client.get("/api/edge/glass_node_01/snapshot/latest")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
 
 
 class TestSnapshotStatus:
@@ -350,7 +427,9 @@ class TestClearSnapshot:
         assert delete_response.status_code == 204
         
         # Should now return placeholder
-        get_response = client.get(f"/api/edge/{node_id}/snapshot/latest")
+        get_response = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
         assert get_response.headers.get("x-snapshot-status") == "placeholder"
     
     def test_clear_snapshot_nonexistent(self, client, api_headers):
