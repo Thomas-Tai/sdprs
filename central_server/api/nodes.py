@@ -14,7 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
-from ..database import get_all_nodes, get_node, set_node_location, get_pump_readings
+# get_node is aliased to db_get_node: the GET /nodes/{node_id} route below is
+# also named get_node (name kept — it's part of FastAPI's operation ids) and
+# rebinds the module global, so an un-aliased import would make every
+# get_node(node_id) call recurse into the route (TypeError -> HTTP 500).
+from ..database import get_all_nodes, get_node as db_get_node, set_node_location, get_pump_readings
 from ..services.mqtt_service import get_mqtt_service
 from ..timeutil import utcnow
 
@@ -304,7 +308,7 @@ async def get_node(
         else:
             is_stale = True
     
-    db_node = get_node(node_id) or {}
+    db_node = db_get_node(node_id) or {}
     return NodeStatus(
         node_id=node_id,
         node_type=node_type,
@@ -337,7 +341,7 @@ async def update_node(
     Auto-creates the node row if not seen yet (e.g. user labels it before first heartbeat).
     """
     # Auto-create row if absent so location can be set pre-deployment
-    if get_node(node_id) is None:
+    if db_get_node(node_id) is None:
         from ..database import upsert_node as _upsert
         _upsert(node_id, "glass", "OFFLINE", None)
 
@@ -348,7 +352,7 @@ async def update_node(
         from ..services.audit_service import log_action, ACTION_LOCATION_EDIT
         log_action(user, ACTION_LOCATION_EDIT, target_id=node_id, details={"location": patch.location})
 
-    db_node = get_node(node_id) or {}
+    db_node = db_get_node(node_id) or {}
     return {"node_id": node_id, "location": db_node.get("location")}
 
 
@@ -414,7 +418,7 @@ async def snooze_node(
     from ..database import set_node_snooze
     from ..services.mqtt_service import get_mqtt_service
 
-    if get_node(node_id) is None:
+    if db_get_node(node_id) is None:
         from ..database import upsert_node as _upsert
         _upsert(node_id, "glass", "OFFLINE", None)
 

@@ -65,23 +65,28 @@ def main():
         relay = machine.Pin(config.RELAY_PIN, machine.Pin.OUT)
         led_red = machine.Pin(config.LED_RED_PIN, machine.Pin.OUT)
         led_green = machine.Pin(config.LED_GREEN_PIN, machine.Pin.OUT)
-        sensor_set = SensorSet(build_sensor_config(), readers, _RealClockShim())
-        pump = PumpController(relay, led_red, led_green, {"low_threshold": float(config.LOW_THRESHOLD)})
+        clock = _RealClockShim()
+        sensor_set = SensorSet(build_sensor_config(), readers, clock)
+        pump = PumpController(relay, led_red, led_green,
+                              {"low_threshold": float(config.LOW_THRESHOLD)}, clock)
         mqtt = PumpMQTTClient(
             ssid=config.SSID, password=config.WIFI_PASS, broker=config.MQTT_BROKER,
             port=config.MQTT_PORT, node_id=config.NODE_ID, topic=config.MQTT_TOPIC_STATUS,
             retry_interval=config.WIFI_RETRY_INTERVAL,
-            username=config.MQTT_USERNAME, mqtt_password=config.MQTT_PASSWORD)
-        # Item 12: battery/power monitoring (optional — preserve existing telemetry;
-        # inner try so an unwired pin disables it without boot-looping the node).
+            username=config.MQTT_USERNAME, mqtt_password=config.MQTT_PASSWORD,
+            wifi_connect_timeout=config.WIFI_CONNECT_TIMEOUT,
+            socket_timeout_s=config.SOCKET_TIMEOUT_S)
+        # Item 12: battery/power monitoring (optional — pins ship as None until
+        # wired per §6, so an un-commissioned node publishes no floating-pin
+        # noise; inner try so a bad pin disables it without boot-looping).
         battery_adc = None
         power_source_pin = None
         try:
-            if config.BATTERY_ADC_PIN:
+            if config.BATTERY_ADC_PIN is not None:
                 battery_adc = machine.ADC(machine.Pin(config.BATTERY_ADC_PIN))
                 battery_adc.atten(machine.ADC.ATTN_11DB)
                 battery_adc.width(machine.ADC.WIDTH_12BIT)
-            if config.POWER_SOURCE_PIN:
+            if config.POWER_SOURCE_PIN is not None:
                 power_source_pin = machine.Pin(config.POWER_SOURCE_PIN, machine.Pin.IN)
         except Exception as e:
             print("[MAIN] Battery/power pins unavailable: %s (continuing)" % str(e))

@@ -35,6 +35,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -260,6 +261,7 @@ def main():
 
     # 確保事件目錄存在
     events_dir = config["events"]["local_backup_dir"]
+    max_local_files = int(config["events"].get("max_local_files", 20))
     Path(events_dir).mkdir(parents=True, exist_ok=True)
 
     # ============ M2 組件初始化 ============
@@ -296,14 +298,23 @@ def main():
         logger.warning(f"Upload worker not available: {e}")
         logger.warning("Events will not be uploaded to server")
 
-    # 初始化快照推送線程
+    # 初始化快照推送線程（由 snapshot.enabled 控制；尺寸／品質由配置提供）
+    snapshot_cfg = config.get("snapshot", {})
+    snapshot_size = (
+        int(snapshot_cfg.get("width", 854)),
+        int(snapshot_cfg.get("height", 480)),
+    )
+    snapshot_jpeg_quality = int(snapshot_cfg.get("jpeg_quality", 50))
     snapshot_pusher: Optional[SnapshotPusher] = None
-    try:
-        snapshot_pusher = SnapshotPusher(config)
-        logger.info("Snapshot pusher initialized")
-    except ImportError as e:
-        logger.warning(f"Snapshot pusher not available: {e}")
-        logger.warning("Snapshots will not be pushed to server")
+    if snapshot_cfg.get("enabled", True):
+        try:
+            snapshot_pusher = SnapshotPusher(config)
+            logger.info("Snapshot pusher initialized")
+        except ImportError as e:
+            logger.warning(f"Snapshot pusher not available: {e}")
+            logger.warning("Snapshots will not be pushed to server")
+    else:
+        logger.info("Snapshot pusher disabled by config (snapshot.enabled=false)")
 
     # 初始化熱管理監控線程
     def on_critical_temp(temp: float):
@@ -390,7 +401,7 @@ def main():
         pre_roll, post_roll = clamp_capture_window(buf_duration, pre_roll, post_roll, margin=1.0)
         event_tracker = PendingEventTracker(post_roll)
         encode_worker = EncodeWorker(
-            encode_mp4,
+            partial(encode_mp4, max_local_files=max_local_files),
             event_queue,
             config["node_id"],
             events_dir,
@@ -412,6 +423,9 @@ def main():
             main._cam_retry = camera_retry_count
             backoff = min(5 * camera_retry_count, 30)
             logger.warning(f"Camera read failed (attempt {camera_retry_count}), retrying in {backoff}s...")
+            # 攝像頭讀取失敗：緩衝區停止進幀，心跳回報 degraded
+            if mqtt_client:
+                mqtt_client.set_buffer_health("degraded")
             if camera_retry_count > 10:
                 logger.error("Camera failed too many times, exiting")
                 _running = False
@@ -424,8 +438,11 @@ def main():
             continue
 
         # Reset camera retry counter on success
-        if hasattr(main, "_cam_retry"):
+        if getattr(main, "_cam_retry", 0) > 0:
             main._cam_retry = 0
+            # 攝像頭失敗後首次成功讀取：心跳回報 ok
+            if mqtt_client:
+                mqtt_client.set_buffer_health("ok")
 
         timestamp = time.time()
 
@@ -459,15 +476,20 @@ def main():
                 f"delta_db={event.audio_delta_db:.1f}"
             )
 
+            # 事件元資料（telemetry-only）：非同步／傳統路徑共用同一份；
+            # is_simulation 讓伺服器可區分演練事件與真實警報。
+            event_metadata = {
+                "visual_confidence": event.visual_confidence,
+                "audio_db_peak": event.audio_db_peak,
+                "audio_freq_peak_hz": event.audio_freq_peak_hz,
+                "is_simulation": bool(getattr(event, "is_simulation", False)),
+            }
+
             if async_encode:
                 # 非阻塞路徑：僅登記事件；緩衝區持續填充，待 post_roll 經過後
                 # （於下方 6b. due-drain 區塊）凍結、切片並交給編碼工作線程。
                 # 主迴圈不會被錄製或編碼阻塞。
-                event_tracker.add(event.timestamp, {
-                    "visual_confidence": event.visual_confidence,
-                    "audio_db_peak": event.audio_db_peak,
-                    "audio_freq_peak_hz": event.audio_freq_peak_hz,
-                })
+                event_tracker.add(event.timestamp, event_metadata)
             else:
                 # ---- 傳統阻塞路徑（async_encode=false，行為不變）----
                 # 7. 凍結緩衝區
@@ -495,6 +517,7 @@ def main():
                         node_id=config["node_id"],
                         timestamp=event.timestamp,
                         output_dir=events_dir,
+                        max_local_files=max_local_files,
                     )
                     logger.info(f"MP4 saved: {mp4_path}")
                 except Exception as e:
@@ -507,18 +530,15 @@ def main():
                             node_id=config["node_id"],
                             timestamp=datetime.fromtimestamp(event.timestamp).isoformat(),
                             mp4_path=mp4_path,
-                            metadata={
-                                "visual_confidence": event.visual_confidence,
-                                "audio_db_peak": event.audio_db_peak,
-                                "audio_freq_peak_hz": event.audio_freq_peak_hz,
-                            }
+                            metadata=event_metadata,
                         )
                         logger.info(f"Event enqueued for upload: {mp4_path}")
                     except Exception as e:
                         logger.error(f"Failed to enqueue event: {e}")
 
-            # 設定冷卻時間
-            cooldown_until = timestamp + config["trigger"]["cooldown_seconds"]
+            # 設定冷卻時間（僅真實事件；模擬演練不得壓制真實警報 30 秒）
+            if not getattr(event, "is_simulation", False):
+                cooldown_until = timestamp + config["trigger"]["cooldown_seconds"]
 
         # 6b. 非同步擷取：對 post-roll 視窗已到期的事件凍結、切片並提交編碼。
         #     此區塊每次迭代皆執行（僅非同步模式）。
@@ -535,8 +555,8 @@ def main():
         if timestamp - last_snapshot_time >= thermal_monitor.snapshot_interval:
             if snapshot_pusher and snapshot_pusher.is_idle:
                 try:
-                    small_frame = cv2.resize(frame, (854, 480))
-                    _, jpeg = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    small_frame = cv2.resize(frame, snapshot_size)
+                    _, jpeg = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, snapshot_jpeg_quality])
                     snapshot_pusher.push(jpeg.tobytes())
                     last_snapshot_time = timestamp
                 except Exception as e:

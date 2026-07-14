@@ -1,4 +1,5 @@
 from tests.fakes import FakeClock, FakePin, make_reader
+import control_logic
 import sensors, main
 from pump_controller import PumpController
 
@@ -29,3 +30,11 @@ def test_build_config_maps_thresholds():
     cfg = main.build_config()
     assert cfg["high_threshold"] == 80.0 and cfg["low_threshold"] == 20.0
     assert cfg["rain_on_threshold"] == 60.0
+
+
+def test_build_config_matches_control_logic_defaults():
+    # Drift guard: control_logic.DEFAULT_CONFIG (used by the pure-logic tests)
+    # and the real device config marshaled by main.build_config() cover the
+    # same keys today — if either side changes without the other, the logic
+    # tests would silently validate values the device never runs with.
+    assert main.build_config() == control_logic.DEFAULT_CONFIG

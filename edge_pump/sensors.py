@@ -91,8 +91,14 @@ def build_readers(config):
     adc.atten(machine.ADC.ATTN_11DB)
     adc.width(machine.ADC.WIDTH_12BIT)
     readers["adc"] = adc.read
-    for key, pin_key in (("float", "float_pin"), ("rain", "rain_pin"),
-                         ("high_water", "high_water_pin")):
-        pin = machine.Pin(config[pin_key], machine.Pin.IN, machine.Pin.PULL_UP)
+    for key, pin_key, al_key in (("float", "float_pin", "float_active_low"),
+                                 ("rain", "rain_pin", "rain_active_low"),
+                                 ("high_water", "high_water_pin", "high_water_active_low")):
+        # Pull toward the DE-ASSERTED level so an unwired/broken line reads
+        # not-asserted: active-low idles HIGH (PULL_UP), active-high idles LOW
+        # (PULL_DOWN). A blanket PULL_UP would make a broken active-high
+        # high-water line read asserted -> pump ON on a wiring fault.
+        pull = machine.Pin.PULL_UP if config[al_key] else machine.Pin.PULL_DOWN
+        pin = machine.Pin(config[pin_key], machine.Pin.IN, pull)
         readers[key] = pin.value
     return readers

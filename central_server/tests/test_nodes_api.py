@@ -42,13 +42,18 @@ from central_server.auth import get_current_user
 
 
 class FakeMqttService:
-    """Stand-in for MQTTService exposing only what list_nodes() calls."""
+    """Stand-in for MQTTService exposing only what the nodes routes call."""
 
     def __init__(self, states):
         self._states = states
 
     def get_node_states(self):
         return self._states
+
+    def get_node_state(self, node_id):
+        # Mirrors MQTTService.get_node_state — single-node lookup used by
+        # GET /api/nodes/{node_id}.
+        return self._states.get(node_id)
 
 
 @pytest.fixture
@@ -131,6 +136,16 @@ def client(monkeypatch, node_states, db_rows):
 
     monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: FakeMqttService(node_states))
     monkeypatch.setattr(nodes_api, "get_all_nodes", lambda: list(db_rows.values()))
+    # Single-row DB lookup used by GET-one/PATCH/snooze. raising=False is
+    # deliberate: on the pre-fix code the module attribute `db_get_node` does
+    # not exist (the route function shadowed the plain `get_node` import), so
+    # the shadowing regression tests below hit the original TypeError/500
+    # instead of erroring out here in the fixture.
+    monkeypatch.setattr(
+        nodes_api, "db_get_node",
+        lambda node_id: db_rows.get(node_id),
+        raising=False,
+    )
 
     with TestClient(app) as test_client:
         yield test_client
@@ -182,6 +197,76 @@ def test_list_nodes_surfaces_visual_and_audio_health(client):
     quiet = by_id["glass_node_02"]
     assert "visual_health" in quiet and quiet["visual_health"] is None
     assert "audio_health" in quiet and quiet["audio_health"] is None
+
+
+# =============================================================================
+# get_node shadowing regression (CRITICAL fix)
+#
+# api/nodes.py's route `async def get_node(...)` rebinds the module global,
+# shadowing the DB helper imported under the same name — so every
+# `get_node(node_id)` DB lookup inside the routes recursed into the route
+# coroutine with missing arguments (TypeError -> HTTP 500). This broke the
+# success path of GET /api/nodes/{id} and ALL of PATCH /api/nodes/{id} and
+# POST /api/nodes/{id}/snooze (both called by the SPA). The fix imports the
+# helper as `db_get_node`; these tests exercise exactly the paths that used
+# to 500 and MUST fail on the unfixed code.
+# =============================================================================
+
+def test_get_single_node_success_path(client):
+    """GET /api/nodes/{id} success path: node has live MQTT state AND a DB
+    row — the DB-enrichment call is what used to recurse into the route."""
+    response = client.get("/api/nodes/pump_node_01")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["node_id"] == "pump_node_01"
+    assert data["status"] == "ONLINE"
+    assert data["pump_state"] == "ON"
+    # location comes from the DB row via the (previously shadowed) helper.
+    assert data["location"] == "Test Site"
+
+
+def test_patch_node_location(client, monkeypatch, db_rows):
+    """PATCH /api/nodes/{id}: both the exists-check and the read-back after
+    set_node_location went through the shadowed name."""
+    def fake_set_location(node_id, location):
+        db_rows[node_id]["location"] = location
+        return True
+
+    monkeypatch.setattr(nodes_api, "set_node_location", fake_set_location)
+
+    response = client.patch("/api/nodes/pump_node_01", json={"location": "New Site"})
+    assert response.status_code == 200
+    assert response.json() == {"node_id": "pump_node_01", "location": "New Site"}
+
+
+def test_snooze_node(client, monkeypatch):
+    """POST /api/nodes/{id}/snooze: the auto-create exists-check went through
+    the shadowed name."""
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+
+    captured = {}
+
+    def fake_set_snooze(node_id, until, reason):
+        captured["args"] = (node_id, until, reason)
+        return True
+
+    # snooze_node imports these at call time from their home modules (not the
+    # router-module bindings the fixture patches), so patch them there.
+    monkeypatch.setattr(database, "set_node_snooze", fake_set_snooze)
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: None)
+
+    response = client.post(
+        "/api/nodes/pump_node_01/snooze",
+        json={"minutes": 30, "reason": "typhoon"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["node_id"] == "pump_node_01"
+    assert data["snooze_reason"] == "typhoon"
+    assert data["snoozed_until"]
+    assert captured["args"][0] == "pump_node_01"
+    assert captured["args"][2] == "typhoon"
 
 
 if __name__ == "__main__":

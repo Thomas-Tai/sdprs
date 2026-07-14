@@ -149,6 +149,78 @@ class UploadWorker(threading.Thread):
         else:
             self._queue.increment_retry(row_id)
 
+    def _send(
+        self,
+        event: dict,
+        label: str,
+        do_request,
+        success_code: int,
+        on_success,
+    ) -> bool:
+        """共用上傳狀態階梯（JSON 與影片路徑行為一致）：
+        成功 / 429 退避 / 4xx 終態 FAILED / 5xx 退避 /
+        Timeout / ConnectError / 其他例外皆退避。
+
+        Args:
+            event: 事件字典
+            label: 記錄字首（"JSON upload" / "Video upload"）
+            do_request: 無參數呼叫，執行實際 HTTP 請求並回傳 response
+            success_code: 視為成功的 HTTP 狀態碼
+            on_success: 成功回調 (response) -> None，負責狀態更新與記錄
+
+        Returns:
+            是否成功
+        """
+        row_id = event["id"]
+
+        try:
+            response = do_request()
+
+            if response.status_code == success_code:
+                on_success(response)
+                return True
+
+            elif response.status_code == 429:
+                # 429 Too Many Requests：速率限制屬暫時性，退避重試
+                logger.warning(
+                    f"{label} rate-limited (429): row_id={row_id}, retrying with backoff"
+                )
+                self._handle_retriable_failure(event)
+                return False
+
+            elif 400 <= response.status_code < 500:
+                # 4xx 錯誤（非 429）：不會自癒，直接終態 FAILED，不再重試
+                logger.error(
+                    f"{label} failed (client error, terminal -> FAILED): row_id={row_id}, "
+                    f"status={response.status_code}, response={response.text}"
+                )
+                self._queue.update_status(row_id, "FAILED")
+                return False
+
+            else:
+                # 5xx 錯誤：重試
+                logger.warning(
+                    f"{label} failed (server error): row_id={row_id}, "
+                    f"status={response.status_code}"
+                )
+                self._handle_retriable_failure(event)
+                return False
+
+        except httpx.TimeoutException:
+            logger.warning(f"{label} timeout: row_id={row_id}")
+            self._handle_retriable_failure(event)
+            return False
+
+        except httpx.ConnectError as e:
+            logger.warning(f"{label} connection error: row_id={row_id}, error={e}")
+            self._handle_retriable_failure(event)
+            return False
+
+        except Exception as e:
+            logger.error(f"{label} error: row_id={row_id}, error={e}")
+            self._handle_retriable_failure(event)
+            return False
+
     def _upload_json(self, event: dict) -> bool:
         """
         上傳 JSON metadata。
@@ -175,56 +247,19 @@ class UploadWorker(threading.Thread):
 
         url = f"{self._api_url}/alerts"
 
-        try:
-            response = self._client.post(url, json=body)
+        def on_success(response):
+            data = response.json()
+            alert_id = data.get("alert_id")
+            self._queue.update_status(row_id, "JSON_SENT", event_id=str(alert_id))
+            logger.info(f"JSON uploaded: row_id={row_id}, alert_id={alert_id}")
 
-            if response.status_code == 200:
-                data = response.json()
-                alert_id = data.get("alert_id")
-                self._queue.update_status(row_id, "JSON_SENT", event_id=str(alert_id))
-                logger.info(f"JSON uploaded: row_id={row_id}, alert_id={alert_id}")
-                return True
-
-            elif response.status_code == 429:
-                # 429 Too Many Requests：速率限制屬暫時性，退避重試
-                logger.warning(
-                    f"JSON upload rate-limited (429): row_id={row_id}, retrying with backoff"
-                )
-                self._handle_retriable_failure(event)
-                return False
-
-            elif 400 <= response.status_code < 500:
-                # 4xx 錯誤（非 429）：不會自癒，直接終態 FAILED，不再重試
-                logger.error(
-                    f"JSON upload failed (client error, terminal -> FAILED): row_id={row_id}, "
-                    f"status={response.status_code}, response={response.text}"
-                )
-                self._queue.update_status(row_id, "FAILED")
-                return False
-
-            else:
-                # 5xx 錯誤：重試
-                logger.warning(
-                    f"JSON upload failed (server error): row_id={row_id}, "
-                    f"status={response.status_code}"
-                )
-                self._handle_retriable_failure(event)
-                return False
-
-        except httpx.TimeoutException:
-            logger.warning(f"JSON upload timeout: row_id={row_id}")
-            self._handle_retriable_failure(event)
-            return False
-
-        except httpx.ConnectError as e:
-            logger.warning(f"JSON upload connection error: row_id={row_id}, error={e}")
-            self._handle_retriable_failure(event)
-            return False
-
-        except Exception as e:
-            logger.error(f"JSON upload error: row_id={row_id}, error={e}")
-            self._handle_retriable_failure(event)
-            return False
+        return self._send(
+            event,
+            "JSON upload",
+            lambda: self._client.post(url, json=body),
+            success_code=200,
+            on_success=on_success,
+        )
 
     def _upload_video(self, event: dict) -> bool:
         """
@@ -255,60 +290,29 @@ class UploadWorker(threading.Thread):
 
         url = f"{self._api_url}/alerts/{event_id}/video"
 
-        try:
+        def do_request():
             with open(mp4_path, "rb") as f:
                 files = {"file": (os.path.basename(mp4_path), f, "video/mp4")}
-                response = self._client.put(url, files=files)
+                return self._client.put(url, files=files)
 
-            if response.status_code == 204:
-                self._queue.update_status(row_id, "UPLOADED")
-                logger.info(f"Video uploaded: row_id={row_id}, alert_id={event_id}")
+        def on_success(response):
+            self._queue.update_status(row_id, "UPLOADED")
+            logger.info(f"Video uploaded: row_id={row_id}, alert_id={event_id}")
 
-                # 可選：刪除本地 MP4
-                # self._delete_local_mp4(mp4_path)
+            # 上傳完成：清除佇列中的 UPLOADED 記錄，避免資料庫無限增長
+            # （FAILED 保留供鑑識，不在此清除）
+            self._queue.delete_uploaded(row_id)
 
-                return True
+            # 可選：刪除本地 MP4
+            # self._delete_local_mp4(mp4_path)
 
-            elif response.status_code == 429:
-                # 429 Too Many Requests：速率限制屬暫時性，退避重試
-                logger.warning(
-                    f"Video upload rate-limited (429): row_id={row_id}, retrying with backoff"
-                )
-                self._handle_retriable_failure(event)
-                return False
-
-            elif 400 <= response.status_code < 500:
-                # 4xx 錯誤（非 429）：不會自癒，直接終態 FAILED，不再重試
-                logger.error(
-                    f"Video upload failed (client error, terminal -> FAILED): row_id={row_id}, "
-                    f"status={response.status_code}, response={response.text}"
-                )
-                self._queue.update_status(row_id, "FAILED")
-                return False
-
-            else:
-                # 5xx 錯誤：重試
-                logger.warning(
-                    f"Video upload failed (server error): row_id={row_id}, "
-                    f"status={response.status_code}"
-                )
-                self._handle_retriable_failure(event)
-                return False
-
-        except httpx.TimeoutException:
-            logger.warning(f"Video upload timeout: row_id={row_id}")
-            self._handle_retriable_failure(event)
-            return False
-
-        except httpx.ConnectError as e:
-            logger.warning(f"Video upload connection error: row_id={row_id}, error={e}")
-            self._handle_retriable_failure(event)
-            return False
-
-        except Exception as e:
-            logger.error(f"Video upload error: row_id={row_id}, error={e}")
-            self._handle_retriable_failure(event)
-            return False
+        return self._send(
+            event,
+            "Video upload",
+            do_request,
+            success_code=204,
+            on_success=on_success,
+        )
 
     def _delete_local_mp4(self, mp4_path: str):
         """刪除本地 MP4 檔案（上傳成功後）。"""

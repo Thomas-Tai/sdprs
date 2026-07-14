@@ -443,5 +443,76 @@ class TestResolveAlert:
         assert event["resolved_by"] == "operator"
 
 
+class TestListAlertsAckFieldMapping:
+    """Regression guard for AlertDetail mapping drift (duplicate-merge fix).
+
+    get_alert_detail mapped acknowledged_by/acknowledged_at but list_alerts's
+    hand-rolled copy omitted them, so GET /api/alerts returned nulls for
+    acknowledged events — blanking the SPA's 認領 badge and stale-ack counter.
+    Both endpoints now share the single _row_to_alert_detail() mapper; this
+    test acknowledges an event and asserts the LIST endpoint carries the ack
+    fields, matching the detail endpoint.
+    """
+
+    @pytest.fixture
+    def authed_client(self, test_db):
+        """Alerts router with session auth bypassed as "operator" (mirrors
+        TestResolveAlert.authed_client)."""
+        from fastapi import FastAPI
+        from starlette.middleware.sessions import SessionMiddleware
+        from central_server.api.alerts import router as alerts_router
+        from central_server.auth import get_current_user
+
+        app = FastAPI()
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key="test-secret-key-for-testing"
+        )
+        app.include_router(alerts_router, prefix="/api")
+        app.state.latest_snapshots = {}
+        app.dependency_overrides[get_current_user] = lambda: "operator"
+
+        with TestClient(app) as test_client:
+            yield test_client
+
+        app.dependency_overrides.clear()
+
+    def test_list_alerts_returns_ack_fields(
+        self, authed_client, api_headers, sample_alert
+    ):
+        # Create an alert and upload its video so it is PENDING (ack-able).
+        create_response = authed_client.post(
+            "/api/alerts", json=sample_alert, headers=api_headers
+        )
+        assert create_response.status_code == 200
+        alert_id = create_response.json()["alert_id"]
+
+        fake_mp4 = io.BytesIO(b"fake mp4 content for testing")
+        upload_response = authed_client.put(
+            f"/api/alerts/{alert_id}/video",
+            files={"file": ("test.mp4", fake_mp4, "video/mp4")},
+            headers=api_headers,
+        )
+        assert upload_response.status_code == 204
+
+        ack_response = authed_client.patch(f"/api/alerts/{alert_id}/acknowledge")
+        assert ack_response.status_code == 200
+
+        # The LIST endpoint must surface the ack fields (this is what drifted).
+        list_response = authed_client.get("/api/alerts", headers=api_headers)
+        assert list_response.status_code == 200
+        row = next(e for e in list_response.json() if e["id"] == alert_id)
+        assert row["status"] == "ACKNOWLEDGED"
+        assert row["acknowledged_by"] == "operator"
+        assert isinstance(row["acknowledged_at"], str) and row["acknowledged_at"]
+
+        # And it must agree with the detail endpoint (shared mapper).
+        detail = authed_client.get(
+            f"/api/alerts/{alert_id}", headers=api_headers
+        ).json()
+        assert detail["acknowledged_by"] == row["acknowledged_by"]
+        assert detail["acknowledged_at"] == row["acknowledged_at"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

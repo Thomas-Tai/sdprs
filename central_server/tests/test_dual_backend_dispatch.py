@@ -30,7 +30,9 @@ os.environ["EDGE_API_KEY"] = "test-api-key-12345"
 os.environ["SECRET_KEY"] = "test-secret-key-for-testing"
 
 import central_server.database as database
+import central_server.services.audit_service as audit_service
 import central_server.services.event_service as event_service
+from central_server.timeutil import utcnow
 
 
 def _boom(*_args, **_kwargs):
@@ -132,6 +134,89 @@ def test_get_handover_note_row_pg_dispatch(force_pg):
     result = database.get_handover_note_row()
 
     assert result == {"note": "hi", "author": "admin", "updated_at": "2026-07-13 10:00:00"}
+
+
+def test_set_handover_note_pg_dispatch(force_pg):
+    captured = {}
+
+    def fake_set(note, author, updated_at_iso):
+        captured["args"] = (note, author, updated_at_iso)
+
+    force_pg.setattr(database, "_pg_set_handover_note_sync", fake_set)
+
+    database.set_handover_note("note text", "admin", "2026-07-14T10:00:00")
+
+    assert captured["args"] == ("note text", "admin", "2026-07-14T10:00:00")
+
+
+def test_get_effective_handover_note_pg_dispatch(force_pg):
+    """Fresh note under PG: dispatches via get_handover_note_row's PG branch
+    and applies the shared TTL (not expired for a just-written stamp)."""
+    fresh = utcnow().isoformat()
+
+    def fake_fetch_one(query, params):
+        return {"note": "hi", "author": "admin", "updated_at": fresh}
+
+    force_pg.setattr(database, "_pg_fetch_one_sync", fake_fetch_one)
+
+    row = database.get_effective_handover_note()
+
+    assert row == {"note": "hi", "author": "admin", "updated_at": fresh, "expired": False}
+
+
+def test_get_effective_handover_note_pg_expired(force_pg):
+    """A stamp older than the TTL flips expired=True (space-delimited stamp
+    exercises the ' '->'T' normalization on the PG-shaped value)."""
+    from datetime import timedelta
+    stale = (utcnow() - timedelta(hours=48)).isoformat(sep=" ", timespec="seconds")
+
+    def fake_fetch_one(query, params):
+        return {"note": "old", "author": "admin", "updated_at": stale}
+
+    force_pg.setattr(database, "_pg_fetch_one_sync", fake_fetch_one)
+
+    row = database.get_effective_handover_note()
+
+    assert row["expired"] is True
+    # Caller-chosen TTL is respected.
+    assert database.get_effective_handover_note(ttl_hours=72)["expired"] is False
+
+
+def test_log_action_pg_dispatch(force_pg):
+    """Under PG, log_action must route to the PG mirror instead of the
+    SQLite-only get_db_cursor() (whose failure the never-raises contract
+    used to swallow — silently losing the audit trail)."""
+    captured = {}
+
+    def fake_insert(operator, action_type, target_id, details_json):
+        captured["args"] = (operator, action_type, target_id, details_json)
+
+    force_pg.setattr(audit_service, "_pg_log_action_sync", fake_insert)
+
+    audit_service.log_action(
+        "admin", audit_service.ACTION_RESOLVE, target_id=7, details={"bulk": True}
+    )
+
+    assert captured["args"] == ("admin", "RESOLVE", "7", '{"bulk": true}')
+
+
+def test_list_actions_pg_dispatch(force_pg):
+    captured = {}
+    sentinel = [{
+        "id": 1, "timestamp": "2026-07-14 10:00:00", "operator": "admin",
+        "action_type": "LOGIN", "target_id": None, "details": None,
+    }]
+
+    def fake_list(limit, offset, operator, action_type, since):
+        captured["args"] = (limit, offset, operator, action_type, since)
+        return sentinel
+
+    force_pg.setattr(audit_service, "_pg_list_actions_sync", fake_list)
+
+    rows = audit_service.list_actions(limit=50, operator="admin")
+
+    assert rows is sentinel
+    assert captured["args"] == (50, 0, "admin", None, None)
 
 
 def test_get_event_counts_pg_dispatch(force_pg):
@@ -236,6 +321,58 @@ def test_sqlite_get_event_created_ats(sqlite_db):
 
     assert len(rows) == 2
     assert all(isinstance(r, str) for r in rows)
+
+
+def test_sqlite_get_event_created_ats_same_day_window(sqlite_db):
+    """Regression (alert-rate sparkline blank): the SQLite branch used a raw
+    string compare of the stored space-delimited created_at
+    ('YYYY-MM-DD HH:MM:SS', SQLite CURRENT_TIMESTAMP) against the
+    T-delimited cutoff — ' ' < 'T', so any cutoff on the SAME day sorted
+    above every same-day row and returned zero rows. datetime() on both
+    sides (retention_service.py idiom) normalizes the delimiters."""
+    eid = _seed_event(status="PENDING")
+    created_at = str(database.get_event(eid)["created_at"])  # 'YYYY-MM-DD HH:MM:SS'
+    same_day_start = created_at[:10] + "T00:00:00"
+
+    rows = database.get_event_created_ats(same_day_start)
+
+    assert rows == [created_at]
+
+
+def test_sqlite_set_and_get_effective_handover_note(sqlite_db):
+    stamp = utcnow().isoformat()
+
+    database.set_handover_note("hand over", "admin", stamp)
+    row = database.get_effective_handover_note()
+
+    assert row == {"note": "hand over", "author": "admin",
+                   "updated_at": stamp, "expired": False}
+
+
+def test_sqlite_handover_note_expires_after_ttl(sqlite_db):
+    from datetime import timedelta
+    stale = (utcnow() - timedelta(hours=25)).isoformat()
+
+    database.set_handover_note("old note", "admin", stale)
+
+    assert database.get_effective_handover_note()["expired"] is True
+    # Caller-chosen TTL is respected.
+    assert database.get_effective_handover_note(ttl_hours=48)["expired"] is False
+
+
+def test_sqlite_log_and_list_actions(sqlite_db):
+    """SQLite audit path stays byte-identical after the PG dispatch was added:
+    a logged action round-trips through list_actions with parsed details."""
+    audit_service.log_action(
+        "admin", audit_service.ACTION_LOGIN, details={"ip": "1.2.3.4"}
+    )
+
+    rows = audit_service.list_actions(limit=10)
+
+    assert len(rows) == 1
+    assert rows[0]["operator"] == "admin"
+    assert rows[0]["action_type"] == "LOGIN"
+    assert rows[0]["details"] == {"ip": "1.2.3.4"}
 
 
 def test_sqlite_get_event_counts_db_none_and_explicit(sqlite_db):

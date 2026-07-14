@@ -9,8 +9,9 @@ frame ingestion:
   post-roll window has elapsed, so the main loop can keep buffering frames
   and simply poll ``due(now)`` each iteration (no ``sleep``, no second
   blocking camera read).
-- ``slice_window`` extracts the bare ndarrays for a ``[t_start, t_end]``
-  window out of a frozen ``(timestamp, frame)`` circular-buffer snapshot.
+- ``slice_window`` extracts the ``(timestamp, frame)`` tuples for a
+  ``[t_start, t_end]`` window out of a frozen circular-buffer snapshot
+  (timestamps preserved — ``encode_mp4`` sorts by them and unpacks tuples).
 - ``clamp_capture_window`` enforces the buffer invariant
   ``pre_roll + post_roll + margin <= duration_seconds`` so a requested
   window can never exceed what the circular buffer actually retains.
@@ -84,11 +85,15 @@ class PendingEventTracker:
 
 def slice_window(
     frames: List[Tuple[float, "np.ndarray"]], t_start: float, t_end: float
-) -> List["np.ndarray"]:
-    """Return the BARE ndarrays (timestamps dropped) whose timestamp falls
-    within ``[t_start, t_end]`` inclusive, in their original order.
+) -> List[Tuple[float, "np.ndarray"]]:
+    """Return the ``(timestamp, frame)`` tuples whose timestamp falls within
+    ``[t_start, t_end]`` inclusive, in their original order.
+
+    Timestamps MUST be preserved: the downstream encoder (``encode_mp4``)
+    does ``sorted(frames, key=lambda x: x[0])`` and unpacks ``(ts, frame)``
+    — bare ndarrays would raise and drop the event.
     """
-    return [f for (ts, f) in frames if t_start <= ts <= t_end]
+    return [(ts, f) for (ts, f) in frames if t_start <= ts <= t_end]
 
 
 def clamp_capture_window(

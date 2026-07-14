@@ -222,6 +222,61 @@ class TestAudioDetectorFixedMode:
         assert result is not None
         # 固定模式下可能觸發（取決於頻率和振幅）
 
+    def test_fixed_mode_default_threshold_triggers_on_loud_impulse(self):
+        """fixed 模式使用預設閾值（-30 dBFS）時，高振幅脈衝應能觸發。
+
+        回歸測試：舊預設 90（SPL 尺度）對照 _compute_rms_db 的 dBFS
+        輸出（一律 <= ~0）永遠無法觸發。
+        """
+        config = {k: v for k, v in AUDIO_CONFIG.items() if k != "fixed_db_threshold"}
+        config["mode"] = "fixed"
+
+        detector = AudioDetector(config)
+        # 預設閾值必須是 dBFS 尺度（負值），而非 SPL
+        assert detector._fixed_db_threshold == -30
+
+        # 合成脈衝：短促高振幅 + 高頻成分（模擬玻璃碎裂）
+        t = np.arange(22050) / 44100.0
+        impulse = 30000 * np.sin(2 * np.pi * 5000 * t) * np.exp(-t * 50)
+        feed_audio(detector, impulse.astype(np.float32))
+
+        result = detector.analyze()
+
+        assert result is not None
+        assert result.triggered is True
+
+
+class TestAudioResultForensics:
+    """測試警報鑑識欄位（db_peak / freq_peak_hz）。
+
+    回歸測試：AudioResult 過去缺這兩個欄位，trigger_engine 以 getattr
+    預設 0.0 導致每筆警報的音訊鑑識資料恆為零。
+    """
+
+    def test_triggered_result_carries_nondefault_peak_fields(self):
+        """觸發的 AudioResult 應帶有非預設的 db_peak / freq_peak_hz。"""
+        config = AUDIO_CONFIG.copy()
+        config["mode"] = "fixed"
+        config["fixed_db_threshold"] = -40
+        config["fixed_freq_threshold_hz"] = 1000
+
+        detector = AudioDetector(config)
+
+        # 高振幅 5kHz 正弦波：RMS ≈ 20000/√2 → 約 -7.3 dBFS
+        t = np.arange(22050) / 44100.0
+        signal = (20000 * np.sin(2 * np.pi * 5000 * t)).astype(np.float32)
+        feed_audio(detector, signal)
+
+        result = detector.analyze()
+
+        assert result is not None
+        assert result.triggered is True
+        # db_peak = 當前 RMS dBFS（非預設 0.0，且在合理範圍內）
+        assert result.db_peak != 0.0
+        assert -20.0 < result.db_peak < 0.0
+        # freq_peak_hz = 頻譜峰值頻率（應接近 5kHz）
+        assert result.freq_peak_hz == pytest.approx(5000.0, abs=100.0)
+
 
 class TestAudioDetectorBaseline:
     """測試基線行為。"""

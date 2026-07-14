@@ -16,7 +16,6 @@ import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
@@ -34,7 +33,7 @@ from .services.weather_service import init_weather_service, get_weather_service
 from .database import (
     init_db as db_init_db, close_db as db_close_db,
     get_all_events, get_events_by_status, get_event,
-    get_all_nodes, get_pending_alert_ids, get_handover_note_row,
+    get_all_nodes, get_pending_alert_ids, get_effective_handover_note,
 )
 from .services.event_service import get_event_counts, list_events
 import time as _time
@@ -68,8 +67,10 @@ async def lifespan(app: FastAPI):
     except ValueError as e:
         logger.warning(f"Settings validation warning: {e}")
 
-    # Initialize database (use database.py module - single source of truth)
-    db_path = os.environ.get("DB_PATH", "./data/sdprs.db")
+    # Initialize database (use database.py module - single source of truth).
+    # Sourced from Settings (same DB_PATH env var + default) so validation
+    # and .env loading are applied consistently.
+    db_path = settings.DB_PATH
     db_init_db(db_path)
 
     # Initialize in-memory snapshot storage
@@ -92,8 +93,16 @@ async def lifespan(app: FastAPI):
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         scheduler = AsyncIOScheduler()
-        storage_dir = os.environ.get("STORAGE_DIR", "./storage")
-        retention_days = int(os.environ.get("RETENTION_DAYS", "30"))
+        # Storage root: STORAGE_PATH (Settings) is authoritative — the same
+        # root api/alerts.py writes uploads to, so the orphan-MP4 sweep
+        # watches the tree that actually receives files. Fall back to the
+        # legacy STORAGE_DIR env var only when STORAGE_PATH was left at its
+        # default, so existing deployments keep working (with a warning).
+        storage_dir = settings.STORAGE_PATH
+        if storage_dir == "./storage" and os.environ.get("STORAGE_DIR"):
+            storage_dir = os.environ["STORAGE_DIR"]
+            logger.warning("STORAGE_DIR is deprecated; set STORAGE_PATH")
+        retention_days = settings.RETENTION_DAYS
         setup_retention_scheduler(scheduler, db_path, storage_dir, retention_days)
         scheduler.start()
         app.state.scheduler = scheduler
@@ -142,8 +151,9 @@ async def lifespan(app: FastAPI):
     logger.info("SDPRS Central Server shutdown complete")
 
 
-# Get secret key from environment
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
+# Get secret key from Settings (required + validated there; raw os.environ
+# bypassed .env loading and the placeholder-value warning)
+SECRET_KEY = get_settings().SECRET_KEY
 
 # Create FastAPI application
 app = FastAPI(
@@ -233,25 +243,13 @@ def _get_dashboard_context(request: Request) -> dict:
     unacked_alert_ids = get_pending_alert_ids()
 
     # Item 16: handover note. Cheap to read on every page (single row).
+    # The 24hr read-time TTL lives in database.get_effective_handover_note()
+    # — one implementation shared with api/handover.py, not an inline copy.
     handover_note = {"note": "", "author": None, "updated_at": None}
     try:
-        from datetime import timedelta as _td
-        row = get_handover_note_row()
-        if row:
-            note = row["note"] or ""
-            updated_at = row["updated_at"]
-            # Auto-clear after 24hr (read-time check; no background job).
-            expired = False
-            if updated_at:
-                try:
-                    ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00").replace(" ", "T"))
-                    if ts.tzinfo is not None:
-                        ts = ts.replace(tzinfo=None)
-                    expired = (utcnow() - ts) > _td(hours=24)
-                except ValueError:
-                    expired = False
-            if not expired:
-                handover_note = {"note": note, "author": row["author"], "updated_at": updated_at}
+        row = get_effective_handover_note()
+        if row and not row["expired"]:
+            handover_note = {"note": row["note"], "author": row["author"], "updated_at": row["updated_at"]}
     except Exception as e:
         logger.debug(f"Handover note read failed (non-fatal): {e}")
 

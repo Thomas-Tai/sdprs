@@ -90,6 +90,32 @@ class BulkResolveRequest(BaseModel):
     notes: Optional[str] = Field(None, max_length=500)
 
 
+def _row_to_alert_detail(event: dict) -> AlertDetail:
+    """Map a DB event row to AlertDetail.
+
+    Single mapping site shared by get_alert_detail AND list_alerts so the two
+    endpoints cannot drift: the list endpoint's hand-rolled copy used to omit
+    acknowledged_by/acknowledged_at, which nulled the SPA's 認領 badge and
+    stale-ack counter for anything read via GET /api/alerts.
+    """
+    return AlertDetail(
+        id=event["id"],
+        node_id=event["node_id"],
+        timestamp=event["timestamp"],
+        status=event["status"],
+        mp4_path=event.get("mp4_path"),
+        visual_confidence=event.get("visual_confidence"),
+        audio_db_peak=event.get("audio_db_peak"),
+        audio_freq_peak_hz=event.get("audio_freq_peak_hz"),
+        acknowledged_by=event.get("acknowledged_by"),
+        acknowledged_at=event.get("acknowledged_at"),
+        resolved_by=event.get("resolved_by"),
+        resolved_at=event.get("resolved_at"),
+        notes=event.get("notes"),
+        created_at=event.get("created_at"),
+    )
+
+
 # ===== API Endpoints =====
 
 @router.post("/alerts", response_model=AlertResponse, status_code=status.HTTP_200_OK)
@@ -610,22 +636,7 @@ async def get_alert_detail(
             detail=f"Alert {alert_id} not found"
         )
     
-    return AlertDetail(
-        id=event["id"],
-        node_id=event["node_id"],
-        timestamp=event["timestamp"],
-        status=event["status"],
-        mp4_path=event.get("mp4_path"),
-        visual_confidence=event.get("visual_confidence"),
-        audio_db_peak=event.get("audio_db_peak"),
-        audio_freq_peak_hz=event.get("audio_freq_peak_hz"),
-        acknowledged_by=event.get("acknowledged_by"),
-        acknowledged_at=event.get("acknowledged_at"),
-        resolved_by=event.get("resolved_by"),
-        resolved_at=event.get("resolved_at"),
-        notes=event.get("notes"),
-        created_at=event.get("created_at")
-    )
+    return _row_to_alert_detail(event)
 
 
 @router.get("/alerts", response_model=list[AlertDetail])
@@ -660,23 +671,7 @@ async def list_alerts(
     else:
         events = get_all_events(limit=limit, offset=offset)
     
-    return [
-        AlertDetail(
-            id=e["id"],
-            node_id=e["node_id"],
-            timestamp=e["timestamp"],
-            status=e["status"],
-            mp4_path=e.get("mp4_path"),
-            visual_confidence=e.get("visual_confidence"),
-            audio_db_peak=e.get("audio_db_peak"),
-            audio_freq_peak_hz=e.get("audio_freq_peak_hz"),
-            resolved_by=e.get("resolved_by"),
-            resolved_at=e.get("resolved_at"),
-            notes=e.get("notes"),
-            created_at=e.get("created_at")
-        )
-        for e in events
-    ]
+    return [_row_to_alert_detail(e) for e in events]
 
 
 # Export router

@@ -42,6 +42,8 @@ class AudioResult:
     delta_db: float = 0.0
     flatness: float = 1.0
     is_impulsive: bool = False
+    db_peak: float = 0.0        # 當前 RMS dB（dBFS，0 = 滿刻度）——警報鑑識欄位
+    freq_peak_hz: float = 0.0   # 頻譜峰值頻率（Hz）——警報鑑識欄位
 
 
 class AudioDetector:
@@ -63,7 +65,7 @@ class AudioDetector:
                 - spectral_flatness_threshold: float (0.3)
                 - attack_time_ms: float (10)
                 - analysis_window_ms: int (500)
-                - fixed_db_threshold: float (90)
+                - fixed_db_threshold: float (-30, dBFS；0 = 滿刻度，非 SPL)
                 - fixed_freq_threshold_hz: float (3000)
         """
         self._config = config
@@ -101,7 +103,9 @@ class AudioDetector:
         self._delta_db_threshold = config.get("delta_db_threshold", 20)
         self._spectral_flatness_threshold = config.get("spectral_flatness_threshold", 0.3)
         self._attack_time_ms = config.get("attack_time_ms", 10)
-        self._fixed_db_threshold = config.get("fixed_db_threshold", 90)
+        # 注意：_compute_rms_db 回傳 dBFS（0 = 滿刻度，一律 <= ~0），非 SPL；
+        # 閾值必須為負值（如 -30），若誤設 SPL 尺度（如 90）將永遠無法觸發。
+        self._fixed_db_threshold = config.get("fixed_db_threshold", -30)
         self._fixed_freq_threshold_hz = config.get("fixed_freq_threshold_hz", 3000)
 
     def process_chunk(self, samples: np.ndarray) -> None:
@@ -451,11 +455,17 @@ class AudioDetector:
         elif self._mode == "fixed":
             triggered = self._evaluate_fixed(current_db, spectrum, freqs)
 
+        # 警報鑑識欄位：峰值 dB（= 當前 RMS dBFS）與頻譜峰值頻率
+        peak_idx = int(np.argmax(spectrum))
+        freq_peak_hz = float(freqs[peak_idx]) if peak_idx < len(freqs) else 0.0
+
         return AudioResult(
-            triggered=triggered,
+            triggered=bool(triggered),
             delta_db=delta_db,
             flatness=flatness,
             is_impulsive=is_impulsive,
+            db_peak=float(current_db),
+            freq_peak_hz=freq_peak_hz,
         )
 
 
@@ -473,7 +483,7 @@ if __name__ == "__main__":
         "spectral_flatness_threshold": 0.3,
         "attack_time_ms": 10,
         "analysis_window_ms": 500,
-        "fixed_db_threshold": 90,
+        "fixed_db_threshold": -30,   # dBFS（0 = 滿刻度），非 SPL
         "fixed_freq_threshold_hz": 3000,
     }
 

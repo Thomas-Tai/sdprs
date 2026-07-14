@@ -80,6 +80,7 @@ def encode_mp4(
     timestamp: float,
     output_dir: str = "./events",
     encoder: Optional[str] = None,
+    max_local_files: int = 20,
 ) -> str:
     """
     將幀列表編碼為 MP4 檔案。
@@ -90,6 +91,7 @@ def encode_mp4(
         timestamp: 事件觸發時間戳（用於檔名）
         output_dir: MP4 輸出目錄
         encoder: 編碼器名稱（None 則自動偵測）
+        max_local_files: 本地備份最大保留檔案數（events.max_local_files）
 
     Returns:
         生成的 MP4 檔案完整路徑
@@ -192,7 +194,7 @@ def encode_mp4(
     logger.info(f"MP4 encoded successfully: {output_path} ({file_size} bytes)")
 
     # 清理本地備份
-    cleanup_local_events(output_dir, max_files=20)
+    cleanup_local_events(output_dir, max_files=max_local_files)
 
     return output_path
 

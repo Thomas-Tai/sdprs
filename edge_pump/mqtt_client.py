@@ -60,7 +60,8 @@ class PumpMQTTClient:
     """
 
     def __init__(self, ssid, password, broker, port, node_id, topic,
-                 retry_interval=60, username="", mqtt_password=""):
+                 retry_interval=60, username="", mqtt_password="",
+                 wifi_connect_timeout=15, socket_timeout_s=3):
         self._ssid = ssid
         self._password = password
         self._broker = broker
@@ -74,7 +75,9 @@ class PumpMQTTClient:
         self._wifi_connected = False
         self._mqtt_connected = False
         self._client = None
-        self._socket_timeout_s = 3
+        # 預設值與 config.py 的 WIFI_CONNECT_TIMEOUT / SOCKET_TIMEOUT_S 一致
+        self._wifi_connect_timeout = wifi_connect_timeout
+        self._socket_timeout_s = socket_timeout_s
         self._last_wifi_attempt = None  # ticks_ms of last attempt; None = never
 
         # 初始化 STA 模式並取消任何自動連線
@@ -118,11 +121,11 @@ class PumpMQTTClient:
                     time.sleep(0.5)
                     # 只呼叫一次 connect()，然後等待
                     self._wlan.connect(self._ssid, self._password)
-                    if self._wait_wifi(timeout_sec=15):
+                    if self._wait_wifi(timeout_sec=self._wifi_connect_timeout):
                         self._wifi_connected = True
                         print("[MQTT] WiFi connected: %s" % self._wlan.ifconfig()[0])
                     else:
-                        print("[MQTT] WiFi timeout after 15s")
+                        print("[MQTT] WiFi timeout after %ds" % self._wifi_connect_timeout)
                         return False
                 except OSError as e:
                     print("[MQTT] WiFi error: %s" % str(e))

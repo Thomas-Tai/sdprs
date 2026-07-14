@@ -23,8 +23,9 @@ MQTT_PORT = 1883
 MQTT_USERNAME = "pump_node_01"
 MQTT_PASSWORD = "YOUR_MQTT_PASSWORD"
 NODE_ID = "pump_node_01"       # 此裝置的唯一識別碼
+# canonical scheme 見 shared/mqtt_topics.py（ESP32 不隨附該模組，故此處為字面值）
 MQTT_TOPIC_STATUS = "sdprs/edge/" + NODE_ID + "/pump_status"   # 水泵狀態發布主題
-MQTT_TOPIC_HEARTBEAT = "sdprs/edge/" + NODE_ID + "/heartbeat"  # 心跳主題（備用）
+MQTT_TOPIC_HEARTBEAT = "sdprs/edge/" + NODE_ID + "/heartbeat"  # 保留未用 — 伺服器由 pump_status 推斷存活（PUMP_OFFLINE_TIMEOUT）
 
 # ============ 水泵控制閾值（滞後控制 Hysteresis） ============
 HIGH_THRESHOLD = 80    # 水位 >= 80% → 啟動水泵
@@ -37,16 +38,16 @@ LED_RED_PIN = 27       # 紅色 LED（水泵運行中）
 LED_GREEN_PIN = 25     # 綠色 LED（待機）
 ADC_PIN = 34           # 水位感測器 ADC 輸入（ADC1_CH6, 只讀引腳）
 
-# Item 12: 電池監測引腳（選用）
-BATTERY_ADC_PIN = 35   # 電池電壓 ADC 輸入（ADC1_CH7, 只讀引腳） — 需實際接線
-POWER_SOURCE_PIN = 21  # 電源來源檢測 GPIO（高電位 = 外接電源/UPS；低電位 = 電池）
+# Item 12: 電池監測引腳（選用）— 未接線時懸空引腳會發布雜訊電壓/來源跳動，
+# 故出廠預設 None（跳過建構、payload 省略欄位）。接線後改為 35 / 21（§6 台架驗證）。
+BATTERY_ADC_PIN = None    # 電池電壓 ADC 輸入（接線後改為 35，ADC1_CH7 只讀引腳）
+POWER_SOURCE_PIN = None   # 電源來源檢測 GPIO（接線後改為 21；高電位 = 外接電源/UPS；低電位 = 電池）
 
 # ============ 時間間隔 ============
 PUBLISH_INTERVAL = 10   # MQTT 發布間隔（秒）
 POLL_INTERVAL = 1       # 水位讀取間隔（秒）
 WIFI_RETRY_INTERVAL = 60  # WiFi 重連間隔（秒）
-WIFI_CONNECT_TIMEOUT = 3  # 單次 WiFi 連線等待（秒）
-WIFI_MAX_RETRIES = 10     # boot 時最大重試次數
+WIFI_CONNECT_TIMEOUT = 15  # 單次 WiFi 連線等待（秒）— 由 mqtt_client._wait_wifi 使用
 
 # ============ 看門狗 (WDT) ============
 WDT_ENABLED = True       # 生產預設為 True；開發除錯時可暫時改為 False
@@ -82,4 +83,4 @@ CONFLICT_MAX_MS = 900000    # 15 分鐘後鎖定 OFF 並持續告警
 MAX_RUN_MS = 600000
 REST_MS = 60000
 DEBOUNCE_MS = 2500
-SOCKET_TIMEOUT_S = 3
+SOCKET_TIMEOUT_S = 3        # MQTT socket 逾時（秒）— 由 mqtt_client 套用於 broker socket

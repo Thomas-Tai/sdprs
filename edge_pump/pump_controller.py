@@ -5,23 +5,14 @@ that feeds control_logic.decide(). All ticks bookkeeping lives here."""
 import control_logic
 
 
-class _RealClock:
-    def ticks_ms(self):
-        import time
-        return time.ticks_ms()
-
-    def ticks_diff(self, a, b):
-        import time
-        return time.ticks_diff(a, b)
-
-
 class PumpController:
-    def __init__(self, relay, led_red, led_green, config, clock=None):
+    def __init__(self, relay, led_red, led_green, config, clock):
+        # clock 由呼叫端注入：裝置上為 main._RealClockShim，測試為 FakeClock。
         self._relay = relay
         self._led_red = led_red
         self._led_green = led_green
         self._config = config
-        self._clock = clock or _RealClock()
+        self._clock = clock
 
         self.ctrl_state = control_logic.initial_state()
         self._on_since = None

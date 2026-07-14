@@ -34,6 +34,59 @@ def test_digital_bounce_resets_timer():
     clk.advance(500);  assert s.update() is True    # t=5500 2500ms held -> flips
 
 
+def test_build_readers_pull_matches_polarity(monkeypatch):
+    # Digital inputs must be pulled toward the DE-ASSERTED level: PULL_UP for
+    # active-low, PULL_DOWN for active-high. A blanket PULL_UP would make a
+    # broken active-high high-water line read asserted -> pump ON on a fault.
+    import sys
+    import types
+
+    pin_calls = []
+
+    class FakeHWPin:
+        IN = "IN"
+        PULL_UP = "PULL_UP"
+        PULL_DOWN = "PULL_DOWN"
+
+        def __init__(self, pin, mode=None, pull=None):
+            pin_calls.append((pin, mode, pull))
+
+        def value(self):
+            return 1
+
+    class FakeADC:
+        ATTN_11DB = "ATTN_11DB"
+        WIDTH_12BIT = "WIDTH_12BIT"
+
+        def __init__(self, pin):
+            pass
+
+        def atten(self, v):
+            pass
+
+        def width(self, v):
+            pass
+
+        def read(self):
+            return 0
+
+    fake_machine = types.ModuleType("machine")
+    fake_machine.Pin = FakeHWPin
+    fake_machine.ADC = FakeADC
+    monkeypatch.setitem(sys.modules, "machine", fake_machine)
+
+    config = {"adc_pin": 34, "float_pin": 32, "rain_pin": 33, "high_water_pin": 13,
+              "float_active_low": True, "rain_active_low": True,
+              "high_water_active_low": False}
+    readers = sensors.build_readers(config)
+
+    pulls = {pin: pull for pin, mode, pull in pin_calls if mode == FakeHWPin.IN}
+    assert pulls[32] == FakeHWPin.PULL_UP     # float: active-low idles HIGH
+    assert pulls[33] == FakeHWPin.PULL_UP     # rain: active-low idles HIGH
+    assert pulls[13] == FakeHWPin.PULL_DOWN   # high water: active-high idles LOW
+    assert set(readers) == {"adc", "float", "rain", "high_water"}
+
+
 def test_read_all_disabled_sensors_are_none():
     clk = FakeClock()
     config = {"level_enabled": True, "float_enabled": False,

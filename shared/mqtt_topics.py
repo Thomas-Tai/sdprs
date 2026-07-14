@@ -153,6 +153,23 @@ def topic_cmd_simulate_trigger(node_id: str) -> str:
     return f"{TOPIC_PREFIX}/{node_id}/cmd/simulate_trigger"
 
 
+def topic_cmd(node_id: str, command: str) -> str:
+    """
+    生成通用指令主題。
+
+    用於中央伺服器發送任意指令給邊緣節點（如 stream_start、snooze）。
+    topic_cmd_* 系列函式為常用指令的具名捷徑，兩者產生的主題格式一致。
+
+    Args:
+        node_id: 節點識別碼（如 "glass_node_01"）
+        command: 指令名稱（如 "snooze"）
+
+    Returns:
+        完整主題字串，如 "sdprs/edge/glass_node_01/cmd/snooze"
+    """
+    return f"{TOPIC_PREFIX}/{node_id}/cmd/{command}"
+
+
 def sub_cmd_all(node_id: str) -> str:
     """
     生成該節點所有指令的訂閱模式。

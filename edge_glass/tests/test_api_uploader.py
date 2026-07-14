@@ -6,7 +6,7 @@ UploadWorker 單元測試
     - 429 → 可重試（退避），仍為 QUEUED
     - 5xx 超過 MAX_RETRIES → 終態 FAILED
     - MP4 遺失 → 終態 FAILED（非誤標 UPLOADED）
-    - 204 → UPLOADED（成功路徑）
+    - 204 → UPLOADED 且該列隨即被清除（成功路徑；佇列資料庫不無限增長）
 
 使用真實的 in-memory EventQueue，並注入 FakeClient 避免任何網路呼叫。
 """
@@ -162,8 +162,9 @@ def test_video_missing_mp4_marked_failed(queue):
     assert row_id not in _pending_ids(queue)
 
 
-def test_video_204_marks_uploaded(queue, tmp_path):
-    """成功路徑：put 回傳 204 → 狀態 UPLOADED。"""
+def test_video_204_marks_uploaded_and_purges_row(queue, tmp_path):
+    """成功路徑：put 回傳 204 → 標記 UPLOADED 後該列隨即被清除
+    （delete_uploaded），佇列資料庫不會無限增長。"""
     mp4 = tmp_path / "clip.mp4"
     mp4.write_bytes(b"\x00\x01\x02fake mp4 bytes")
 
@@ -175,8 +176,26 @@ def test_video_204_marks_uploaded(queue, tmp_path):
     result = worker._upload_video(event)
 
     assert result is True
-    assert _status(queue, row_id) == "UPLOADED"
+    # 該列已被清除（非僅標記 UPLOADED）
+    assert _status(queue, row_id) is None
     assert row_id not in _pending_ids(queue)
+
+
+def test_video_failed_row_is_retained(queue, tmp_path):
+    """FAILED 終態列不被清除（保留供鑑識）——只有成功上傳才清除。"""
+    mp4 = tmp_path / "clip.mp4"
+    mp4.write_bytes(b"fake")
+
+    row_id = queue.enqueue("glass_node_01", "2026-03-03T12:00:00Z", str(mp4), {})
+    queue.update_status(row_id, "JSON_SENT", event_id="42")
+    event = queue.get_pending()[0]
+
+    worker = _make_worker(queue, FakeClient(status=422, text="unprocessable"))
+    result = worker._upload_video(event)
+
+    assert result is False
+    # FAILED 列仍存在於資料庫（未被 delete_uploaded 清除）
+    assert _status(queue, row_id) == "FAILED"
 
 
 def test_video_4xx_marked_failed(queue, tmp_path):

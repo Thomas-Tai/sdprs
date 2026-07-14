@@ -143,7 +143,9 @@ MQTT_PORT=1883
 
 # Database
 DB_PATH=/opt/sdprs/data/sdprs.db
-STORAGE_DIR=/opt/sdprs/storage
+# 儲存根目錄 (上傳與保留清理共用)。舊名 STORAGE_DIR 已棄用，
+# 伺服器仍有回退支援但會記錄警告。
+STORAGE_PATH=/opt/sdprs/storage
 
 # Retention
 RETENTION_DAYS=30

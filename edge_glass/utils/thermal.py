@@ -66,6 +66,7 @@ class ThermalMonitor(threading.Thread):
                 - thermal.pause_visual_temp: 暫停視覺處理的溫度閾值
                 - thermal.critical_alert_temp: 發送 CRITICAL 警報的溫度閾值
                 - camera.fps: 正常 FPS
+                - snapshot.fps / snapshot.fps_degraded: 快照頻率（換算為間隔）
             critical_callback: >85°C 時調用的回調，簽名 (temp: float) -> None
         """
         super().__init__(daemon=True)
@@ -81,10 +82,18 @@ class ThermalMonitor(threading.Thread):
         # 正常 FPS
         self._normal_fps = config.get("camera", {}).get("fps", 15)
 
+        # 快照間隔：由 snapshot.fps / snapshot.fps_degraded 換算
+        # （預設 1.0 fps / 0.2 fps，即維持原本硬編碼的 1.0s / 5.0s 行為）
+        snapshot_config = config.get("snapshot", {})
+        normal_snap_fps = float(snapshot_config.get("fps", 1.0)) or 1.0
+        degraded_snap_fps = float(snapshot_config.get("fps_degraded", 0.2)) or 0.2
+        self._snapshot_interval_normal = 1.0 / normal_snap_fps
+        self._snapshot_interval_degraded = 1.0 / degraded_snap_fps
+
         # 共享屬性（供主迴圈讀取）
         self._current_fps = self._normal_fps
         self._visual_paused = False
-        self._snapshot_interval = 1.0  # 正常快照間隔
+        self._snapshot_interval = self._snapshot_interval_normal  # 正常快照間隔
 
         # 回調
         self._critical_callback = critical_callback
@@ -194,7 +203,7 @@ class ThermalMonitor(threading.Thread):
 
         self._current_fps = self._normal_fps
         self._visual_paused = False
-        self._snapshot_interval = 1.0
+        self._snapshot_interval = self._snapshot_interval_normal
 
     def _set_degraded(self, temp: float):
         """設定降級模式。"""
@@ -203,7 +212,7 @@ class ThermalMonitor(threading.Thread):
 
         self._current_fps = 10
         self._visual_paused = False
-        self._snapshot_interval = 5.0  # 5 秒一張快照
+        self._snapshot_interval = self._snapshot_interval_degraded  # 降級快照間隔（snapshot.fps_degraded）
 
     def _set_visual_paused(self, temp: float):
         """設定視覺暫停模式。"""
@@ -212,7 +221,7 @@ class ThermalMonitor(threading.Thread):
 
         self._current_fps = 10
         self._visual_paused = True
-        self._snapshot_interval = 5.0
+        self._snapshot_interval = self._snapshot_interval_degraded
 
     def _set_critical(self, temp: float):
         """設定緊急模式。"""
@@ -221,7 +230,7 @@ class ThermalMonitor(threading.Thread):
 
         self._current_fps = 10
         self._visual_paused = True
-        self._snapshot_interval = 5.0
+        self._snapshot_interval = self._snapshot_interval_degraded
 
         # 調用回調
         if self._critical_callback:

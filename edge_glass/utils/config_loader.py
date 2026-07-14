@@ -37,6 +37,7 @@ DEFAULTS: Dict[str, Any] = {
         "roi_polygon": [[100, 50], [1180, 50], [1180, 670], [100, 670]],
         "canny_threshold1": 50,
         "canny_threshold2": 150,
+        "anomaly_recovery_seconds": 3,   # 亮度異常後的恢復期（visual_detector 讀取）
     },
     "audio": {
         "device_index": 1,
@@ -49,7 +50,7 @@ DEFAULTS: Dict[str, Any] = {
         "spectral_flatness_threshold": 0.3,
         "attack_time_ms": 10,
         "analysis_window_ms": 500,
-        "fixed_db_threshold": 90,
+        "fixed_db_threshold": -30,   # dBFS（0 = 滿刻度），非 SPL——正值永遠無法觸發
         "fixed_freq_threshold_hz": 3000,
     },
     "trigger": {

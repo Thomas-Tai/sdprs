@@ -33,6 +33,7 @@ visual:
   roi_polygon: [[100,50],[1180,50],[1180,670],[100,670]]  # ROI polygon vertices
   canny_threshold1: 50                # Canny edge detection lower threshold
   canny_threshold2: 150               # Canny edge detection upper threshold
+  anomaly_recovery_seconds: 3         # Recovery period after brightness anomaly
 
 # Audio detection settings
 audio:
@@ -48,7 +49,7 @@ audio:
   attack_time_ms: 10                  # Attack time threshold
   analysis_window_ms: 500             # Analysis window duration
   # Fixed mode parameters (backup)
-  fixed_db_threshold: 90              # Fixed dB threshold
+  fixed_db_threshold: -30             # Fixed threshold in dBFS (0 = full scale, NOT SPL; positive values can never trigger)
   fixed_freq_threshold_hz: 3000       # Fixed frequency threshold
 
 # Trigger engine settings
@@ -71,7 +72,6 @@ server:
 
 # Stream settings
 stream:
-  type: "hls"                         # Stream type: HLS
   auto_stop_minutes: 5                # Auto-stop duration in minutes
   tunnel_port: 18554                  # Reverse SSH tunnel remote port (unique per node)
 
@@ -88,6 +88,3 @@ snapshot:
 events:
   local_backup_dir: "./events"        # Local MP4 backup directory
   max_local_files: 20                 # Maximum number of local backup files
-
-# Timezone
-timezone: "Asia/Macau"                # Local timezone

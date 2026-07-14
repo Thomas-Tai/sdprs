@@ -3,7 +3,8 @@ event_capture 單元測試
 
 涵蓋非阻塞事件捕獲的四個構件：
 - PendingEventTracker：註冊觸發，post-roll 到期後才釋放（順序保留）
-- slice_window：從凍結的 (timestamp, frame) 快照切出 [t_start, t_end] 的裸 ndarray
+- slice_window：從凍結的 (timestamp, frame) 快照切出 [t_start, t_end] 的
+  (timestamp, frame) tuple（時間戳保留——encode_mp4 依賴排序與解包）
 - clamp_capture_window：強制 pre+post+margin <= duration 的緩衝區不變式
 - EncodeWorker：以背景執行緒 + 有界佇列（drop-newest）執行編碼與入列
 
@@ -14,6 +15,8 @@ event_capture 單元測試
 """
 
 import logging
+import os
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -27,6 +30,10 @@ from utils.event_capture import (
     clamp_capture_window,
     slice_window,
 )
+from utils.mp4_encoder import encode_mp4
+
+# 檢查 ffmpeg 是否可用（供真實編碼器整合測試，與 test_mp4_encoder 相同做法）
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +151,21 @@ class TestSliceWindow:
         out = slice_window(self._frames_0_to_10(), 3.0, 7.0)
         # 3,4,5,6,7 -> 5 幀
         assert len(out) == 5
-        assert [int(a[0, 0, 0]) for a in out] == [3, 4, 5, 6, 7]
+        assert [ts for (ts, _) in out] == [3.0, 4.0, 5.0, 6.0, 7.0]
+        assert [int(f[0, 0, 0]) for (_, f) in out] == [3, 4, 5, 6, 7]
 
-    def test_returns_bare_ndarrays_not_tuples(self):
+    def test_returns_timestamp_frame_tuples(self):
+        """必須保留 (ts, frame) tuple——encode_mp4 依賴
+        sorted(frames, key=lambda x: x[0]) 與 (ts, frame) 解包；
+        裸 ndarray 會使編碼失敗、事件被丟棄。"""
         out = slice_window(self._frames_0_to_10(), 0.0, 4.0)
         assert len(out) == 5
-        assert all(isinstance(a, np.ndarray) for a in out)
-        assert not any(isinstance(a, tuple) for a in out)
+        assert all(isinstance(item, tuple) and len(item) == 2 for item in out)
+        assert all(
+            isinstance(ts, float) and isinstance(f, np.ndarray) for (ts, f) in out
+        )
+        # 時間戳過濾正確且順序保留
+        assert [ts for (ts, _) in out] == [0.0, 1.0, 2.0, 3.0, 4.0]
 
     def test_empty_window_returns_empty_list(self):
         out = slice_window(self._frames_0_to_10(), 100.0, 200.0)
@@ -158,7 +173,49 @@ class TestSliceWindow:
 
     def test_order_preserved(self):
         out = slice_window(self._frames_0_to_10(), 0.0, 10.0)
-        assert [int(a[0, 0, 0]) for a in out] == list(range(11))
+        assert [ts for (ts, _) in out] == [float(i) for i in range(11)]
+        assert [int(f[0, 0, 0]) for (_, f) in out] == list(range(11))
+
+
+class TestSliceWindowEncoderContract:
+    """整合形測試：slice_window 輸出必須符合真實編碼器
+    (utils.mp4_encoder.encode_mp4) 的幀契約。"""
+
+    def test_output_satisfies_mp4_encoder_frame_contract(self):
+        """逐步重演 encode_mp4 對 frames 的操作（排序、解包、取尺寸、tobytes）。"""
+        frames = [(100.0 + i * 0.1, _frame(i, shape=(4, 4, 3))) for i in range(20)]
+        out = slice_window(frames, 100.5, 101.5)
+        assert out  # 非空
+
+        # 與 mp4_encoder.encode_mp4 完全相同的操作序列：
+        # sorted(frames, key=lambda x: x[0]) → shape[:2] → 逐幀 (ts, frame) 解包
+        sorted_frames = sorted(out, key=lambda x: x[0])
+        height, width = sorted_frames[0][1].shape[:2]
+        assert (height, width) == (4, 4)
+        for ts, frame in sorted_frames:
+            assert isinstance(ts, float)
+            assert frame.tobytes()  # 逐幀寫入 ffmpeg stdin 的相同操作
+
+    @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
+    def test_output_encodes_with_real_encoder(self, tmp_path):
+        """端到端：slice_window 輸出直接餵給真實 encode_mp4 可產出 MP4
+        （鏡像 test_mp4_encoder 的做法：720p 假幀 + libx264）。"""
+        base = time.time()
+        fake_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        frames = [(base + i * 0.1, fake_frame.copy()) for i in range(10)]
+
+        out = slice_window(frames, base, base + 1.0)
+        assert out
+
+        mp4_path = encode_mp4(
+            out,
+            node_id="test_node",
+            timestamp=base,
+            output_dir=str(tmp_path),
+            encoder="libx264",
+        )
+        assert os.path.exists(mp4_path)
+        assert os.path.getsize(mp4_path) > 0
 
 
 # ---------------------------------------------------------------------------

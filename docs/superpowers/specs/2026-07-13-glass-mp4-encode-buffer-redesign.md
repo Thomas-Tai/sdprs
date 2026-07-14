@@ -102,7 +102,7 @@ New file `edge_glass/capture/event_capture.py` (or `utils/`), with two small, in
 - `due(now) -> list[PendingEvent]` — return + remove events whose `trigger_ts + post_roll <= now`.
 - Trivial to unit-test with a fake `now`.
 
-**5b. `slice_window(frozen, t_start, t_end) -> list[frame]`** — pure function selecting frames whose timestamp ∈ `[t_start, t_end]`. Unit-testable with synthetic `(ts, frame)` tuples. (Handles the low-fps case correctly because it slices by **timestamp**, not frame count — and under thermal throttling the fixed-`maxlen` buffer spans *more* wall-time, never less.)
+**5b. `slice_window(frozen, t_start, t_end) -> list[(ts, frame)]`** — pure function selecting the `(timestamp, frame)` tuples whose timestamp ∈ `[t_start, t_end]`, **timestamps preserved**: the downstream `encode_mp4` sorts by `x[0]` and unpacks `(ts, frame)`, so bare frames would break the encoder contract. Unit-testable with synthetic `(ts, frame)` tuples. (Handles the low-fps case correctly because it slices by **timestamp**, not frame count — and under thermal throttling the fixed-`maxlen` buffer spans *more* wall-time, never less.)
 
 **5c. `EncodeWorker(threading.Thread)`** — drains a **bounded** `queue.Queue(maxsize=N)`:
 - On item: `mp4 = encode_fn(frames, ...)` then `event_queue.enqueue(...)`. `encode_fn` is injected (real `encode_mp4` in prod, fake in tests).

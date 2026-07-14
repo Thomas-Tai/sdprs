@@ -19,17 +19,22 @@ from typing import Any, Callable, Dict, Optional
 
 from ..config import get_settings
 
-# Import shared MQTT topic constants
-try:
-    import sys as _sys
-    from pathlib import Path as _Path
-    _shared_path = str(_Path(__file__).parent.parent.parent)
-    if _shared_path not in _sys.path:
-        _sys.path.insert(0, _shared_path)
-    from shared.mqtt_topics import SUB_ALL_HEARTBEAT, SUB_ALL_PUMP_STATUS, SUB_ALL_STREAM_STATUS
-    _TOPICS_IMPORTED = True
-except ImportError:
-    _TOPICS_IMPORTED = False
+# Import shared MQTT topic constants. Hard import (no fallback): the path
+# insert below puts the directory containing both central_server/ and shared/
+# on sys.path in every supported layout (repo checkout, root Dockerfile
+# `COPY . .`, deploy/Dockerfile which copies central_server/ and shared/
+# side-by-side), so a failure here is a broken deployment we WANT loud.
+import sys as _sys
+from pathlib import Path as _Path
+_shared_path = str(_Path(__file__).parent.parent.parent)
+if _shared_path not in _sys.path:
+    _sys.path.insert(0, _shared_path)
+from shared.mqtt_topics import (
+    SUB_ALL_HEARTBEAT,
+    SUB_ALL_PUMP_STATUS,
+    SUB_ALL_STREAM_STATUS,
+    topic_cmd,
+)
 from ..database import (
     upsert_node, update_node_heartbeat, update_node_status, insert_pump_reading
 )
@@ -164,19 +169,13 @@ class MQTTService:
         if rc == 0:
             logger.info("Connected to MQTT broker successfully")
             
-            # Subscribe to all edge node topics
-            if _TOPICS_IMPORTED:
-                topics = [
-                    (SUB_ALL_HEARTBEAT, 1),
-                    (SUB_ALL_PUMP_STATUS, 1),
-                    (SUB_ALL_STREAM_STATUS, 1),
-                ]
-            else:
-                topics = [
-                    ("sdprs/edge/+/heartbeat", 1),
-                    ("sdprs/edge/+/pump_status", 1),
-                    ("sdprs/edge/+/stream_status", 1),
-                ]
+            # Subscribe to all edge node topics (canonical patterns from
+            # shared/mqtt_topics.py — single source of truth, no local copies)
+            topics = [
+                (SUB_ALL_HEARTBEAT, 1),
+                (SUB_ALL_PUMP_STATUS, 1),
+                (SUB_ALL_STREAM_STATUS, 1),
+            ]
             
             for topic, qos in topics:
                 client.subscribe(topic, qos=qos)
@@ -514,7 +513,7 @@ class MQTTService:
         Returns:
             True if command was sent successfully
         """
-        topic = f"sdprs/edge/{node_id}/cmd/{command}"
+        topic = topic_cmd(node_id, command)
         payload = {"timestamp": utcnow().isoformat()}
         
         logger.info(f"Sending {command} command to {node_id}")
@@ -542,7 +541,7 @@ class MQTTService:
         server-side snooze flag is checked only when processing incoming alerts
         (event_service.py). Full edge-side suppression requires firmware update.
         """
-        topic = f"sdprs/edge/{node_id}/cmd/snooze"
+        topic = topic_cmd(node_id, "snooze")
         payload = {
             "snooze_until": snooze_until,
             "snooze_reason": snooze_reason,

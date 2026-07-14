@@ -17,6 +17,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -938,6 +939,68 @@ def get_handover_note_row() -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def set_handover_note(note: str, author: str, updated_at_iso: str) -> None:
+    """Item 16: last-write-wins update of the handover_note singleton (id=1).
+
+    ``updated_at_iso`` is stamped by the caller (naive-UTC isoformat) rather
+    than SQL CURRENT_TIMESTAMP so both backends store the same shape.
+    """
+    if get_backend() == "postgresql":
+        _pg_set_handover_note_sync(note, author, updated_at_iso)
+        return
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "UPDATE handover_note SET note = ?, author = ?, updated_at = ? WHERE id = 1;",
+            (note, author, updated_at_iso),
+        )
+
+
+def _pg_set_handover_note_sync(note, author, updated_at_iso) -> None:
+    import sqlalchemy
+    database_url = os.environ.get("DATABASE_URL", "")
+    engine = sqlalchemy.create_engine(database_url)
+    with engine.connect() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE handover_note SET note = :note, author = :author, updated_at = :ts WHERE id = 1"
+            ),
+            {"note": note, "author": author, "ts": updated_at_iso},
+        )
+        conn.commit()
+
+
+def get_effective_handover_note(ttl_hours: int = 24) -> Optional[Dict[str, Any]]:
+    """Item 16: handover note with the read-time TTL applied.
+
+    Wraps get_handover_note_row() + the 24h expiry check so api/handover.py
+    and main.py share ONE TTL implementation on both backends (the old
+    api/handover.py copy went straight to get_db_cursor(), which raises
+    under PostgreSQL). Naive-UTC compare: normalizes 'Z'/space-delimited
+    stamps and strips any tzinfo before comparing against utcnow().
+
+    Returns {note, author, updated_at, expired}, or None when no row exists.
+    """
+    row = get_handover_note_row()
+    if row is None:
+        return None
+    updated_at = row.get("updated_at")
+    expired = False
+    if updated_at:
+        try:
+            ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00").replace(" ", "T"))
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+            expired = (utcnow() - ts) > timedelta(hours=ttl_hours)
+        except ValueError:
+            expired = False
+    return {
+        "note": row.get("note") or "",
+        "author": row.get("author"),
+        "updated_at": updated_at,
+        "expired": expired,
+    }
+
+
 def get_event_created_ats(since_iso: str) -> List[str]:
     """Item 11: created_at values (ASC) for events at/after ``since_iso``.
 
@@ -952,8 +1015,13 @@ def get_event_created_ats(since_iso: str) -> List[str]:
         return [str(r["created_at"]) for r in rows]
     db = get_db()
     cursor = db.cursor()
+    # datetime() on BOTH sides normalizes the stored space-delimited
+    # "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP) against the
+    # T-delimited since_iso — same idiom as retention_service.py. A raw
+    # string compare returns ZERO rows for same-day windows (' ' < 'T'),
+    # which blanked the alert-rate sparkline.
     cursor.execute(
-        "SELECT created_at FROM events WHERE created_at >= ? ORDER BY created_at ASC;",
+        "SELECT created_at FROM events WHERE datetime(created_at) >= datetime(?) ORDER BY created_at ASC;",
         (since_iso,),
     )
     return [str(r["created_at"]) for r in cursor.fetchall()]
