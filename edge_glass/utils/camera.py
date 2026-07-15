@@ -74,9 +74,14 @@ class _Picamera2Capture:
         if not self._opened:
             return False, None
         try:
-            frame_rgb = self._picam.capture_array("main")
-            # Downstream OpenCV code assumes BGR; picamera2 gives RGB.
-            return True, frame_rgb[..., ::-1]
+            # Picamera2's format="RGB888" is famously misnamed: the numpy array
+            # is already in B, G, R channel order (the "RGB888" name refers to
+            # libcamera's packed-bit-order convention, not numpy). Downstream
+            # cv2 code wants BGR — so we pass the array through unchanged.
+            # Reversing here would double-swap R and B and give every JPEG a
+            # magenta cast (verified visually 2026-07-15 on Pi 1/2/3 fleet).
+            frame_bgr = self._picam.capture_array("main")
+            return True, frame_bgr
         except Exception as e:  # noqa: BLE001 — picamera2 raises many types
             logger.error(f"picamera2 capture_array failed: {e}")
             return False, None
