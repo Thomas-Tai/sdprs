@@ -98,8 +98,14 @@ class MQTTService:
             logger.error("paho-mqtt not installed. MQTT service disabled.")
             return
         
-        # Create MQTT client
-        self.client = mqtt.Client(client_id="central_server")
+        # Unique client_id per process so multiple pods (e.g. during a Zeabur
+        # rolling deploy that fails to terminate the old pod) don't kick each
+        # other off the broker via MQTT's same-client_id session-takeover rule.
+        # Downside: N pods each receive every message → N× message processing.
+        # Acceptable at MVP scale (1 camera + 1 pump, ~10 msg/min).
+        import os, socket
+        pod_tag = f"{socket.gethostname()[:12]}_{os.getpid()}"
+        self.client = mqtt.Client(client_id=f"central_server_{pod_tag}")
         
         # Set up callbacks
         self.client.on_connect = self._on_connect
