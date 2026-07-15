@@ -86,8 +86,8 @@ class MQTTClient:
                 - node_id: 節點 ID
                 - server.mqtt_broker: MQTT broker 地址
                 - server.mqtt_port: MQTT broker 端口
-                - server.mqtt_username: EMQX 用戶名（雲端部署）
-                - server.mqtt_password: EMQX 密碼（雲端部署）
+                - server.mqtt_username: Mosquitto 用戶名（雲端部署）
+                - server.mqtt_password: Mosquitto 密碼（雲端部署）
                 - server.mqtt_use_tls: 是否啟用 TLS（雲端部署）
         """
         if not PAHO_AVAILABLE:
@@ -145,7 +145,7 @@ class MQTTClient:
         # 設定自動重連
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
 
-        # 認證（EMQX 雲端部署）
+        # 認證（雲端部署）
         if self._username:
             self._client.username_pw_set(self._username, self._password)
             logger.info("MQTT auth configured (username/password)")

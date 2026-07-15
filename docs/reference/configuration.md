@@ -27,9 +27,9 @@
 | --------------------------- | ----------------------------- | -------------------------------------------------------------------- |
 | `MQTT_BROKER`               | `localhost`                   | MQTT broker 主機                                                     |
 | `MQTT_PORT`                 | `1883`                        | MQTT TCP 埠                                                          |
-| `MQTT_USERNAME`             | `""`                          | EMQX 認證用戶（雲端部署）                                            |
-| `MQTT_PASSWORD`             | `""`                          | EMQX 認證密碼                                                        |
-| `MQTT_USE_TLS`              | `false`                       | 啟用 TLS（雲端 EMQX 建議 `true`）                                    |
+| `MQTT_USERNAME`             | `""`                          | Mosquitto 認證用戶（雲端部署）                                       |
+| `MQTT_PASSWORD`             | `""`                          | Mosquitto 認證密碼                                                   |
+| `MQTT_USE_TLS`              | `false`                       | 啟用 TLS（雲端 Mosquitto 若前置 TLS 代理則設 `true`）                |
 | `DATABASE_URL`              | `""`                          | **設定即啟用 PostgreSQL 後端**；為空時使用 SQLite                    |
 | `DB_PATH`                   | `./data/sdprs.db`             | SQLite 檔案路徑（由 Settings 讀取，`DATABASE_URL` 空才生效）         |
 | `RETENTION_DAYS`            | `30`                          | 事件與 MP4 保留天數（由 Settings 傳入排程器）                        |
@@ -157,7 +157,7 @@ server:
   api_key: "和伺服器 EDGE_API_KEY 相同"    # 必須修改
   mqtt_broker: "192.168.1.100"
   mqtt_port: 1883
-  mqtt_username: ""                   # EMQX 帳號（雲端）
+  mqtt_username: ""                   # Mosquitto 帳號（雲端）
   mqtt_password: ""
   mqtt_use_tls: false
 
@@ -196,7 +196,7 @@ events:
 | ----------------------- | ---------------------------------------------------------------------------------------- |
 | `server.api_url`        | Zeabur HTTPS URL（如 `https://sdprs.zeabur.app/api`）                                    |
 | `server.api_key`        | 與雲端 `EDGE_API_KEY` 一致                                                               |
-| `server.mqtt_broker`    | EMQX 公開 TCP 地址（非 Zeabur 內部名 `emqx`）                                            |
+| `server.mqtt_broker`    | Mosquitto 公開 TCP 地址（非 Zeabur 內部名 `mosquitto`）                                  |
 | `server.mqtt_username`  | 與雲端 `MQTT_USERNAME` 一致                                                              |
 | `server.mqtt_password`  | 與雲端 `MQTT_PASSWORD` 一致                                                              |
 | `server.mqtt_use_tls`   | Public TCP 用 `false`；WebSocket 443 用 `true`                                           |
@@ -220,7 +220,7 @@ SSID = "YOUR_WIFI_SSID"                # WiFi SSID（舊名 WIFI_SSID 已改為 
 WIFI_PASS = "YOUR_WIFI_PASSWORD"       # WiFi 密碼
 
 # ============ MQTT ============
-MQTT_BROKER = "YOUR_BROKER_IP"         # 中央伺服器或雲端 EMQX 公開 IP
+MQTT_BROKER = "YOUR_BROKER_IP"         # 中央伺服器或雲端 Mosquitto 公開 IP
 MQTT_PORT = 1883
 MQTT_USERNAME = "pump_node_01"
 MQTT_PASSWORD = "YOUR_MQTT_PASSWORD"

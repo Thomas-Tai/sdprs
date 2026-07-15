@@ -109,7 +109,7 @@ class MQTTService:
         # Configure reconnection
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
 
-        # Authentication (EMQX on Zeabur)
+        # Authentication (Mosquitto on Zeabur cloud deploy)
         if getattr(self.settings, "MQTT_USERNAME", ""):
             self.client.username_pw_set(
                 self.settings.MQTT_USERNAME,
@@ -122,7 +122,7 @@ class MQTTService:
 
         try:
             # Non-blocking connect — returns immediately; paho retries in background.
-            # This prevents blocking the FastAPI startup when EMQX isn't ready yet.
+            # This prevents blocking the FastAPI startup when the broker isn't ready yet.
             logger.info(f"Connecting to MQTT broker at {self.settings.MQTT_BROKER}:{self.settings.MQTT_PORT}")
             self.client.connect_async(
                 self.settings.MQTT_BROKER,

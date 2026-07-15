@@ -46,8 +46,8 @@ if PYDANTIC_AVAILABLE:
         Optional variables (have defaults):
         - MQTT_BROKER: MQTT broker address
         - MQTT_PORT: MQTT broker port
-        - MQTT_USERNAME: MQTT broker username (EMQX auth)
-        - MQTT_PASSWORD: MQTT broker password (EMQX auth)
+        - MQTT_USERNAME: MQTT broker username (Mosquitto auth on Zeabur cloud deploy)
+        - MQTT_PASSWORD: MQTT broker password (Mosquitto auth on Zeabur cloud deploy)
         - MQTT_USE_TLS: Enable TLS for MQTT connection (cloud deployment)
         - DATABASE_URL: PostgreSQL connection string (empty = use SQLite)
         - DB_PATH: SQLite database path (used when DATABASE_URL is empty)

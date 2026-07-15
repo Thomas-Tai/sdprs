@@ -29,8 +29,7 @@
 - [ ] ESP32 外接 5V/2A 電源（非僅 USB 供電）
 - [ ] ESP32 上綠色 LED 亮起（表示泵停止，正常待機）
 - [ ] 串口日誌顯示 `[BOOT] WiFi connected!` 和 `[MQTT] Connected to broker`
-- [ ] EMQX Dashboard Clients 頁面顯示 `pump_node_01` 在線
-- [ ] EMQX Dashboard 可看到 `sdprs/edge/pump_node_01/pump_status` 主題有資料（每 10 秒）
+- [ ] `mosquitto_sub -h <mosquitto-host> -p <port> -u sdprs -P <pw> -t '$SYS/broker/clients/connected' -C 1` 回傳值 ≥ 2（server + pump_node_01 皆已連線）
 - [ ] 儀表板顯示水泵節點狀態
 
 ## Zeabur 雲端部署驗證

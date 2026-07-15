@@ -12,12 +12,19 @@
 > - 使用短而粗的 USB 數據線（非充電線），直插主機板 USB 埠（避免 Hub）
 > - Windows 需先裝 CP2102 或 CH340 USB 驅動
 
-## 步驟 1：在 EMQX Dashboard 新增認證用戶
+## 步驟 1：確認 Zeabur Mosquitto 認證已就緒
 
-EMQX Dashboard → **Access Control → Authentication → Users → Add**
+雲端 Mosquitto 採用**單一共用帳號模型**（MVP）：在 Zeabur `mosquitto` 服務的 Variables
+頁面設定 `MQTT_USERNAME=sdprs` 與 `MQTT_PASSWORD=<random-24>`；容器啟動時
+`entrypoint.sh` 會用 `mosquitto_passwd -U` 雜湊寫入 passwd 檔（詳見 `deploy/mosquitto/`）。
+中央伺服器、Pi、ESP32 都共用這一組帳密。
 
-- Username: `pump_node_01`
-- Password: 任選（步驟 3 會輸入給腳本）
+- **共用帳號：** `sdprs`
+- **共用密碼：** Zeabur 設定的 `MQTT_PASSWORD`（步驟 3 會輸入給腳本）
+- **node_id 是主題路由用途**（如 `pump_node_01`），與 MQTT 認證無關
+
+> 之後若要做多帳號 + ACL 隔離（每節點獨立帳號），需擴充 `deploy/mosquitto/entrypoint.sh`
+> 讀多組 `MQTT_USER_*`/`MQTT_PASS_*` 環境變數並掛載 `mosquitto_acl.conf`。目前不啟用。
 
 ## 步驟 2：在電腦上安裝刷寫工具
 
@@ -52,10 +59,10 @@ chmod +x setup_esp32.sh
 ./setup_esp32.sh /dev/ttyUSB0 \
     --wifi-ssid "MyWiFi" \
     --wifi-pass "wifi-secret" \
-    --mqtt-broker "<emqx-public-ip>" \
-    --mqtt-port 32150 \
-    --mqtt-username pump_node_01 \
-    --mqtt-password "<emqx-password>" \
+    --mqtt-broker "<mosquitto-public-host>" \
+    --mqtt-port <mosquitto-public-port> \
+    --mqtt-username sdprs \
+    --mqtt-password "<mosquitto-password>" \
     --node-id pump_node_01
 ```
 
@@ -81,7 +88,13 @@ mpremote connect /dev/ttyUSB0 repl
 # 按 Ctrl+] 退出
 ```
 
-也可在 EMQX Dashboard `/#/clients` 頁面確認 `pump_node_01` 在線。
+也可在任一台電腦上執行以下命令，確認 `pump_node_01` 有發佈 `pump_status` 訊息：
+
+```bash
+mosquitto_sub -h <mosquitto-public-host> -p <mosquitto-public-port> \
+    -u sdprs -P "<mosquitto-password>" \
+    -t 'sdprs/edge/pump_node_01/#' -v
+```
 
 ## 附錄：手動刷寫流程（不使用腳本時）
 
@@ -129,7 +142,7 @@ config.py 中有以下開關：
 | `ampy: failed to access COMx`               | 關閉所有串口工具、執行 `powershell Stop-Process -Name python,ampy -Force`、等 3 秒重試                |
 | `esptool` 連不上                            | 按住 BOOT 鍵再執行指令                                                                                  |
 | WiFi 錯誤 `sta is connecting, return error` | `wlan.disconnect()` 後才呼叫 `wlan.connect()`；確保只呼叫一次 connect()                             |
-| MQTT 連線失敗                                 | 確認 EMQX 已新增 `pump_node_01` 用戶                                                                  |
+| MQTT 連線失敗                                 | 確認 Zeabur `mosquitto` 服務的 `MQTT_USERNAME`/`MQTT_PASSWORD` 已設定；用 `mosquitto_sub -h <host> -p <port> -u sdprs -P <pw> -t '#' -v` 驗證認證通過 |
 | `umqtt` 找不到                              | MicroPython 官方 ESP32 韌體已內建，無需額外安裝                                                         |
 | WDT 導致反覆重啟                              | config.py 中設 `WDT_ENABLED = False`                                                                  |
 | `ampy put` 後仍用舊程式碼                   | 遠端路徑不加 `:` 前綴，正確：`ampy put file.py file.py`                                             |

@@ -18,7 +18,7 @@
 #
 # 範例:
 #   ./setup_esp32.sh /dev/ttyUSB0
-#   ./setup_esp32.sh COM3 --wifi-ssid MyWiFi --mqtt-broker emqx.zeabur.app
+#   ./setup_esp32.sh COM3 --wifi-ssid MyWiFi --mqtt-broker <mosquitto-public-host>
 #
 # 前置條件: Python 3.8+ + esptool + mpremote (pip install esptool mpremote)
 

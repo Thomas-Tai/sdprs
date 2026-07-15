@@ -129,7 +129,7 @@ mosquitto_pub -h 192.168.1.100 -p 1883 \
     -q 1 -m '{}'
 ```
 
-若中央伺服器有 EMQX + TLS，加上 `--cafile <ca>.pem --tls-version tlsv1.2` 與正確帳密。
+若中央伺服器有 Mosquitto + TLS，加上 `--cafile <ca>.pem --tls-version tlsv1.2` 與正確帳密。
 
 **期望觀察：**
 
@@ -143,4 +143,4 @@ mosquitto_pub -h 192.168.1.100 -p 1883 \
 ## 相關文件
 
 - REST／WebSocket 端點請見 [API 參考](api.md)。
-- MQTT broker 加固與 EMQX 設定請見 [../../deploy/MQTT_SECURITY.md](../../deploy/MQTT_SECURITY.md)。
+- MQTT broker 加固與 Mosquitto 設定請見 [../../deploy/MQTT_SECURITY.md](../../deploy/MQTT_SECURITY.md)。

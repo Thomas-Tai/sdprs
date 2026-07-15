@@ -184,15 +184,17 @@ git add Dockerfile && git commit -m "add Dockerfile" && git push
 | Runtime 無錯誤日誌                                                                                            | 缺少 `PYTHONUNBUFFERED=1`                     | Dockerfile 加 `ENV PYTHONUNBUFFERED=1`                     |
 | `No module named 'asyncpg'`                                                                                 | 依賴未安裝                                      | 檢查 requirements.txt 含 asyncpg                             |
 
-**其三：EMQX TCP 端口連不上**
+**其三：Mosquitto TCP 端口連不上**
 
 ```bash
 # 在 Pi 上測試連線
 nc -zv hkg1.clusters.zeabur.com 34567
-# 如果超時，改用 WebSocket 模式：
-# mqtt_broker: "your-app.zeabur.app"
-# mqtt_port: 443
-# mqtt_use_tls: true
+# 亦可用 mosquitto_sub 測認證是否通過（要裝 mosquitto-clients）：
+mosquitto_sub -h hkg1.clusters.zeabur.com -p 34567 \
+    -u sdprs -P "<mosquitto-password>" \
+    -t '$SYS/broker/clients/connected' -C 1
+# Zeabur Public TCP 為純 TCP（無 TLS 包裝）；若端口在重新部署後變更，
+# 需重新對照 Zeabur 面板 Networking → Public TCP 顯示的新端口。
 ```
 
 **其四：儀表板 WebSocket 斷線**

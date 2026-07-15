@@ -67,8 +67,8 @@ DEFAULTS: Dict[str, Any] = {
         "api_key": "changeme-random-secret-key",
         "mqtt_broker": "central-server",
         "mqtt_port": 1883,
-        "mqtt_username": "",        # EMQX auth username (cloud deployment)
-        "mqtt_password": "",        # EMQX auth password (cloud deployment)
+        "mqtt_username": "",        # MQTT auth username (Zeabur Mosquitto)
+        "mqtt_password": "",        # MQTT auth password (Zeabur Mosquitto)
         "mqtt_use_tls": False,      # Enable TLS for MQTT connection (cloud)
     },
     "stream": {

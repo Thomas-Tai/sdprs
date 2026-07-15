@@ -210,6 +210,6 @@ sqlite3 /opt/sdprs/data/sdprs.db "PRAGMA wal_checkpoint(TRUNCATE);"
 13. **佔位密碼偵測** -- 伺服器啟動時自動檢查 .env 中是否仍使用預設佔位密碼，並發出警告
 14. **Zeabur 環境變數安全** -- 所有密鑰透過 Zeabur Variables 設定，禁止將 `changeme` 密鑰上傳至 GitHub
 15. **備份可用性驗證** -- 定期執行 `restore_to_zeabur.sh` 驗證備份檔案可屬恢復
-16. **EMQX 安全** -- 雲端 EMQX 建議啟用認證，禁用匿名登入
+16. **Mosquitto 安全** — 雲端 Mosquitto 建議啟用認證，禁用匿名登入（在 Zeabur `mosquitto` 服務的 Variables 設定 `MQTT_USERNAME`/`MQTT_PASSWORD`，容器 `entrypoint.sh` 會用 `mosquitto_passwd -U` 雜湊寫入 passwd 檔；預設已內建於 `deploy/mosquitto/`）
 
 > MQTT broker 加固步驟詳見 [MQTT_SECURITY](../../deploy/MQTT_SECURITY.md)。
