@@ -21,6 +21,25 @@ sudo git clone https://github.com/Thomas-Tai/sdprs.git /opt/sdprs
 
 > **替代：** 開發機上有 LAN 連線時可改用 `cd sdprs/scripts && SDPRS_GLASS_HOST=<pi-ip> ./deploy_sync.sh init-glass 01`，會用 rsync 同步並自動建環境，跳到步驟 4。
 
+## 步驟 1.5：Pi 5 CSI 攝像頭準備（Pi 4 可跳過）
+
+**2026-07-15 field-commissioning 學到的三個踩雷點**：
+
+**1. Pi 5 的 CAM 埠名稱跟直覺相反。** Pi 5 板上兩個 FPC 排線接口，**靠近 HDMI 那個** physically 是 `CAM/DISP 1`；靠近 USB stack 那個是 `CAM/DISP 0`。這跟 Pi 4 相反，也跟大多數操作者的直覺相反。
+
+**2. 別問 "camera 該插哪一孔" — 兩孔的 overlay 一起加進去就好。**  空的那個 slot probe 失敗會在 dmesg 產生 `imx219 10-0010: error -EREMOTEIO`，那是預期的無害雜訊，別當 bug 追。編輯 `/boot/firmware/config.txt`，在 `[all]` 區段底下追加：
+
+```
+dtoverlay=imx219,cam0
+dtoverlay=imx219,cam1
+dtparam=i2c_arm=on
+```
+（若使用其他 sensor：`imx477` 用 HQ Cam、`ov5647` 用 v1 module。）
+
+`sudo reboot` 後 `rpicam-hello --list-cameras` 應顯示 `imx219 [3280x2464]`。若仍 `No cameras available`：關電源、把排線兩端 latch 完全拉起 90 度，重新插到底、按 latch 均勻壓平（左右都要平）——這是 CSI 攝像頭 90% 的 "假故障" 原因。
+
+**3. Pi 5 上 `cv2.VideoCapture(0)` 不能開 CSI camera** — Pi 5 用 libcamera stack，`/dev/video0` 只是 raw CSI channel，不是可 grab 的 YUV 裝置。專案用 `edge_glass/utils/camera.py` 的 `open_camera()` 自動偵測 Pi 5 並改用 `picamera2` 後端；`setup_pi.sh` 已 `apt install python3-picamera2 libcamera-tools`，並用 `--system-site-packages` 建 venv 才能 import。此節點跑 `setup_pi.sh` 之前這些應已自動處理，只需先確認 `rpicam-hello --list-cameras` 有列出 sensor。
+
 ## 步驟 2：執行一鍵佈建腳本
 
 ```bash
