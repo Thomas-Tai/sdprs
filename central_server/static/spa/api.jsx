@@ -200,6 +200,10 @@
       snoozeMin: n.snoozed_until ? Math.max(0, Math.round((parseTs(n.snoozed_until) - Date.now()) / 60000)) : 0,
       visualHealth,
       audioHealth,
+      // Used by the tile view as an <img> cache-buster — changes each time the
+      // edge pushes a new snapshot, so the browser refetches only then. Null
+      // when the node has never uploaded a snapshot (offline / pump / new node).
+      snapshotTimestamp: n.snapshot_timestamp || null,
     };
   }
 

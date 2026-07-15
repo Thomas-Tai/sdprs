@@ -584,10 +584,22 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
             <Icon.BellOff size={9} strokeWidth={2.5}/>{node.snoozeMin}m
           </div>
         )}
-        {/* Center icon when no real frame */}
-        <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
-          {node.type === 'camera' ? <Icon.Camera size={48} strokeWidth={1}/> : <Icon.Droplet size={48} strokeWidth={1}/>}
-        </div>
+        {/* Real snapshot for camera nodes with a fresh frame; icon placeholder
+            for pumps, offline cameras, or brand-new nodes that have never uploaded.
+            Cache-buster uses snapshotTimestamp so the browser only refetches when
+            the edge pushes a new frame. object-cover preserves aspect ratio and
+            fills the aspect-video container without letterboxing. */}
+        {node.type === 'camera' && node.snapshotTimestamp && !frozen ? (
+          <img
+            src={`/api/edge/${node.id}/snapshot/latest?t=${encodeURIComponent(node.snapshotTimestamp)}`}
+            alt={`${node.name || node.id} snapshot`}
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
+            {node.type === 'camera' ? <Icon.Camera size={48} strokeWidth={1}/> : <Icon.Droplet size={48} strokeWidth={1}/>}
+          </div>
+        )}
         {/* Frozen overlay */}
         {frozen && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
