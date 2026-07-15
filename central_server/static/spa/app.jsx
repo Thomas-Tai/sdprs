@@ -519,10 +519,8 @@ function WallView({ alerts, liveSec, unackCount }) {
           {sorted.slice(0, 9).map(n => (
             <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
               <div className={`relative h-full snapshot-placeholder ${n.status === 'offline' ? 'snapshot-frozen' : ''}`}>
+                <SnapshotImage node={n} iconSize={64}/>
                 <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
-                <div className="absolute inset-0 flex items-center justify-center text-ink-muted/30">
-                  {n.type === 'camera' ? <Icon.Camera size={64} strokeWidth={1}/> : <Icon.Droplet size={64} strokeWidth={1}/>}
-                </div>
                 {n.status === 'offline' && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/40">
                     <div className="bg-sev-critical text-white text-base font-bold px-3 py-1 rounded">離線 {Math.floor(n.heartbeat/60)}m</div>

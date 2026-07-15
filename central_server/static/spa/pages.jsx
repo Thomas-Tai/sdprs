@@ -561,19 +561,6 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
   const frozen = node.status === 'offline' || node.upload > 60;
   const nodeAlerts = activeAlerts.filter(a => a.node === node.id);
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
-  // Snapshot refresh ticker — decoupled from the 20 s /api/nodes safety-net
-  // poll so the tile updates at ~1 Hz (matching the edge upload cadence). Each
-  // tick bumps a counter that becomes the img src cache-buster below, forcing
-  // the browser to refetch a fresh JPEG from /api/edge/{id}/snapshot/latest.
-  // Skipped entirely for pump nodes and offline/frozen cameras — those don't
-  // render an <img> tag so a tick would be wasted.
-  const wantsLiveImg = node.type === 'camera' && !frozen;
-  const [snapshotTick, setSnapshotTick] = React.useState(0);
-  React.useEffect(() => {
-    if (!wantsLiveImg) return;
-    const id = setInterval(() => setSnapshotTick(t => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [wantsLiveImg]);
   return (
     <div className={`bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors group cursor-pointer`} onClick={() => onSelect(node)}>
       <div className={`relative aspect-video snapshot-placeholder ${frozen ? 'snapshot-frozen' : ''}`}>
@@ -597,23 +584,11 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
             <Icon.BellOff size={9} strokeWidth={2.5}/>{node.snoozeMin}m
           </div>
         )}
-        {/* Real snapshot for live cameras; icon placeholder for pumps, offline
-            cameras, or brand-new nodes. Cache-buster uses snapshotTick (1 Hz
-            client-side ticker above) so the browser refetches at ~1 Hz to
-            match the edge's snapshot upload rate — decoupled from the 20 s
-            data poll that was making the tile feel stale. object-cover keeps
-            the IMX219 native aspect ratio without letterboxing. */}
-        {wantsLiveImg && node.snapshotTimestamp ? (
-          <img
-            src={`/api/edge/${node.id}/snapshot/latest?t=${snapshotTick}`}
-            alt={`${node.name || node.id} snapshot`}
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
-            {node.type === 'camera' ? <Icon.Camera size={48} strokeWidth={1}/> : <Icon.Droplet size={48} strokeWidth={1}/>}
-          </div>
-        )}
+        {/* Snapshot: live JPEG (camera + fresh frame) or fallback icon. All the
+            ticker + <img>/icon-fallback logic lives in SnapshotImage — shared
+            with the big monitor-wall view (app.jsx) and the node side panel
+            (components.jsx) so all three refresh at the same 1 Hz cadence. */}
+        <SnapshotImage node={node}/>
         {/* Frozen overlay */}
         {frozen && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">

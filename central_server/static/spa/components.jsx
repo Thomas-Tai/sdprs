@@ -53,6 +53,43 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
   );
 };
 
+// ---------- SnapshotImage — live camera frame or icon fallback ----------
+// Used by NodeCard tile (pages.jsx), the big monitor wall (app.jsx), and
+// the node detail side panel (components.jsx). Each slot needs the same
+// behaviour: show a live JPEG for cameras that have uploaded a snapshot,
+// fall back to an icon otherwise. Spawns a 1 Hz interval that bumps a
+// counter used as the img src cache-buster — decoupled from the /api/nodes
+// safety-net poll so refresh matches the edge upload rate. Ticker is gated
+// on wantsLiveImg so pump tiles and offline cameras don't run intervals
+// they'd only throw away.
+// Server encoding: picamera2's misnamed "RGB888" numpy array is already
+// B,G,R; the edge adapter passes it straight through to cv2.imencode.
+// If colours ever look magenta again, check edge_glass/utils/camera.py.
+const SnapshotImage = ({ node, iconSize = 48 }) => {
+  const frozen = node.status === 'offline' || node.upload > 60;
+  const wantsLiveImg = node.type === 'camera' && !frozen;
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    if (!wantsLiveImg) return;
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [wantsLiveImg]);
+  if (wantsLiveImg && node.snapshotTimestamp) {
+    return (
+      <img
+        src={`/api/edge/${node.id}/snapshot/latest?t=${tick}`}
+        alt={`${node.name || node.id} snapshot`}
+        className="absolute inset-0 w-full h-full object-cover"
+      />
+    );
+  }
+  return (
+    <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
+      {node.type === 'camera' ? <Icon.Camera size={iconSize} strokeWidth={1}/> : <Icon.Droplet size={iconSize} strokeWidth={1}/>}
+    </div>
+  );
+};
+
 // ---------- Detector Health — visual + audio detector status (cameras only) ----------
 // Surfaces an "online but unable to alert" camera: blinded/paused vision or a
 // dead/stale mic. Renders nothing for pump nodes.
@@ -768,11 +805,9 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
           <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
         </div>
         <div className="p-4 space-y-4">
-          {/* Snapshot */}
+          {/* Snapshot — live JPEG (camera + fresh frame) or fallback icon */}
           <div className="relative aspect-video bg-surface-base border border-border-subtle rounded overflow-hidden snapshot-placeholder">
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-ink-muted/40">
-              {node.type === 'camera' ? <Icon.Camera size={48} strokeWidth={1}/> : <Icon.Droplet size={48} strokeWidth={1}/>}
-            </div>
+            <SnapshotImage node={node}/>
             <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2">
               <div className="text-[10px] text-white/80 font-mono tnum">{node.location}</div>
             </div>
