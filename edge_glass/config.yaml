@@ -37,6 +37,7 @@ visual:
 
 # Audio detection settings
 audio:
+  enabled: true                       # false = skip PyAudio init entirely (avoid SEGV on hosts without a mic)
   device_index: 1                     # Audio device index
   mode: "adaptive"                    # "fixed" | "adaptive"
   sample_rate: 44100                  # Sample rate in Hz

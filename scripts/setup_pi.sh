@@ -24,6 +24,16 @@
 
 set -euo pipefail
 
+# ===== Repo self-location =====
+# When this script is executed from a cloned repo (`~/sdprs/scripts/setup_pi.sh`),
+# we can copy `edge_glass/` AND `shared/` from that repo into /opt/sdprs/ so
+# the operator doesn't have to remember two steps. If the script is run
+# stand-alone (e.g. curl-piped), REPO_ROOT will still point at its
+# directory's parent, and Step 4/6 will fall back to expecting files to be
+# there already.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # ===== 顏色定義 =====
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -184,7 +194,8 @@ apt-get install -y \
     python3-pip python3-venv python3-dev \
     portaudio19-dev libportaudio2 \
     ffmpeg autossh git avahi-daemon \
-    libopenjp2-7 libtiff6
+    libopenjp2-7 libtiff6 \
+    python3-picamera2 libcamera-tools
 
 # 建立 sdprs 用戶
 if ! id -u sdprs &>/dev/null; then
@@ -204,8 +215,10 @@ mkdir -p /opt/sdprs/edge_glass/buffer
 mkdir -p /opt/mediamtx
 
 # 建立 Python venv
+# --system-site-packages: 讓 venv 看得到 apt 裝的 python3-picamera2
+# (Pi 5 CSI camera 走 libcamera stack，picamera2 是 apt 專屬套件，pip 裝不了)
 echo "建立 Python 虛擬環境..."
-python3 -m venv /opt/sdprs/edge_glass/venv
+python3 -m venv --system-site-packages /opt/sdprs/edge_glass/venv
 
 # 安裝 Python 依賴
 echo "安裝 Python 套件..."
@@ -262,8 +275,16 @@ if [[ -d /opt/sdprs/edge_glass/.git ]]; then
 elif command -v git &>/dev/null && [[ -n "${GIT_REPO:-}" ]]; then
     echo "Clone repository..."
     git clone "${GIT_REPO}" /opt/sdprs/edge_glass
+elif [[ -d "${REPO_ROOT}/edge_glass" && -d "${REPO_ROOT}/shared" ]]; then
+    # 從腳本所在的 repo 複製 (最常見的操作路徑：
+    # git clone .../sdprs.git ~/sdprs && sudo ~/sdprs/scripts/setup_pi.sh ...)
+    # 必須複製 edge_glass/ **和** shared/ - shared 是 mqtt_topics 等共用
+    # 模組的家，缺了會拋 ModuleNotFoundError: No module named 'shared'.
+    echo "從本機 repo 複製檔案: ${REPO_ROOT}"
+    cp -a "${REPO_ROOT}/edge_glass/." /opt/sdprs/edge_glass/
+    cp -a "${REPO_ROOT}/shared"       /opt/sdprs/edge_glass/
 else
-    echo "假設檔案已在 /opt/sdprs/edge_glass/"
+    echo "假設檔案已在 /opt/sdprs/edge_glass/ (含 shared/ 子目錄)"
 fi
 
 if [[ "$MODE" == "lan" ]]; then
@@ -355,6 +376,20 @@ echo -e "${GREEN}[Step 5/6] 安裝 systemd 服務...${NC}"
 cp /opt/sdprs/edge_glass/systemd/sdprs-edge.service /etc/systemd/system/
 cp /opt/sdprs/edge_glass/systemd/autossh-tunnel.service /etc/systemd/system/
 cp /opt/sdprs/edge_glass/systemd/sdprs-edge-cloud.service /etc/systemd/system/
+
+# 把 sdprs-edge-cloud.service 裡的 __CLOUD_HEALTH_URL__ placeholder 換成
+# 實際 URL；否則 ExecStartPre 的 curl 全輪失敗，systemd 會在
+# TimeoutStartSec 時被砍掉，服務永遠啟不了。
+if [[ "$MODE" == "cloud" && -n "${CLOUD_URL:-}" ]]; then
+    # CLOUD_URL 已含 /api（例如 https://msc-sdprs.zeabur.app/api）
+    # 我們要 <base>/health，先剝去尾端斜線再串上 /health
+    CLEAN_URL="${CLOUD_URL%/}"
+    HEALTH_URL="${CLEAN_URL}/health"
+    # 用 | 當分隔符避開 URL 裡的 /
+    sed -i "s|__CLOUD_HEALTH_URL__|${HEALTH_URL}|g" \
+        /etc/systemd/system/sdprs-edge-cloud.service
+    echo "已替換 ExecStartPre health URL: ${HEALTH_URL}"
+fi
 
 # 安裝 curl（雲端模式 ExecStartPre 需要）
 apt-get install -y curl 2>/dev/null || true

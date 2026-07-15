@@ -5,7 +5,11 @@
 #   - 不依賴 autossh-tunnel.service（雲端模式無需 SSH 隧道）
 #   - 使用 config.zeabur.yaml（指向 Zeabur 伺服器）
 #
-# 安裝: sudo cp sdprs-edge-cloud.service /etc/systemd/system/
+# 安裝: setup_pi.sh --mode cloud --cloud-url <url> ... (推薦)
+#       手動安裝時，必須先將 __CLOUD_HEALTH_URL__ placeholder 換成實際
+#       health-check URL，否則 ExecStartPre 會 6 輪 curl 全部失敗然後
+#       被 TimeoutStartSec 砍掉。
+#
 # 啟用: sudo systemctl daemon-reload && sudo systemctl enable sdprs-edge-cloud
 # 啟動: sudo systemctl start sdprs-edge-cloud
 # 狀態: sudo systemctl status sdprs-edge-cloud
@@ -16,6 +20,10 @@ Description=SDPRS Edge Glass Detection Service (Zeabur Cloud)
 Documentation=https://github.com/Thomas-Tai/sdprs
 After=network-online.target
 Wants=network-online.target
+# systemd's start-rate limiter lives in [Unit], not [Service]; keeping it in
+# [Service] silently warns "Unknown key" and disables the guard.
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -28,15 +36,17 @@ WorkingDirectory=/opt/sdprs/edge_glass
 Environment=PYTHONUNBUFFERED=1
 Environment=CONFIG_FILE=/opt/sdprs/edge_glass/config.zeabur.yaml
 
-# 等待網路就緒（WiFi 可能啟動較慢）
-ExecStartPre=/bin/bash -c "for i in 1 2 3 4 5 6; do curl -sf --max-time 3 https://sdprs.zeabur.app/api/health && break || sleep 5; done || true"
+# 等待網路就緒（WiFi 可能啟動較慢）。__CLOUD_HEALTH_URL__ 由
+# setup_pi.sh 依 --cloud-url 參數在安裝時替換為
+# <cloud-url>/health（例如 https://msc-sdprs.zeabur.app/api/health）。
+ExecStartPre=/bin/bash -c "for i in 1 2 3 4 5 6; do curl -sf --max-time 3 __CLOUD_HEALTH_URL__ && break || sleep 5; done || true"
 
 ExecStart=/opt/sdprs/edge_glass/venv/bin/python edge_glass_main.py
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=10
-TimeoutStartSec=30
+# 6 * (3s curl + 5s sleep) = 48s worst-case in ExecStartPre; 30s here was
+# too tight and killed the pre-check before it could exit. 90s gives room.
+TimeoutStartSec=90
 TimeoutStopSec=30
 
 # Logging

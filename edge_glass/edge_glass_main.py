@@ -50,6 +50,7 @@ from buffer.circular_buffer import CircularBuffer
 from detectors.audio_detector import AudioDetector
 from detectors.trigger_engine import Event, TriggerEngine
 from detectors.visual_detector import VisualDetector
+from utils.camera import open_camera as _open_camera_backend
 from utils.config_loader import load_config
 from utils.event_capture import PendingEventTracker, slice_window, clamp_capture_window, EncodeWorker
 from utils.logger import setup as setup_logger
@@ -121,7 +122,7 @@ def start_audio_stream(
 
 
 def record_post_trigger(
-    camera: cv2.VideoCapture, seconds: int, fps: int
+    camera, seconds: int, fps: int
 ) -> List[Tuple[float, np.ndarray]]:
     """
     觸發後繼續錄製指定秒數。
@@ -149,24 +150,26 @@ def record_post_trigger(
     return frames
 
 
-def open_camera(cam_config: dict) -> "cv2.VideoCapture":
+def open_camera(cam_config: dict):
     """
     開啟攝像頭並套用解析度／幀率設定。
 
     初次開啟與失敗後重開皆使用此函式，確保重開後攝像頭參數一致，
     避免尺寸改變導致偵測器失效。
 
+    Backend picked by ``utils.camera.open_camera``:
+      * Raspberry Pi 5 → picamera2 (libcamera stack; cv2.VideoCapture
+        cannot drive the rp1-cfe capture pipeline).
+      * Anywhere else → cv2.VideoCapture (USB webcams, older Pi).
+
     Args:
         cam_config: 攝像頭配置（source / resolution / fps）
 
     Returns:
-        已套用設定的 OpenCV VideoCapture 實例
+        Camera object with cv2.VideoCapture-compatible ``read()``/``set()``/
+        ``get()``/``release()``/``isOpened()`` methods.
     """
-    cam = cv2.VideoCapture(cam_config["source"])
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, cam_config["resolution"][0])
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_config["resolution"][1])
-    cam.set(cv2.CAP_PROP_FPS, cam_config["fps"])
-    return cam
+    return _open_camera_backend(cam_config)
 
 
 def compute_audio_health(audio_stream_present: bool, audio_stale: bool) -> str:
@@ -328,7 +331,15 @@ def main():
     # ============ 啟動線程 ============
     
     # 啟動音訊串流 (Thread 2)
-    audio_stream = start_audio_stream(audio_detector, config["audio"])
+    # PortAudio segfaults (not a Python exception — cannot be try/except'd)
+    # when ``pa.open(input=True)`` is called on hardware with no capture
+    # devices. Guard the entire call with ``audio.enabled`` so Pi nodes
+    # without a USB mic can still run in visual-only mode.
+    if config["audio"].get("enabled", True):
+        audio_stream = start_audio_stream(audio_detector, config["audio"])
+    else:
+        logger.info("Audio disabled by config; running in visual-only mode")
+        audio_stream = None
 
     # 模擬觸發請求標誌（供 MQTT simulate_trigger 指令設定，主迴圈讀取）
     sim_request = [False]

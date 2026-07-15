@@ -25,6 +25,7 @@ visual:
   anomaly_recovery_seconds: 3          # 亮度異常後的恢復期（秒）
 
 audio:
+  enabled: false                       # cloud/lab Pi 5 typically lacks a mic; PortAudio SEGVs on empty ALSA. Set true after plugging in a USB mic.
   device_index: 0
   mode: "adaptive"
   sample_rate: 16000
