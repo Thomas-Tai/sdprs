@@ -58,7 +58,7 @@
 
    | 變數名稱           | 範例值                                     | 何時需要                                    |
    | ------------------ | ------------------------------------------ | ------------------------------------------- |
-   | `MQTT_BROKER`    | `mosquitto.zeabur.internal`              | 部署 Mosquitto 後填 **Private** hostname   |
+   | `MQTT_BROKER`    | `${MOSQUITTO_HOST}`                      | 部署 Mosquitto 後填；優先用 Zeabur 自動注入的 `${MOSQUITTO_HOST}`（會解析成 private hostname），退而求其次寫死 `mosquitto.zeabur.internal` |
    | `MQTT_PORT`      | `1883`                                   | Mosquitto TCP 端口                               |
    | `MQTT_USERNAME`  | `sdprs`                                  | Mosquitto 認證                                   |
    | `MQTT_PASSWORD`  | `<mqtt-password>`                        | Mosquitto 認證                                   |
@@ -66,6 +66,10 @@
 
    > **MVP 結論：** 只設前 4 個必填即可。MQTT 用 `connect_async()` 非阻塞，
    > 連不上不會 crash；ESP32 水泵或遠端控制才需要 MQTT。
+
+   > **`${MOSQUITTO_HOST}` 的優點：** Zeabur 在 mosquitto 服務部署後會自動在同專案其他服務暴露
+   > `MOSQUITTO_HOST` auto-generated 變數（即 `mosquitto.zeabur.internal`）。用 `${MOSQUITTO_HOST}`
+   > 引用比硬編碼字串更能適應 Zeabur 未來的 DNS 變動。
 
 ## 步驟 2：部署 PostgreSQL 資料庫（可選）
 
@@ -213,6 +217,42 @@ journalctl -u sdprs-edge-cloud -n 20 --no-pager
 
 見下方 [Zeabur 雲端備份管理](#zeabur-雲端備份管理)。
 
+## Zeabur 平台特性 / 已知問題（實測 2026-07-15）
+
+以下為在 Zeabur 上部署 SDPRS 時實際遇到的平台層級問題與繞道方案：
+
+### 1. Ghost 服務 / Pod（服務或 Pod 卡在刪除狀態）
+
+Zeabur 偶發性 bug：透過 Dashboard 或 CLI 刪除服務後，後端記錄仍存在，容器可能仍在跑（吃記憶體、佔用 auto-generated env vars）。刪除 API 回應 `service deletion already scheduled or service not found`，但實際沒生效。
+
+**症狀：**
+- 已刪除的服務仍在資源用量圖裡顯示 memory footprint
+- 已刪除的服務其 `<SVC>_HOST` 等 auto-generated env vars 仍出現在同專案其他服務的變數列表裡
+- Redeploy 後舊 Pod 沒被終止，新舊 Pod 並存
+
+**繞道：**
+- **短期：** 忽略 stale auto-generated env vars（本 repo 程式碼不會讀 `EMQX_HOST` 等未使用變數，harmless）。
+- **中期：** 到 [Zeabur Forum](https://zeabur.com/forum) 開 ticket 附上 project + service ID，請團隊手動清理 backend 狀態。
+- **長期防禦（已內建於本 repo）：** `central_server/services/mqtt_service.py` 用 `client_id=f"central_server_{hostname}_{pid}"` 而非固定字串，讓多個 sdprs-server pod 可共存在 broker 上不互踢（若真的 ghost pod 存在，會產生 N× 訊息處理，MVP 規模可接受）。
+
+### 2. Resource Limit UI 只暴露 limit，不暴露 request
+
+Zeabur Dashboard 的「Resource Limit」欄位對應 K8s 的 `limit`（硬上限），沒有暴露 `request`（保證下限，會決定 QoS tier）。這代表所有服務都是 `request=0` → BestEffort QoS → **在節點記憶體壓力下最先被 evict**。
+
+**影響：** 大型服務（如 EMQX 5.8 空載 200 MB）容易在跨服務記憶體壓力下被 kill。本 repo 選 Mosquitto（15 MB）而非 EMQX 就是為此。
+
+**繞道：** 若需要「即使發生記憶體壓力也不能被 kill」，需向 Zeabur 洽詢 dedicated node 方案。
+
+### 3. Mosquitto 2.1+ 密碼檔權限嚴格
+
+Mosquitto 2.1.2 拒絕載入 group-/world-readable 的 passwd 檔（日誌：`Warning: File has world readable permissions` 後直接 terminating）。本 repo `deploy/mosquitto/entrypoint.sh` 已內建修復：`umask 077` + 明確 `chown mosquitto:mosquitto`。**直接用 `deploy/mosquitto/` 部署即可，勿手工改 entrypoint。**
+
+### 4. Zeabur TCP 端口在重新部署後可能變更
+
+Mosquitto public TCP port（如 `:30471`）在服務重建後可能變成不同號碼。Pi/ESP32 若寫死舊 port 就會斷線。
+
+**繞道：** 在 Zeabur Networking 頁面把該端口設為 **Reserved Port** 鎖定；或用 CI 監控 port 變化並推送更新到邊緣節點。
+
 ## Zeabur 常見部署問題速查
 
 | 症狀                                                                                                          | 原因                                            | 解法                                                                               |
@@ -225,15 +265,32 @@ journalctl -u sdprs-edge-cloud -n 20 --no-pager
 | Central Server MQTT 連不上                                                                                    | `MQTT_BROKER=mosquitto` 但實際 hostname 不同  | 用 Networking 頁面的 **Private** hostname（如 `mosquitto.zeabur.internal`） |
 | 監控牆不自動刷新                                                                                              | WebSocket 用 `ws://` 但站點是 HTTPS           | 已修正為自動偵測 `wss://`；確認使用最新版代碼                                    |
 | 監控牆/節點數為 0                                                                                             | 無 MQTT 心跳                                    | 正常（MVP 方案 A）；監控牆透過快照數據顯示節點                                     |
+| `pydantic ValidationError` 或 DB 連線失敗，log 顯示 `${POSTGRESQL_PORT}` 未解析 | `DATABASE_URL` 用了 `${POSTGRESQL_*}`（多個 L） | Zeabur Marketplace image 暴露的是 `POSTGRES_*`（無 L）；改用 `${POSTGRES_HOST}` 等 |
+| Mosquitto crash loop：`password-file: Error: Unable to open pwfile`                                          | 密碼檔權限太寬（world-readable）或未 chown 給 mosquitto user | 直接用 `deploy/mosquitto/` 的 entrypoint.sh（已內建 `umask 077` + chown）；不要自己改 |
+| Mosquitto crash loop：`MQTT_USERNAME env var is required`                                                    | 忘了在 mosquitto 服務設 `MQTT_USERNAME`/`MQTT_PASSWORD` env vars | 在 **mosquitto 服務**（不是 sdprs-server）的 Variables 加上這兩個變數                |
+| sdprs-server 日誌不斷 `MQTT ... rc=7` + Mosquitto 日誌 `session taken over` 1 Hz 循環 | 兩個 sdprs-server pod 都用同一 `client_id` 互踢對方 | 本 repo `cc3b860` 起已用 unique client_id；若仍發生 → Zeabur ghost pod，見「平台已知問題 §1」 |
 
 ## 雲端部署驗證清單
 
-- [ ] `https://sdprs.zeabur.app/api/health` 回傳 `{"status": "healthy"}`
+- [ ] `https://<your-app>.zeabur.app/api/health` 回傳 `{"status": "healthy", ...}`
 - [ ] 儀表板（`/login`）可以成功登入
-- [ ] Pi 端 `journalctl` 看到 snapshot POST `204 No Content`
+- [ ] sdprs-server logs 出現 `Connected to MQTT broker successfully`（部署 Mosquitto 後）
+- [ ] Mosquitto logs 顯示 `Opening ipv4 listen socket on port 1883` + `mosquitto version X.Y.Z running`（無 crash loop）
+- [ ] **端到端 MQTT 煙霧測試**：從外部網路推一個假 heartbeat，驗證 server 收到並處理：
+
+  ```bash
+  # 需先安裝 mosquitto-clients（macOS: brew install mosquitto，Ubuntu: apt install mosquitto-clients）
+  mosquitto_pub -h <public-ip> -p <public-port> -u sdprs -P '<mqtt-password>' \
+      -t sdprs/edge/smoke_test_node/heartbeat \
+      -m '{"node_id":"smoke_test_node","timestamp":"2026-01-01T00:00:00Z","online":true}'
+  ```
+
+  在 Zeabur → sdprs-server → Logs，等 ~90 秒後應看到：
+  `Node smoke_test_node marked OFFLINE (no heartbeat for 92s)` → 表示 server 有收到、有寫入、有跑 offline detection timer。
+
+- [ ] Pi 端 `journalctl` 看到 snapshot POST `204 No Content`（部署攝影機 Pi 後）
 - [ ] 監控牆（`/monitor`）顯示 Pi 攝影機即時快照
 - [ ] 主控台（`/`）顯示節點: 1/1
-- [ ] 從本機執行 `mosquitto_sub -h <public-ip> -p <public-port> -u sdprs -P <pw> -t '$SYS/broker/clients/connected' -C 1` 顯示 ≥ 2（Pi + Central Server）
 - [ ] Pi 重啟後服務自動啟動：`systemctl is-enabled sdprs-edge-cloud` 顯示 `enabled`
 
 ---
