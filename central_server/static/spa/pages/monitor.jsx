@@ -2,7 +2,7 @@
 
 const { useState: useState_p } = React;
 
-const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
+const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
   const frozen = node.status === 'offline' || node.upload > 60;
   const nodeAlerts = activeAlerts.filter(a => a.node === node.id);
@@ -66,7 +66,7 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
             <div className="text-[10px] text-white/70">{node.name}</div>
           </div>
           <div className="font-mono text-[10px] text-white/60 tnum">
-            {new Date().toLocaleTimeString('zh-TW', { hour12: false })}
+            {new Date(now || Date.now()).toLocaleTimeString('zh-TW', { hour12: false })}
           </div>
         </div>
       </div>
@@ -117,6 +117,15 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
     const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
+  // Single page-level 1 Hz tick, passed down as `now` so every NodeCard's
+  // header timestamp re-renders alongside the SnapshotImage underneath
+  // (whose own ticker lives module-private in components.jsx). Without this
+  // the "last updated" label freezes for minutes.
+  const [now, setNow] = useState_p(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   // Filter nodes by tab
   const allNodes = window.NODES;
   const cameraNodes = allNodes.filter(n => n.type === 'camera');
@@ -196,7 +205,7 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
           </div>
         ) : tab === 'cameras' ? (
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-            {sorted.map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts}/>)}
+            {sorted.map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} now={now}/>)}
           </div>
         ) : (
           // 全部 — split per type, native cards per sensor
@@ -225,7 +234,7 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
                   {[...cameraNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
-                    .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts}/>)}
+                    .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} now={now}/>)}
                 </div>
               </div>
             )}

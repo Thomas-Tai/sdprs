@@ -20,9 +20,18 @@
     const ac = new AbortController();
     const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : FETCH_TIMEOUT_MS;
     const t = setTimeout(() => ac.abort(), timeoutMs);
+    // Compose the built-in timeout signal with any caller-supplied signal so
+    // a page-level AbortController (e.g. cancel-on-navigate) does NOT defeat
+    // the timeout. If the runtime lacks AbortSignal.any (all evergreen
+    // browsers ship it since 2024), fall back to letting the timeout win —
+    // i.e. spread opts BEFORE signal so opts.signal can't override it.
+    const callerSignal = opts && opts.signal;
+    const signal = (callerSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function')
+      ? AbortSignal.any([ac.signal, callerSignal])
+      : ac.signal;
     let res;
     try {
-      res = await fetch(path, { credentials: 'same-origin', signal: ac.signal, ...opts });
+      res = await fetch(path, { credentials: 'same-origin', ...opts, signal });
     } catch (e) {
       if (e && e.name === 'AbortError') {
         const err = new Error('timeout after ' + timeoutMs + 'ms on ' + path);
@@ -39,8 +48,23 @@
       throw new Error('unauthorized');
     }
     if (!res.ok) {
-      const err = new Error('HTTP ' + res.status + ' on ' + path);
+      // Read the response body so FastAPI's structured `{ detail: '...' }`
+      // (e.g. "already resolved by alice at 14:32" on a 409 race) reaches the
+      // operator's toast instead of the opaque "HTTP 409 on /api/…" default.
+      // Guard for non-JSON error pages (proxy 502/504 HTML) via .text().
+      const ct2 = res.headers.get('content-type') || '';
+      let body = null;
+      if (ct2.includes('application/json')) {
+        body = await res.json().catch(() => null);
+      } else {
+        body = await res.text().catch(() => null);
+      }
+      const detail = (body && typeof body === 'object' && typeof body.detail === 'string')
+        ? body.detail : null;
+      const err = new Error('HTTP ' + res.status + ' on ' + path + (detail ? ': ' + detail : ''));
       err.status = res.status;
+      err.detail = detail;
+      err.body = body;
       throw err;
     }
     if (res.status === 204) return null;
@@ -651,16 +675,21 @@
   //
   // Two call shapes for backward compat:
   //   openSocket({ onNewAlert, onEvent })   — new contract
-  //   openSocket(fn)                        — legacy; fn treated as onNewAlert
+  //   openSocket(fn)                        — legacy; fn treated as onEvent
   //
   // `onNewAlert(alertObj)` fires for `new_alert` (alert is mapAlert-normalised).
   // `onEvent(type, data)` fires for the 5 telemetry types above. `ping` is
   // handled internally. Auto-reconnects with exponential backoff (max 15s).
   function openSocket(arg) {
-    let onNewAlert = null, onEvent = null;
+    // Legacy positional callers passed a single fn for telemetry (onEvent).
+    // Routing it to onEvent — not onNewAlert — is what preserves ack/resolve
+    // echoes, node-status flips, and auth_expired (drops here caused mystery
+    // /login redirects). new_alert reaches legacy pages via the DOM bridge.
     if (typeof arg === 'function') {
-      onNewAlert = arg; // legacy positional call
-    } else if (arg && typeof arg === 'object') {
+      arg = { onEvent: arg };
+    }
+    let onNewAlert = null, onEvent = null;
+    if (arg && typeof arg === 'object') {
       onNewAlert = typeof arg.onNewAlert === 'function' ? arg.onNewAlert : null;
       onEvent = typeof arg.onEvent === 'function' ? arg.onEvent : null;
     }
