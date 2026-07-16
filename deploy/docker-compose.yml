@@ -68,7 +68,11 @@ services:
       - "80:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ../storage:/var/www/storage:ro
+      # storage/ mount removed (SECURITY): nginx no longer serves /storage/
+      # publicly. Video/snapshot access goes through FastAPI's authenticated
+      # routes (/api/clips/, /api/snapshots/) via the existing `location /`
+      # proxy. Re-adding this mount without an `auth_request` subrequest
+      # would reintroduce the anonymous-download vulnerability.
     depends_on:
       - sdprs-app
     networks:
