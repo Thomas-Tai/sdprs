@@ -18,11 +18,13 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .api import alerts, snapshots, stream, nodes, weather, audit as audit_api, handover
@@ -150,6 +152,89 @@ async def lifespan(app: FastAPI):
 # bypassed .env loading and the placeholder-value warning)
 SECRET_KEY = get_settings().SECRET_KEY
 
+
+# ===== CSRF Origin gate (Auth-E1, 2026-07-16) =====
+# Defense-in-depth backup to the SessionMiddleware same_site="lax" cookie flag.
+# For POST/PUT/PATCH/DELETE requests to /api/* and /logout, require the Origin
+# (or Referer, as fallback) header to match the request's own scheme+host or a
+# host listed in the CSRF_TRUSTED_ORIGINS env var. This catches the residual
+# risks that a lax-samesite cookie alone does not: same-site subdomain XSS
+# forging cross-site POSTs, browser bugs leaking the cookie cross-site, or a
+# future middleware misconfig that flips same_site="none" without our noticing.
+#
+# The whole check is a bypass for GET/HEAD/OPTIONS (never mutating) and for the
+# /login endpoint itself (an unauthenticated form POST is the whole point).
+# A request that carries NEITHER Origin nor Referer is allowed through — a
+# curl script or server-rendered same-origin form legitimately lacks both, and
+# blanket-rejecting would break too many real clients. The lax same-site
+# cookie is still the primary CSRF defense; this middleware is the belt.
+class CSRFOriginMiddleware(BaseHTTPMiddleware):
+    """Reject cross-site mutating requests by comparing Origin/Referer to Host."""
+
+    _GUARDED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+    # /login is intentionally NOT guarded — see class docstring.
+    _BYPASS_PATHS = frozenset({"/login"})
+
+    def _guards_path(self, path: str) -> bool:
+        if path in self._BYPASS_PATHS:
+            return False
+        return path.startswith("/api/") or path == "/logout"
+
+    @staticmethod
+    def _normalize(url: str):
+        """Return canonical ``scheme://netloc`` (lowercased) or None on malformed input.
+
+        Parses the URL rather than string-matching — that is exactly the
+        naive-filter idiom CSRF-bypass tools defeat by prepending fake schemes
+        or embedding the allowed host in the path.
+        """
+        try:
+            parts = urlsplit(url)
+        except (ValueError, TypeError):
+            return None
+        if not parts.scheme or not parts.netloc:
+            return None
+        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in self._GUARDED_METHODS:
+            return await call_next(request)
+        if not self._guards_path(request.url.path):
+            return await call_next(request)
+
+        raw = request.headers.get("origin") or request.headers.get("referer")
+        # Neither header set: allow. Common for non-browser clients (curl,
+        # httpx without follow-redirects). See class docstring.
+        if not raw:
+            return await call_next(request)
+
+        origin_norm = self._normalize(raw)
+        if origin_norm is None:
+            return PlainTextResponse("CSRF: malformed origin", status_code=403)
+
+        # Same-origin allowlist: derived from the request's own Host header
+        # and URL scheme. This is what makes a same-origin browser POST work.
+        allowed = set()
+        host = request.headers.get("host", "").strip()
+        if host:
+            allowed.add(f"{request.url.scheme.lower()}://{host.lower()}")
+
+        # Optional extra trusted origins from env (comma-separated). For
+        # deployments that front the app under additional hostnames.
+        # Read at request time so operational rollout doesn't require restart.
+        for extra in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(","):
+            extra = extra.strip()
+            if not extra:
+                continue
+            n = self._normalize(extra)
+            if n:
+                allowed.add(n)
+
+        if origin_norm in allowed:
+            return await call_next(request)
+        return PlainTextResponse("CSRF: origin not allowed", status_code=403)
+
+
 # Create FastAPI application
 app = FastAPI(
     title="SDPRS Central Server",
@@ -171,6 +256,13 @@ app.add_middleware(
     # SessionMiddleware default (no parameter needed).
     https_only=get_settings().COOKIE_SECURE,
 )
+
+# CSRF gate is added AFTER SessionMiddleware in code order, which makes it the
+# OUTER middleware (Starlette's add_middleware inserts each new entry at the
+# front of the stack). Request flow: CSRFOriginMiddleware → SessionMiddleware
+# → route. This is what lets the CSRF check reject a cross-site POST before
+# any route dependency (get_current_user, DB access, etc.) even runs.
+app.add_middleware(CSRFOriginMiddleware)
 
 # Get the directory where this file is located
 BASE_DIR = Path(__file__).resolve().parent
@@ -263,6 +355,15 @@ async def login(request: Request):
 
     if locked:
         # Too many recent failures from this IP: reject before touching creds.
+        # Auth-I2 (2026-07-16): persist the lockout hit itself. Fires ONCE per
+        # attempt-while-locked, which is noisy for a persistent attacker — but
+        # the noise IS the signal here: operators reviewing the audit trail
+        # see the lockout rows pile up and can identify the source IP.
+        # log_action failure must NOT be swallowed at this call site: the
+        # audit log is a security invariant, and hiding lockout events would
+        # defeat the purpose of persisting them.
+        from .services.audit_service import log_action, ACTION_LOGIN_LOCKED
+        log_action(username or "<empty>", ACTION_LOGIN_LOCKED, target_id=ip)
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -283,6 +384,14 @@ async def login(request: Request):
     # Record this failure against the IP.
     with _login_attempts_lock:
         _login_attempts.setdefault(ip, []).append(now)
+
+    # Auth-I1 (2026-07-16): persist the failed-login event alongside the
+    # in-memory throttle counter. Grep-across-app-logs forensics is fragile —
+    # the operator_actions table is the durable source. Do NOT log the
+    # password or the full form body here (would leak credential material
+    # into the audit surface).
+    from .services.audit_service import log_action, ACTION_LOGIN_FAILED
+    log_action(username or "<empty>", ACTION_LOGIN_FAILED, target_id=ip)
 
     return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤"})
 

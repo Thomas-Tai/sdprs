@@ -18,6 +18,13 @@ logger = logging.getLogger("audit_service")
 # Action-type constants. Defining them here keeps callers from drifting.
 ACTION_LOGIN          = "LOGIN"
 ACTION_LOGOUT         = "LOGOUT"
+# Auth-I1 / Auth-I2 (2026-07-16): persist failed-login and lockout events
+# to the audit trail so forensics does not have to grep across app logs.
+# LOGIN_FAILED fires once per wrong-credential attempt; LOGIN_LOCKED fires
+# once per attempt-while-already-locked-out (the noise IS the signal — an
+# operator sees the lockout rows pile up when a bot is hammering the door).
+ACTION_LOGIN_FAILED   = "LOGIN_FAILED"
+ACTION_LOGIN_LOCKED   = "LOGIN_LOCKED"
 ACTION_ACKNOWLEDGE    = "ACKNOWLEDGE"
 ACTION_RESOLVE        = "RESOLVE"
 ACTION_BULK_RESOLVE      = "BULK_RESOLVE"
@@ -248,6 +255,7 @@ def _pg_snooze_provenance_sync(node_ids: List[str]) -> List[Dict[str, Any]]:
 __all__ = [
     "log_action", "list_actions", "get_snooze_provenance",
     "ACTION_LOGIN", "ACTION_LOGOUT",
+    "ACTION_LOGIN_FAILED", "ACTION_LOGIN_LOCKED",
     "ACTION_ACKNOWLEDGE", "ACTION_RESOLVE", "ACTION_BULK_RESOLVE",
     "ACTION_BULK_ACKNOWLEDGE",
     "ACTION_SNOOZE", "ACTION_UNSNOOZE",
