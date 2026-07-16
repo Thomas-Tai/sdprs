@@ -147,5 +147,30 @@ Shipped 2026-07-16 (5 file-scoped fix agents: 2 Claude · 2 GLM · 1 Claude inli
 | Weather nulls + node-panel save race | `0d8f865` | C5, C6 |
 
 Deferred (tracked separately, not in this slice):
-- Keyboard shortcuts `A/R/S` in `app.jsx` bypass the new busy guard added inside `AlertDetail` — flagged out-of-scope during the alerts fix; needs a companion patch to route through `guardedSnooze`/equivalent.
+- Keyboard shortcuts `A/R/S` in `app.jsx` bypass the new busy guard added inside `AlertDetail` — flagged out-of-scope during the alerts fix; needs a companion patch to route through `guardedSnooze`/equivalent. **Shipped `9721e9c` (2026-07-16)** — busy-guard hoisted into App state so keyboard A/R and click-driven Ack/Resolve share the same guard.
 - All remaining HIGH items outside the alerts cluster + all MEDIUM/LOW findings.
+
+### HIGH-slice follow-up (6 file-scoped agents, all Claude — 2026-07-16)
+
+Shipped as 6 file-scoped `fix(spa)` commits + 1 `security(auth)` (Agent 3 revealed a matching backend gap on `/login?next=`). Full dispatch was file-disjoint per the entry-27 pattern; all six agents returned cleanly; integration was diff-verified against each finding's `failure_scenario` before commit.
+
+| Slice | Commit | Findings |
+|---|---|---|
+| `handover.jsx` draft rescue + `weather.jsx` null bars + `audit.jsx` CSV busy-guard | `390622d` | Data-render H-2, H-3, H-4 |
+| `status.jsx` per-row snooze busy-guard + `pumps.jsx` offline-first tone | `0912d4f` | Buttons-lie H-1, H-2 |
+| `alerts.jsx` ghost selection + SnoozeMenu key-bubble + a11y nesting | `5b2f69a` | Selection H-1, H-2, H-3 |
+| `app.jsx` cross-login state carrier + IME/palette guards + `/login?next=` backend + login.html + regression test | `163e399` | Session/auth H-1..H-4 |
+| `api.jsx` FastAPI-detail surfacing + AbortSignal.any + openSocket contract + `monitor.jsx` 1Hz tick | `a6046e6` | API/WS H-1..H-4 |
+| `components.jsx` SnapshotImage 304 + MuteDrawer truth-in-labeling + NodeSidePanel div-guard | `8ac7d67` | Selection/desync H-1..H-5 |
+
+Backend `/login` `?next=` support (added in `163e399`) closes an open-redirect vector that the SPA carrier would have otherwise exposed: `_safe_next_path()` rejects any absolute URL, protocol-relative (`//evil.com`), backslash-normalisation prefix (`/\evil.com`), or non-empty scheme/netloc; 12 new regression cases in `test_auth_persistence_and_csrf.py` (22 passed total).
+
+Deferred adjacent bugs surfaced during agent runs (tracked, not in this slice):
+- `pages/pumps.jsx` still renders `p.level` numerically on an offline card (tone is now stale but the number is still shown as-is); needs an "—" or stale-tag substitution.
+- `runRefreshAfterBulk` in `alerts.jsx` swallows errors — surfaced during the H-1 selection intersection review.
+- `monitor.jsx:59` prints `水位 null%` when pumps have no telemetry; needs the same "—" fallback as Agent 6's weather bars.
+- `MonitorPage` reads `window.NODES` directly instead of via the React `nodes` state prop; benign today (parent re-renders trigger reflow) but bypasses the load-bearing setNodes contract.
+- `ShiftBanner` mislabels `s.warn` as `s.snoozed` in one badge — trivial swap.
+- VolumeSlider is a UI-only placebo; no wiring to `SDPRS_AUDIO.setVolume` outside MuteDrawer.
+- `handover.jsx writeGeneratedSummary` prints `undefined` when a section is missing.
+- Weather rain-unit inconsistency (`mm` vs `mm/h`) between the top-strip and forecast bars.
