@@ -549,8 +549,14 @@
   async function refreshLive() {
     if (refreshLiveInFlight) return refreshLiveInFlight;
     refreshLiveInFlight = (async () => {
-      const results = await Promise.allSettled([loadNodes(), loadAlerts(), loadHistory(), loadRate()]);
-      const [nodes, alerts, history, rate] =
+      // weather + handover + audit added 2026-07-16: previously initial-load
+      // only, so post-503 weather recovery, peer-operator handover edits, and
+      // audit rows stayed stale until page reload.
+      const results = await Promise.allSettled([
+        loadNodes(), loadAlerts(), loadHistory(), loadRate(),
+        loadWeather(), loadHandover(), loadAudit(),
+      ]);
+      const [nodes, alerts, history, rate, weather, handover, audit] =
         results.map((r) => (r.status === 'fulfilled' ? r.value : null));
       if (nodes) window.NODES = nodes;
       if (alerts) window.ALERTS = alerts;
@@ -559,12 +565,18 @@
         window.NODE_HISTORY = buildNodeHistory(history);
       }
       if (rate) window.ALERT_RATE = rate;
+      if (weather) window.WEATHER = weather;
+      if (handover) window.HANDOVER = handover;
+      if (audit) window.AUDIT = audit;
       window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
       return {
         nodes: window.NODES,
         alerts: window.ALERTS,
         history: window.HISTORY_ALERTS,
         rate: window.ALERT_RATE,
+        weather: window.WEATHER,
+        handover: window.HANDOVER,
+        audit: window.AUDIT,
       };
     })()
       .catch((err) => {
@@ -576,6 +588,9 @@
           alerts: window.ALERTS,
           history: window.HISTORY_ALERTS,
           rate: window.ALERT_RATE,
+          weather: window.WEATHER,
+          handover: window.HANDOVER,
+          audit: window.AUDIT,
         };
       })
       .finally(() => { refreshLiveInFlight = null; });
@@ -603,13 +618,15 @@
   const bulkResolveAlerts = (ids, note) => apiFetch('/api/alerts/bulk-resolve',
     jsonBody('POST', { ids: ids || [], note: note || null }));
 
-  // Audit CSV export — HEAD preflight to detect 403/401 (otherwise the
-  // browser would silently "download" the JSON error body as a .csv file
-  // and the caller's `await` would resolve with success). Server sets
-  // Content-Disposition on GET, so on preflight-success we hand off to a
-  // plain anchor click: keeps the session cookie, lets the browser handle
-  // the save dialog, and avoids the memory cost of fetch→blob→createObjectURL
-  // for large exports.
+  // Audit CSV export — preflight against the sibling GET /api/audit endpoint
+  // (same admin-only gate as export.csv, see api/audit.py) to detect 401/403
+  // BEFORE the anchor-click download, otherwise the browser would silently
+  // "download" the JSON error body as a .csv file and the caller's `await`
+  // would resolve with success. HEAD is unusable here because FastAPI's
+  // APIRouter.get does not auto-implement HEAD and returns 405. On success
+  // we hand off to a plain anchor click: keeps the session cookie, lets the
+  // browser handle the save dialog, and avoids the memory cost of
+  // fetch→blob→createObjectURL for large exports.
   async function exportAuditCsv(opts) {
     const o = opts || {};
     const params = new URLSearchParams();
@@ -624,10 +641,14 @@
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
 
-    const head = await fetch(url, { method: 'HEAD', credentials: 'same-origin' });
-    if (!head.ok) {
-      const err = new Error('audit export failed: ' + head.status);
-      err.status = head.status;
+    // apiFetch handles 401 (redirects to /login) and re-throws non-2xx with
+    // `.status` attached, so a 403 non-admin surfaces to the caller's toast.
+    try {
+      await apiFetch('/api/audit?limit=1');
+    } catch (e) {
+      const err = new Error('audit export failed: ' + (e && e.status != null ? e.status : (e && e.message) || 'unknown'));
+      err.status = (e && e.status) || 0;
+      err.cause = e;
       throw err;
     }
 
@@ -674,12 +695,14 @@
   // Opens the live event socket.
   //
   // Two call shapes for backward compat:
-  //   openSocket({ onNewAlert, onEvent })   — new contract
-  //   openSocket(fn)                        — legacy; fn treated as onEvent
+  //   openSocket({ onNewAlert, onEvent, onPing })   — new contract
+  //   openSocket(fn)                                — legacy; fn treated as onEvent
   //
   // `onNewAlert(alertObj)` fires for `new_alert` (alert is mapAlert-normalised).
-  // `onEvent(type, data)` fires for the 5 telemetry types above. `ping` is
-  // handled internally. Auto-reconnects with exponential backoff (max 15s).
+  // `onEvent(type, data)` fires for the 5 telemetry types above. `onPing()`
+  // fires on every keepalive so callers (e.g. app.jsx liveSec) can reset a
+  // staleness timer without leaking `ping` into the general event whitelist.
+  // Auto-reconnects with exponential backoff (max 15s).
   function openSocket(arg) {
     // Legacy positional callers passed a single fn for telemetry (onEvent).
     // Routing it to onEvent — not onNewAlert — is what preserves ack/resolve
@@ -688,10 +711,11 @@
     if (typeof arg === 'function') {
       arg = { onEvent: arg };
     }
-    let onNewAlert = null, onEvent = null;
+    let onNewAlert = null, onEvent = null, onPing = null;
     if (arg && typeof arg === 'object') {
       onNewAlert = typeof arg.onNewAlert === 'function' ? arg.onNewAlert : null;
       onEvent = typeof arg.onEvent === 'function' ? arg.onEvent : null;
+      onPing = typeof arg.onPing === 'function' ? arg.onPing : null;
     }
 
     let ws = null, closed = false, retry = 1000;
@@ -711,7 +735,7 @@
         let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
         const type = msg && msg.type;
         if (!type) return;
-        if (type === 'ping') return; // keepalive; never surface
+        if (type === 'ping') { if (onPing) { try { onPing(); } catch (_) {} } return; } // keepalive; surfaced only via onPing so callers can reset liveSec without whitelisting 'ping'
         try {
           if (type === 'new_alert') {
             if (onNewAlert) {
