@@ -137,7 +137,7 @@ const AuditPage = () => {
                 <tr key={i} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60">
                   <td className="px-4 py-2 font-mono text-ink-muted">{a.t}</td>
                   <td className="px-4 py-2 font-mono">
-                    <span className={a.by === 'system' ? 'text-ink-muted' : a.by === 'alice' ? 'text-sev-info font-semibold' : 'text-ink-primary'}>{a.by}</span>
+                    <span className={a.by === 'system' ? 'text-ink-muted' : (_sessionUser && a.by === _sessionUser) ? 'text-sev-info font-semibold' : 'text-ink-primary'}>{a.by}</span>
                   </td>
                   <td className="px-4 py-2">
                     <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border bg-sev-${m.tone}/15 text-sev-${m.tone} border-sev-${m.tone}/30 font-medium`}>

@@ -257,10 +257,6 @@ function App({ initialError = null }) {
           // Server sent {type:'auth_expired'} right before its 1008 close.
           // Do NOT scheduleRefresh() — the socket is about to close and any
           // fetch will 401. Show the blocking modal and halt reconnect thrash.
-          // NOTE (dashboard-audit-2026-07-16): api.jsx's _WS_EVENT_TYPES
-          // whitelist currently doesn't include 'auth_expired', so this branch
-          // won't fire until a follow-up slice adds it to that set (or routes
-          // auth_expired to onEvent directly). Wiring is otherwise complete.
           setSessionExpired(true);
           if (wsStopRef.current) { wsStopRef.current(); wsStopRef.current = null; }
           return;

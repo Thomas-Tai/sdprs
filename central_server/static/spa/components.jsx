@@ -26,7 +26,7 @@ const safeDetectorHealthMeta = (v) => {
   return meta[v] || meta.unknown || { label: v || '未知', tone: 'muted' };
 };
 
-// Expose the safe helpers so pages.jsx / app.jsx call sites (rendered rows,
+// Expose the safe helpers so pages/* / app.jsx call sites (rendered rows,
 // wall-view ticker, alert-detail header) don't crash on unknown severities.
 window.safeSevMeta = safeSevMeta;
 window.safeStateMeta = safeStateMeta;
@@ -82,7 +82,7 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
 };
 
 // ---------- SnapshotImage — live camera frame or icon fallback ----------
-// Used by NodeCard tile (pages.jsx), the big monitor wall (app.jsx), and
+// Used by NodeCard tile (pages/monitor.jsx), the big monitor wall (app.jsx), and
 // the node detail side panel (components.jsx). Each slot needs the same
 // behaviour: show a live JPEG for cameras that have uploaded a snapshot,
 // fall back to an icon otherwise.
@@ -536,7 +536,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // back to window.NODES only if the caller didn't wire it up. Callers should
   // pass `nodes={nodes}` from useState so refreshes reach the drawer.
   // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
-  // call site (app.jsx / pages.jsx) passes the `nodes` prop.
+  // call site (app.jsx / pages/*) passes the `nodes` prop.
   const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
   const activeCount = (muteState.global ? 1 : 0) + muteState.nodes.length + (muteState.lightning ? 1 : 0);
   const nearestKm = window.WEATHER?.lightning?.nearest;
@@ -861,7 +861,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   // Prefer React-state nodes from the caller; window.NODES is a stale-read
   // fallback for legacy call sites.
   // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
-  // call site (app.jsx / pages.jsx) passes the `nodes` prop.
+  // call site (app.jsx / pages/*) passes the `nodes` prop.
   const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
 
   // Build searchable items
