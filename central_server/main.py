@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -30,13 +30,7 @@ from .services.websocket_service import router as ws_router
 from .services.mqtt_service import init_mqtt_service, get_mqtt_service
 from .services.retention_service import setup_retention_scheduler
 from .services.weather_service import init_weather_service, get_weather_service
-from .database import (
-    init_db as db_init_db, close_db as db_close_db,
-    get_all_events, get_events_by_status, get_event,
-    get_all_nodes, get_pending_alert_ids, get_effective_handover_note,
-)
-from .services.event_service import get_event_counts, list_events
-import time as _time
+from .database import init_db as db_init_db, close_db as db_close_db
 from .config import get_settings
 from .auth import authenticate_user
 from .timeutil import utcnow
@@ -216,61 +210,12 @@ app.include_router(ws_router)
 
 
 # ===== Dashboard Page Routes =====
-
-def _get_dashboard_context(request: Request) -> dict:
-    """Build common template context for dashboard pages."""
-    mqtt_svc = get_mqtt_service()
-    node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
-
-    # Also count nodes that have snapshots but no MQTT heartbeat
-    snapshots = getattr(request.app.state, "latest_snapshots", {})
-    snapshot_only_nodes = {nid for nid in snapshots if nid not in node_states}
-
-    online_count = sum(1 for s in node_states.values() if s.get("status") == "ONLINE")
-    online_count += len(snapshot_only_nodes)  # snapshot = online
-    offline_count = sum(1 for s in node_states.values() if s.get("status") == "OFFLINE")
-    total_nodes = len(node_states) + len(snapshot_only_nodes)
-    pump_active = sum(
-        1 for s in node_states.values()
-        if s.get("type") == "pump" and s.get("pump_state") == "ON"
-    )
-
-    counts = get_event_counts()
-
-    # IDs of alerts currently demanding operator action (PENDING with no ack yet).
-    # Used by item-3 audio loop to seed initial state — without this, an operator
-    # opening the dashboard mid-storm would hear no audio for already-queued alerts.
-    unacked_alert_ids = get_pending_alert_ids()
-
-    # Item 16: handover note. Cheap to read on every page (single row).
-    # The 24hr read-time TTL lives in database.get_effective_handover_note()
-    # — one implementation shared with api/handover.py, not an inline copy.
-    handover_note = {"note": "", "author": None, "updated_at": None}
-    try:
-        row = get_effective_handover_note()
-        if row and not row["expired"]:
-            handover_note = {"note": row["note"], "author": row["author"], "updated_at": row["updated_at"]}
-    except Exception as e:
-        logger.debug(f"Handover note read failed (non-fatal): {e}")
-
-    # Item 18: surface session expiry to the client so it can warn at T-5min.
-    settings = get_settings()
-    session_max_age_s = 24 * 3600
-    login_at_iso = (request.session.get("login_at") if hasattr(request, "session") else None) or ""
-
-    return {
-        "pending_count": counts.get("pending", 0) + counts.get("pending_video", 0),
-        "resolved_count": counts.get("resolved", 0),
-        "acknowledged_count": counts.get("acknowledged", 0),
-        "online_count": online_count,
-        "offline_count": offline_count,
-        "total_nodes": total_nodes,
-        "pump_active_count": pump_active,
-        "unacked_alert_ids": unacked_alert_ids,
-        "handover_note": handover_note,
-        "session_login_at": login_at_iso,
-        "session_max_age_s": session_max_age_s,
-    }
+#
+# The V2 SPA at `/` is the single dashboard front-end. The legacy Jinja
+# dashboard (base.html + 5 pages, plus static/js/dashboard.js and monitor.js)
+# was retired 2026-07-16 — SPA covers every page it did (alerts / monitor /
+# status / audit) plus new pages (pumps / weather / handover). Legacy routes
+# 301-redirect below so any lingering browser bookmarks still land on the SPA.
 
 
 # ===== Login throttle (per-process, in-memory) =====
@@ -396,9 +341,6 @@ async def dashboard_page(request: Request):
     The dashboard is now a React single-page app under /static/spa. This
     route returns the SPA index.html with the logged-in username injected
     so the client-side data layer can use it. All data comes from /api/*.
-
-    The legacy Jinja dashboard logic is kept available at /dashboard-legacy
-    so previously-bookmarked links / saved searches still work.
     """
     user = request.session.get("user")
     if not user:
@@ -409,161 +351,38 @@ async def dashboard_page(request: Request):
     return HTMLResponse(html)
 
 
-@app.get("/dashboard-legacy", response_class=HTMLResponse)
-async def dashboard_page_legacy(request: Request, status: str = None, node: str = None, page: int = 1):
-    """Legacy Jinja dashboard (preserved for direct links from before the V2 rollout)."""
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
+# ---- Legacy dashboard redirects (retired 2026-07-16) --------------------
+# 301 redirects preserve any browser bookmarks by pointing at the SPA.
+# The SPA is a single-URL app — deep-link into a page via hash-router only
+# (`/#monitor`, `/#audit`, `/#status`); external inbound links go to `/`
+# and land on the default alerts page.
 
-    ctx = _get_dashboard_context(request)
-
-    DEFAULT_ACTIVE_FILTER = "PENDING_VIDEO,PENDING,ACKNOWLEDGED"
-    if status is None:
-        effective_status = DEFAULT_ACTIVE_FILTER
-        display_status = DEFAULT_ACTIVE_FILTER
-    elif status == "all":
-        effective_status = None
-        display_status = "all"
-    else:
-        effective_status = status
-        display_status = status
-
-    result = list_events(status_filter=effective_status, node_filter=node, page=page, page_size=20)
-
-    ctx["events"] = result["items"]
-    ctx["total"] = result["total"]
-    ctx["total_pages"] = result["total_pages"]
-    ctx["current_page"] = result["page"]
-    ctx["current_status_filter"] = display_status
-    ctx["current_node_filter"] = node or ""
-
-    try:
-        all_nodes_db = get_all_nodes()
-        ctx["available_nodes"] = [n["node_id"] for n in all_nodes_db] if all_nodes_db else []
-    except Exception:
-        ctx["available_nodes"] = []
-
-    ctx["status_filter"] = status
-    return templates.TemplateResponse(request, "dashboard.html", ctx)
+@app.get("/dashboard-legacy")
+async def dashboard_legacy_redirect():
+    return RedirectResponse(url="/", status_code=301)
 
 
-@app.get("/alerts/{alert_id}", response_class=HTMLResponse)
-async def alert_detail_page(request: Request, alert_id: int):
-    """Alert detail page."""
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
-
-    event = get_event(alert_id)
-    if not event:
-        return RedirectResponse(url="/")
-
-    ctx = _get_dashboard_context(request)
-    ctx["event"] = event
-    return templates.TemplateResponse(request, "alert_detail.html", ctx)
+@app.get("/alerts/{alert_id}")
+async def alert_detail_legacy_redirect(alert_id: int):
+    # Old per-alert Jinja page (`/alerts/123`). SPA renders alerts on the
+    # default page; the specific ID can't be preserved without a hash-router
+    # deep-link contract, so we just land on the alerts list.
+    return RedirectResponse(url="/", status_code=301)
 
 
-@app.get("/monitor", response_class=HTMLResponse)
-async def monitor_page(request: Request):
-    """Monitoring wall page."""
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
-
-    ctx = _get_dashboard_context(request)
-
-    mqtt_svc = get_mqtt_service()
-    node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
-    snapshots = getattr(request.app.state, "latest_snapshots", {})
-
-    glass_nodes = []
-    for nid, state in node_states.items():
-        if state.get("type") != "glass":
-            continue
-        # Merge snapshot timestamp from latest_snapshots if available
-        snap_data = snapshots.get(nid)
-        node_dict = {"node_id": nid, **state}
-        if snap_data:
-            ts = snap_data.get("timestamp")
-            if ts:
-                # Append 'Z' to indicate UTC time for proper timezone conversion in JS
-                node_dict["snapshot_timestamp"] = ts.isoformat() + 'Z' if hasattr(ts, 'isoformat') else str(ts)
-        glass_nodes.append(node_dict)
-
-    # Also include nodes that have snapshots but no MQTT heartbeat yet
-    mqtt_node_ids = {n["node_id"] for n in glass_nodes}
-    for nid, snap_data in snapshots.items():
-        if nid not in mqtt_node_ids:
-            glass_nodes.append({
-                "node_id": nid,
-                "status": "ONLINE",
-                "type": "glass",
-                "snapshot_timestamp": snap_data.get("timestamp", ""),
-                "is_stale": False,
-            })
-
-    ctx["glass_nodes"] = glass_nodes
-    ctx["now_ts"] = int(_time.time())
-    return templates.TemplateResponse(request, "monitor.html", ctx)
+@app.get("/monitor")
+async def monitor_legacy_redirect():
+    return RedirectResponse(url="/", status_code=301)
 
 
-@app.get("/system", response_class=HTMLResponse)
-async def system_status_page(request: Request):
-    """System status page."""
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
-
-    ctx = _get_dashboard_context(request)
-
-    mqtt_svc = get_mqtt_service()
-    node_states = mqtt_svc.get_node_states() if mqtt_svc else {}
-
-    # Item 13/17/12: enrich with DB-backed columns (last_upload_at, snooze, battery)
-    db_nodes_by_id = {n["node_id"]: n for n in (get_all_nodes() or [])}
-
-    def _merge(nid: str, state: dict) -> dict:
-        merged = {"node_id": nid, **state}
-        db_row = db_nodes_by_id.get(nid) or {}
-        merged["last_upload_at"] = db_row.get("last_upload_at")
-        merged["snoozed_until"] = db_row.get("snoozed_until")
-        merged["snooze_reason"] = db_row.get("snooze_reason")
-        merged["battery_voltage"] = db_row.get("battery_voltage")
-        merged["power_source"] = db_row.get("power_source")
-        merged["location"] = db_row.get("location")
-        return merged
-
-    glass_nodes = [_merge(nid, state) for nid, state in node_states.items() if state.get("type") == "glass"]
-    pump_nodes = [_merge(nid, state) for nid, state in node_states.items() if state.get("type") == "pump"]
-
-    ctx["glass_nodes"] = glass_nodes
-    ctx["pump_nodes"] = pump_nodes
-    return templates.TemplateResponse(request, "system_status.html", ctx)
+@app.get("/system")
+async def system_legacy_redirect():
+    return RedirectResponse(url="/", status_code=301)
 
 
-@app.get("/audit", response_class=HTMLResponse)
-async def audit_page(request: Request, operator: str = None, action_type: str = None):
-    """Operator-action audit log (admin-only). Item 15."""
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
-    settings = get_settings()
-    if user != settings.DASHBOARD_USER:
-        # Non-admin sees a friendly 403 page rather than a raw error.
-        return HTMLResponse("<h1>403 Forbidden</h1><p>Admin only.</p>", status_code=403)
-
-    from .services.audit_service import list_actions
-    rows = list_actions(limit=200, operator=operator or None, action_type=action_type or None)
-    ctx = _get_dashboard_context(request)
-    ctx["rows"] = rows
-    ctx["operator"] = operator or ""
-    ctx["action_type"] = action_type or ""
-    ctx["action_types"] = [
-        "LOGIN", "LOGOUT", "ACKNOWLEDGE", "RESOLVE", "BULK_RESOLVE",
-        "SNOOZE", "UNSNOOZE", "LOCATION_EDIT", "HANDOVER_EDIT",
-    ]
-    return templates.TemplateResponse(request, "audit.html", ctx)
+@app.get("/audit")
+async def audit_legacy_redirect():
+    return RedirectResponse(url="/", status_code=301)
 
 
 # ===== Exception Handlers =====

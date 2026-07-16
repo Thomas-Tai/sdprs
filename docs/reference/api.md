@@ -115,14 +115,10 @@ Session cookie 認證；未登入自動跳 `/login`。
 
 | 方法    | 路徑                    | 認證          | 說明                                                        |
 | ------- | ----------------------- | ------------- | ----------------------------------------------------------- |
-| GET     | `/`                     | Session       | 現行 V2 SPA 入口（載入 `/static/spa/index.html`）           |
-| GET     | `/dashboard-legacy`     | Session       | 舊版 Jinja 儀表板保留頁                                     |
-| GET     | `/alerts/{alert_id}`    | Session       | 舊版警報詳情頁                                              |
-| GET     | `/monitor`              | Session       | 舊版監控牆                                                  |
-| GET     | `/system`               | Session       | 舊版系統狀態頁                                              |
-| GET     | `/audit`                | Admin Session | 稽核紀錄頁（非 admin 回 403 HTML）                          |
+| GET     | `/`                     | Session       | V2 SPA 入口（載入 `/static/spa/index.html`）                |
 | GET/POST | `/login`               | 無            | 登入頁 / 表單處理（IP 每 `LOGIN_LOCKOUT_SECONDS` 秒限 5 次） |
 | POST    | `/logout`               | Session       | 清除 session cookie 並記 audit                              |
+| GET     | `/dashboard-legacy` `/monitor` `/system` `/audit` `/alerts/{id}` | —  | 舊 Jinja 儀表板 301 → `/`（2026-07-16 淘汰，SPA 全面接手）  |
 
 ## WebSocket
 

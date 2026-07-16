@@ -5,8 +5,9 @@
 ← 返回[文件索引](../README.md)
 
 登入後 `/` 直接載入 V2 SPA（React 18 + Tailwind CDN，`central_server/static/spa/`）。
-所有資料透過 `/api/*` 讀取，變動事件透過 `/ws` WebSocket 推送。舊版 Jinja 儀表板保留在
-`/dashboard-legacy` 以支援既有書籤，但新功能只加在 V2。介面全繁體中文，桌面／4K 牆面／手機皆可用。
+所有資料透過 `/api/*` 讀取，變動事件透過 `/ws` WebSocket 推送。舊版 Jinja 儀表板已於
+2026-07-16 淘汰，舊路徑（`/dashboard-legacy` `/monitor` `/system` `/audit` `/alerts/{id}`）
+一律 301 重導向到 `/`。介面全繁體中文，桌面／4K 牆面／手機皆可用。
 
 ---
 
@@ -21,7 +22,6 @@
 | 天氣     | `/`（`weather`）    | `5`    | CWA／Open-Meteo 資料：風速／雨量／雷擊／36 小時預報（需 `CWA_API_KEY`）  |
 | 交接     | `/`（`handover`）   | `6`    | 班次交接備註（單筆全域 note，24 小時自動失效）＋歷史清單                 |
 | 稽核     | `/`（`audit`）      | `7`    | 操作稽核紀錄（僅 `DASHBOARD_USER` 可讀，其他人為空清單）                  |
-| 舊版儀表 | `/dashboard-legacy` | —      | Jinja 儀表板保留頁，功能凍結，僅供既有連結導向                            |
 | 登入／登出 | `/login` `/logout` | —      | Session Cookie（`sdprs_session`，24h），失敗五次鎖 5 分鐘                |
 
 > V2 SPA 內部以路由狀態切換頁面（單一 `/` URL），並非多個瀏覽器頁面。
@@ -127,7 +127,8 @@ Session Cookie 認證。SPA 每次事件都以 300ms trailing-debounce 合流，
 
 ---
 
-## 舊版儀表板（`/dashboard-legacy`）
+## 舊版儀表板（已淘汰）
 
-保留 Jinja 版本，路徑仍在，但功能不再新增。若既有 SOP、書籤或內嵌連結指向 `/`，
-V2 SPA 已自動接手；如需純表列渲染的舊介面，直接開啟 `/dashboard-legacy`。
+2026-07-16 已刪除 Jinja 版儀表板（`base.html` 及 5 個頁面、`dashboard.js` + `monitor.js`），
+既有 SOP／書籤指向 `/dashboard-legacy` `/monitor` `/system` `/audit` `/alerts/{id}` 者
+均以 301 導向 SPA 首頁 `/`；若需要特定頁面請登入後直接切換。
