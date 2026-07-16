@@ -321,10 +321,42 @@ _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
 
 
+def _safe_next_path(next_param: object) -> str:
+    """Open-redirect defense for the /login `?next=` redirect target.
+
+    Only accept plain LOCAL paths — must start with a single '/' and not with
+    the protocol-relative '//' or '/\\\\' prefixes (which some browsers
+    normalize to an off-site URL). Rejects anything with a scheme or netloc.
+    Fallback is '/', matching pre-2026-07-16 hard-coded behavior.
+
+    Added 2026-07-16 to complete the session-expiry state-carrier slice
+    (audit H-1). The SPA session-expiry modal encodes {page, selectedId,
+    hadDraft} into a `?sdprs_state=<base64>` query string on the target URL,
+    then hands it to `/login?next=<encoded target>`. Without honoring
+    `next`, the frontend round-trip was a no-op — every login landed on
+    `/` regardless of what the operator was doing when the session died.
+    """
+    if not next_param or not isinstance(next_param, str):
+        return "/"
+    if not next_param.startswith("/"):
+        return "/"
+    if next_param.startswith("//") or next_param.startswith("/\\"):
+        return "/"
+    from urllib.parse import urlparse
+    parsed = urlparse(next_param)
+    if parsed.scheme or parsed.netloc:
+        return "/"
+    return next_param
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    """Login page."""
-    return templates.TemplateResponse(request, "login.html")
+    """Login page. Preserves `?next=` into a hidden form input so the POST
+    round-trip carries it back. Jinja auto-escapes the value in the
+    rendered HTML; open-redirect validation is enforced at POST time via
+    `_safe_next_path` — GET-time echo is not a trust boundary."""
+    next_param = request.query_params.get("next", "")
+    return templates.TemplateResponse(request, "login.html", {"next": next_param})
 
 
 @app.post("/login")
@@ -338,6 +370,7 @@ async def login(request: Request):
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
+    next_param = form.get("next", "")
 
     settings = get_settings()
     max_attempts = getattr(settings, "LOGIN_MAX_ATTEMPTS", 5)
@@ -367,7 +400,7 @@ async def login(request: Request):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "嘗試次數過多，請稍後再試"},
+            {"error": "嘗試次數過多，請稍後再試", "next": next_param},
             status_code=429,
         )
 
@@ -379,7 +412,8 @@ async def login(request: Request):
         request.session["login_at"] = utcnow().isoformat()  # item 18
         from .services.audit_service import log_action, ACTION_LOGIN
         log_action(username, ACTION_LOGIN)
-        return RedirectResponse(url="/", status_code=303)
+        target = _safe_next_path(next_param)
+        return RedirectResponse(url=target, status_code=303)
 
     # Record this failure against the IP.
     with _login_attempts_lock:
@@ -393,7 +427,7 @@ async def login(request: Request):
     from .services.audit_service import log_action, ACTION_LOGIN_FAILED
     log_action(username or "<empty>", ACTION_LOGIN_FAILED, target_id=ip)
 
-    return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤"})
+    return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤", "next": next_param})
 
 
 @app.post("/api/session/extend")

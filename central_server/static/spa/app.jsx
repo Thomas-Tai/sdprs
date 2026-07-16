@@ -10,6 +10,29 @@ const DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "blue"
 }/*EDITMODE-END*/;
 
+// H-1: cross-login state carrier. Session-expiry redirect encodes {page,
+// selectedId, hadDraft} into `?sdprs_state=<base64>` on the post-login target
+// URL; on the fresh mount we decode, seed initial state, and strip the query
+// param so a reload doesn't re-apply stale state. Runs once at script load
+// (module IIFE) so the values are ready before App's useState initializers.
+// resolveNote is intentionally NOT preserved — round-tripping a free-form
+// operator note through the URL is a size + XSS risk not worth the payoff.
+const RESTORED_STATE = (function () {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('sdprs_state');
+    if (!raw) return null;
+    const parsed = JSON.parse(atob(raw));
+    params.delete('sdprs_state');
+    const newSearch = params.toString();
+    const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '') + window.location.hash;
+    window.history.replaceState(null, '', newUrl);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+})();
+
 function App({ initialError = null }) {
   const [tweaks, setTweak] = window.useTweaks(DEFAULTS);
 
@@ -18,7 +41,7 @@ function App({ initialError = null }) {
   // reads of window.ALERTS/NODES don't crash on undefined.
   const [bootstrapError, setBootstrapError] = useStateA(initialError);
 
-  const [page, setPageRaw] = useStateA('alerts');
+  const [page, setPageRaw] = useStateA(RESTORED_STATE?.page ?? 'alerts');
   const [pageHistory, setPageHistory] = useStateA([]); // for Alt+← back
   const [alerts, setAlerts] = useStateA(window.ALERTS ?? []);
   // load-bearing: setNodes() forces re-render so window.NODES reads pick up new data. DO NOT remove.
@@ -28,7 +51,7 @@ function App({ initialError = null }) {
   // events until re-opened. Hoist history into React state so refresh() /
   // WS events propagate to the panel automatically.
   const [nodeHistory, setNodeHistory] = useStateA(window.NODE_HISTORY ?? {});
-  const [selectedId, setSelectedId] = useStateA(window.ALERTS?.[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useStateA(RESTORED_STATE?.selectedId ?? window.ALERTS?.[0]?.id ?? null);
   const [liveSec, setLiveSec] = useStateA(0);
   const [shortcutsOpen, setShortcutsOpen] = useStateA(false);
   const [muteDrawerOpen, setMuteDrawerOpen] = useStateA(false);
@@ -409,6 +432,19 @@ function App({ initialError = null }) {
   const [resolveNote, setResolveNote] = useStateA('');
   useEffectA(() => { setResolveNote(''); }, [selectedId]);
 
+  // H-1: surface the restored-across-login state to the operator. Runs once
+  // on mount (deps are the stable showToast identity). If they had a resolve
+  // note in flight before the redirect, tell them explicitly — the draft was
+  // dropped on purpose (see RESTORED_STATE comment above).
+  useEffectA(() => {
+    if (!RESTORED_STATE) return;
+    if (RESTORED_STATE.hadDraft) {
+      showToast('登入前的草稿未保存', 'warn');
+    } else {
+      showToast('已回復先前頁面', 'info');
+    }
+  }, [showToast]);
+
   // Command palette command dispatch
   const onCmdkCommand = useCallbackA((id) => {
     if (id === 'mute-all') setMuteDrawerOpen(true);
@@ -426,13 +462,30 @@ function App({ initialError = null }) {
       // the effect so we don't tear/rebuild listeners on every mode toggle.
       if (tweaks.wallMode) return;
 
+      // H-4: IME composition guard. Bopomofo/Zhuyin/Cangjie/Pinyin deliver
+      // keydown during composition; without this, the first stroke of a
+      // Chinese sequence can trigger a shortcut mid-word. `isComposing` is
+      // the modern spec; `keyCode === 229` is Firefox's consumed-key sentinel
+      // (Firefox delivers keydown BEFORE the IME layer swallows it), so both
+      // are required for full coverage in a zh-TW deployment.
+      if (e.isComposing || e.keyCode === 229) return;
+
       const tag = e.target.tagName;
-      const inField = tag === 'INPUT' || tag === 'TEXTAREA';
+      // H-2: `isContentEditable` is the canonical DOM predicate — catches
+      // any element (e.g. a future handover rich-text editor); SELECT is
+      // added so browser type-to-jump inside a dropdown isn't hijacked.
+      // Shadow-DOM inputs are NOT caught here — that would need
+      // composedPath() traversal and we don't host web components today.
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable;
 
       // Cmd+K / Ctrl+K opens the palette from ANYWHERE, including inside inputs.
       // This is the one shortcut that must survive the inField guard below.
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
+        // H-3: the sessionExpired modal is blocking — palette-driven actions
+        // would fire 401s against the dead session, and the palette would
+        // paint on top of the login modal, producing a confusing UI state.
+        if (sessionExpired) return;
         setCmdkOpen(true);
         return;
       }
@@ -778,7 +831,22 @@ function App({ initialError = null }) {
               您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
             </p>
             <button
-              onClick={() => { window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname); }}
+              onClick={() => {
+                // H-1: preserve page + selectedId across the login roundtrip.
+                // Encoded into the post-login destination URL (not just the
+                // /login URL) so the redirect back carries it into the fresh
+                // app mount, where RESTORED_STATE picks it up.
+                let target = window.location.pathname;
+                try {
+                  const blob = btoa(JSON.stringify({
+                    page,
+                    selectedId,
+                    hadDraft: !!(resolveNote || '').trim(),
+                  }));
+                  target = window.location.pathname + '?sdprs_state=' + encodeURIComponent(blob);
+                } catch (_) { /* fall through with pathname only */ }
+                window.location.href = '/login?next=' + encodeURIComponent(target);
+              }}
               className="w-full h-9 bg-brand-primary text-white rounded font-medium hover:opacity-90"
               autoFocus
             >

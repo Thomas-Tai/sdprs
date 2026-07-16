@@ -286,5 +286,104 @@ def test_lockout_writes_login_locked_audit_row(client, audit_env):
     assert row["target_id"] == "testclient"
 
 
+# ============================================================================
+# Auth-H1: `?next=` open-redirect defense on /login
+# ============================================================================
+#
+# The SPA's session-expiry modal (app.jsx) redirects to
+#   /login?next=<encoded target>
+# so that after re-auth, the operator lands back on the page they lost
+# (with the ?sdprs_state=... carrier still on the URL). The backend
+# _safe_next_path() helper is the trust boundary — it MUST reject any
+# absolute URL, protocol-relative URL, or path with a scheme/netloc, and
+# fall back to `/`. Anything else is an open-redirect that phishing kits
+# can chain off /login. See main.py:_safe_next_path.
+
+def test_login_get_echoes_next_into_hidden_input(client):
+    """(11) GET /login?next=/foo renders a hidden <input name=next value=/foo>
+    inside the form so the value round-trips through the POST. Value is
+    echoed verbatim (Jinja auto-escapes); validation lives in POST."""
+    r = client.get("/login?next=/dashboard%3Fsdprs_state%3Dabc")
+    assert r.status_code == 200
+    assert 'name="next"' in r.text
+    # Jinja url-decodes the query param and then escapes the value: '?' → &#39; no, '?' is literal in attr;
+    # after urldecode we get '/dashboard?sdprs_state=abc', which Jinja emits verbatim in attribute context.
+    assert 'value="/dashboard?sdprs_state=abc"' in r.text
+
+
+def test_login_get_without_next_omits_hidden_input(client):
+    """(12) GET /login (no ?next=) must NOT emit an empty hidden input —
+    the `{% if next %}` guard suppresses it. Keeps the form DOM clean
+    when the user reached /login directly."""
+    r = client.get("/login")
+    assert r.status_code == 200
+    assert 'name="next"' not in r.text
+
+
+def test_login_success_honors_safe_next_path(client):
+    """(13) A successful POST with next=/some/path redirects to that path
+    (303 See Other, Location: /some/path). Baseline for the guard tests
+    below — proves the mechanism works end-to-end when the value is safe."""
+    r = client.post(
+        "/login",
+        data={"username": GOOD_USER, "password": GOOD_PASS,
+              "next": "/monitor?sdprs_state=abc"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/monitor?sdprs_state=abc"
+
+
+@pytest.mark.parametrize("evil_next", [
+    "http://evil.com/steal",       # absolute URL with scheme+netloc
+    "https://evil.com",            # https variant
+    "//evil.com/anything",         # protocol-relative — browser treats as absolute
+    "/\\evil.com",                 # backslash trick — some parsers normalize
+    "javascript:alert(1)",          # javascript: scheme (XSS-via-redirect)
+    "ftp://evil.com/",              # any non-empty scheme
+    "not-a-path-at-all",            # no leading /
+    "",                             # empty string
+])
+def test_login_success_rejects_evil_next(client, evil_next):
+    """(14) Every hostile `next` value falls back to `/`. Uses parametrize
+    so a regression on any single attack shape shows up as a distinct
+    test failure. Covers the four defensive branches of _safe_next_path:
+    non-string/empty, missing leading slash, protocol-relative or
+    backslash prefix, and non-empty scheme/netloc from urlparse."""
+    r = client.post(
+        "/login",
+        data={"username": GOOD_USER, "password": GOOD_PASS, "next": evil_next},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/", (
+        f"evil next={evil_next!r} was honored — open redirect regression"
+    )
+
+
+def test_login_failure_preserves_next_for_retry(client):
+    """(15) A failed login must re-render the form with the same hidden
+    `next` value so the retry preserves the intended target. Without
+    this, the second attempt would silently drop the caller back to `/`
+    after re-auth."""
+    r = _post_login(client, "attacker", "definitely-wrong",
+                    headers={})
+    # Wrong creds → template response, not redirect. The response must
+    # carry the (empty) `next` context, which yields no hidden input.
+    assert r.status_code in (200, 401)
+    assert 'name="next"' not in r.text  # no next supplied → no input
+
+    # Now with a next value:
+    r2 = client.post(
+        "/login",
+        data={"username": "attacker", "password": "wrong",
+              "next": "/audit?filter=today"},
+        follow_redirects=False,
+    )
+    assert r2.status_code in (200, 401)
+    assert 'name="next"' in r2.text
+    assert 'value="/audit?filter=today"' in r2.text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
