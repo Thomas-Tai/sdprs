@@ -182,50 +182,21 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
 // behaviour: show a live JPEG for cameras that have uploaded a snapshot,
 // fall back to an icon otherwise.
 //
-// Shared 1 Hz tick: instead of every tile spawning its own setInterval
-// (which used to mean ~30 drifting timers on the monitor wall), all live
-// tiles subscribe to a single module-level ticker below. The ticker only
-// runs while at least one tile is subscribed, and each tile still gates
-// its subscription on wantsLiveImg so pump tiles and offline cameras
-// don't re-render for a signal they'd ignore. Callback receives Date.now()
-// which drops straight into the ?t= cache-buster.
+// Cache-buster: `node.snapshotTimestamp` (populated by api.jsx mapNode) only
+// changes when the edge actually pushes a new frame. Using it as `?t=` keeps
+// the URL stable across parent re-renders → browser 304 fast-path works and
+// the monitor wall stops hammering the edge cams. Fall back to `node.id` when
+// the timestamp is missing (never Date.now(), which would defeat the fix).
 // Server encoding: picamera2's misnamed "RGB888" numpy array is already
 // B,G,R; the edge adapter passes it straight through to cv2.imencode.
 // If colours ever look magenta again, check edge_glass/utils/camera.py.
-const _snapshotTickListeners = new Set();
-let _snapshotTickId = null;
-const _snapshotTickInterval = 1000; // ms — matches previous per-tile cadence
-function _startSnapshotTick() {
-  if (_snapshotTickId != null) return;
-  _snapshotTickId = setInterval(() => {
-    const now = Date.now();
-    _snapshotTickListeners.forEach(cb => { try { cb(now); } catch (e) {} });
-  }, _snapshotTickInterval);
-}
-function _stopSnapshotTickIfIdle() {
-  if (_snapshotTickListeners.size === 0 && _snapshotTickId != null) {
-    clearInterval(_snapshotTickId);
-    _snapshotTickId = null;
-  }
-}
 const SnapshotImage = ({ node, iconSize = 48 }) => {
   const frozen = node.status === 'offline' || node.upload > 60;
   const wantsLiveImg = node.type === 'camera' && !frozen;
-  const [ts, setTs] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    if (!wantsLiveImg) return;
-    const cb = (now) => setTs(now);
-    _snapshotTickListeners.add(cb);
-    _startSnapshotTick();
-    return () => {
-      _snapshotTickListeners.delete(cb);
-      _stopSnapshotTickIfIdle();
-    };
-  }, [wantsLiveImg]);
   if (wantsLiveImg && node.snapshotTimestamp) {
     return (
       <img
-        src={`/api/edge/${node.id}/snapshot/latest?t=${ts}`}
+        src={`/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}`}
         alt={`${node.name || node.id} snapshot`}
         className="absolute inset-0 w-full h-full object-cover"
       />
@@ -673,14 +644,12 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const headingRef = useRef(null);
   // Inline error for the "解除" unsnooze API call; keyed by node id.
   const [unsnoozeErr, setUnsnoozeErr] = useState(null);
-  // 30s tick so the "剩餘 X 分鐘" text refreshes while the drawer sits open.
-  // Cheap — a single setState per drawer, only while mounted.
-  const [, setNow] = useState(0);
-  useEffect(() => {
-    if (!open) return;
-    const id = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(id);
-  }, [open]);
+  // No local countdown ticker: n.snoozeMin is already a whole-minute value
+  // from api.jsx mapNode and only refreshes on the parent poll (~20s). A
+  // sub-minute setInterval would just re-render without changing the number,
+  // making the "剩餘 X 分鐘" text appear to jump on the poll edge instead of
+  // ticking smoothly. Live smooth countdown would need snoozeUntil (ms epoch)
+  // exposed on the node — deferred to api.jsx.
   // Focus + Escape trap. On open, focus lands on the panel's heading (not the
   // ✕ close button) so screen readers announce the panel's purpose. See H-9.
   useEffect(() => {
@@ -734,8 +703,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
       setUnsnoozeErr({ nid, msg: '伺服器解除失敗，請重試' });
     }
   };
-  // Unsnooze all snoozed nodes then clear local mute state. Errors on any
-  // node are collected and surfaced without wiping the remaining flags.
+  // Unsnooze all snoozed nodes. Preserve global + lightning flags so an
+  // operator clearing stale per-node snoozes during a planned drill doesn't
+  // silently drop their intentional global mute. Errors on any node are
+  // collected and surfaced without wiping the remaining flags.
   const unsnoozeAll = async () => {
     setUnsnoozeErr(null);
     const targets = [...muteState.nodes];
@@ -746,7 +717,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
         setUnsnoozeErr({ nid: null, msg: `${failed.length} 個節點解除失敗: ${failed.join(', ')}` });
       }
     }
-    setMuteState({ global: false, nodes: [], lightning: false, volume: muteState.volume ?? 70 });
+    setMuteState({ ...muteState, nodes: [] });
   };
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
@@ -782,12 +753,16 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                   if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setVolume(v); } catch (_) {} }
                 }}
               />
+              {/* Disable test buttons when global mute is on: beep() short-circuits
+                  on muted, so a live-looking button that emits no sound reads as
+                  "audio broken" to operators. The disabled+tooltip surface tells
+                  them to unmute instead of filing a hardware ticket. */}
               <div className="flex items-center justify-between mt-3 text-xs">
                 <span className="text-ink-muted">測試音效:</span>
                 <div className="flex gap-1">
-                  <button onClick={() => playTest('critical', '嚴重')} className="px-2 h-6 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25">嚴重</button>
-                  <button onClick={() => playTest('warning', '警告')} className="px-2 h-6 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25">警告</button>
-                  <button onClick={() => playTest('ack', '確認')} className="px-2 h-6 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25">確認</button>
+                  <button onClick={() => playTest('critical', '嚴重')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-critical/15">嚴重</button>
+                  <button onClick={() => playTest('warning', '警告')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-warn/15">警告</button>
+                  <button onClick={() => playTest('ack', '確認')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-info/15">確認</button>
                 </div>
               </div>
               <div id="test-audio-feedback" className="text-[10px] text-sev-info font-mono tnum mt-1 h-4"></div>
@@ -834,10 +809,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                 {muteState.nodes.map(nid => {
                   const n = nodeList.find(nn => nn.id === nid);
                   // n.snoozeMin is computed in api.jsx mapNode from
-                  // snoozed_until − now(), so it drifts between polls; the
-                  // 30s tick above nudges the re-render. snoozedBy /
-                  // snoozedAt are now surfaced by api.jsx mapNode — only
-                  // render provenance when snoozedBy is truthy (never fake).
+                  // snoozed_until − now() and only refreshes on the parent
+                  // poll (~20s). snoozedBy / snoozedAt are surfaced by
+                  // api.jsx mapNode — only render provenance when snoozedBy
+                  // is truthy (never fake).
                   const remain = n?.snoozeMin;
                   const snoozeAtText = n?.snoozedAt
                     ? (() => {
@@ -907,9 +882,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
 
           <button
             onClick={unsnoozeAll}
-            className="w-full mt-2 h-9 bg-sev-info hover:bg-blue-600 text-white rounded text-sm font-semibold"
+            disabled={muteState.nodes.length === 0}
+            className="w-full mt-2 h-9 bg-sev-info hover:bg-blue-600 text-white rounded text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-info"
           >
-            全部解除
+            解除所有節點延期
           </button>
         </div>
       </div>
@@ -1354,7 +1330,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                 </div>
                 <div className="bg-surface-elevated rounded p-2">
                   <div className="text-[10px] text-ink-muted">循環</div>
-                  <div className="font-mono tnum">每 {(60/node.cycles).toFixed(1)}m</div>
+                  <div className="font-mono tnum">{node.cycles > 0 ? '每 ' + (60 / node.cycles).toFixed(1) + 'm' : '—'}</div>
                 </div>
               </>
             )}
