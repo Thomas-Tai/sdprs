@@ -69,7 +69,7 @@
 1. **新警報進線** — WebSocket 推送 `new_alert`，SPA 彈出浮動橫幅、標題列出現「(N) SDPRS」計數、
    若未靜音會於 30 秒節奏重播告警音。頁面標題閃爍協助牆面辨識。
 2. **選警報** — 點選列表列，或按 `↑ / ↓` 切換。右側詳情面板顯示：
-   - HLS 影片預覽（可切換 1×／1.5×／2× 倍速、逐格前後、下載）
+   - **影像證據（未完全上線）**：目前僅顯示邊緣節點最近上傳的靜態快照；若尚未收到快照則顯示占位卡片並提示「MP4 稍後上傳 · HLS 預覽尚未接線」。MP4 檔案由邊緣節點透過 `PUT /api/alerts/{id}/video` 上傳並儲存於 `storage/events/<node>/<timestamp>.mp4`；**目前無法在儀表板內播放或下載 MP4**，如需查看事件影像請由值班工程師以 SSH 登入中央伺服器直接取檔。HLS 預覽、播放速率切換（1×／1.5×／2×）、逐格前後、瀏覽器下載為規劃中功能（追蹤於 `dashboard_audit_2026_07_16_executive_summary.md` P0 #3）。
    - 時間軸（`EDGE_CREATED` → `JSON_SENT` → `UPLOADED` → `ACKNOWLEDGED` → `RESOLVED`）
    - Floorplan 場域配置＋節點高亮
    - 同節點其他作用中警報清單（可跳轉）
@@ -96,7 +96,7 @@
 
 ### 串流控制
 
-- 詳情面板影片播放區觀看即時 HLS。
+- 詳情面板影片播放區目前**尚未接線 HLS**，僅顯示靜態快照或占位卡片（見上方「影像證據」說明）；`start` / `stop` 指令目前僅影響邊緣端串流，儀表板內尚無即時預覽視窗。
 - 節點狀態頁「動作」欄的按鈕觸發 `POST /api/stream/{node_id}/start`｜`/stop`
   （伺服器透過 MQTT `sdprs/edge/{node_id}/cmd/stream_start` 發送指令）。
 - 節點必須 `ONLINE` 才能啟動；停止指令即使離線也會發送。
