@@ -83,7 +83,8 @@ apt-get install -y \
     mosquitto mosquitto-clients \
     nginx \
     git avahi-daemon \
-    sqlite3
+    sqlite3 \
+    openssl
 
 # 建立 sdprs 用戶
 if ! id -u sdprs &>/dev/null; then
@@ -122,20 +123,29 @@ else
     echo "假設檔案已在 /opt/sdprs/central_server/"
 fi
 
+# ===== 隨機憑證產生 (SECURITY) =====
+# 舊版寫入 `changeme-*` 佔位值並僅印警告，允許以已知憑證登入或偽造
+# session cookie。config.py:validate_settings 現於啟動時 fail-closed。
+echo "產生隨機憑證 (openssl rand)..."
+RANDOM_PASS=$(openssl rand -base64 24 | tr -d '\n=' | head -c 24)
+RANDOM_EDGE_KEY=$(openssl rand -hex 32)
+RANDOM_SECRET=$(openssl rand -hex 32)
+
 # 建立 .env 文件
 cat > /opt/sdprs/.env << EOF
 # SDPRS Central Server Environment Variables
-# 請修改以下密碼！
+# 憑證由 setup_server.sh 於 $(date -u +%Y-%m-%dT%H:%M:%SZ) 隨機產生。
+# 服務啟動時會拒絕含 "changeme" 或短於 32 字元的秘密 (see MIGRATION.md)。
 
 # Dashboard 登入
 DASHBOARD_USER=admin
-DASHBOARD_PASS=changeme-strong-password
+DASHBOARD_PASS=${RANDOM_PASS}
 
-# Edge Node API Key
-EDGE_API_KEY=changeme-random-secret-key
+# Edge Node API Key (每個邊緣節點必須使用此金鑰認證)
+EDGE_API_KEY=${RANDOM_EDGE_KEY}
 
-# Session Secret
-SECRET_KEY=changeme-session-secret
+# Session Secret (簽署 session cookie；輪換會強制所有使用者重登)
+SECRET_KEY=${RANDOM_SECRET}
 
 # MQTT
 MQTT_BROKER=localhost
@@ -151,12 +161,44 @@ STORAGE_PATH=/opt/sdprs/storage
 RETENTION_DAYS=30
 EOF
 
-echo -e "${YELLOW}已建立 .env 文件，請修改密碼！${NC}"
-echo "檔案位置: /opt/sdprs/.env"
-
-# 設定權限
+# 設定權限 (.env 是機密：root:sdprs 0600)
 chown -R sdprs:sdprs /opt/sdprs
 chmod 600 /opt/sdprs/.env
+
+# 儲存初始 dashboard 密碼供操作員初次登入 (root-only 讀取)
+INIT_CREDS_FILE=/root/sdprs_credentials.INITIAL.txt
+cat > "$INIT_CREDS_FILE" << EOF
+SDPRS 初始 Dashboard 憑證
+產生時間: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+登入頁面: http://<server>/
+使用者名稱: admin
+初始密碼:   ${RANDOM_PASS}
+
+首次登入後:
+  1. 立即在 dashboard 或 /opt/sdprs/.env 中將 DASHBOARD_PASS 換成
+     操作員記憶得住的新密碼 (至少 8 字元)。
+  2. 將本檔內容備份至密碼管理器。
+  3. 刪除本檔:  rm ${INIT_CREDS_FILE}
+
+其他隨機憑證:
+  EDGE_API_KEY  已寫入 .env；每個邊緣節點須配置相同值。輪換會斷開
+                所有邊緣節點直到 re-flash。
+  SECRET_KEY    已寫入 .env；輪換會使所有現有 session cookie 失效，
+                所有使用者必須重新登入。
+
+除非確有必要，請勿更動 EDGE_API_KEY / SECRET_KEY。
+EOF
+chmod 600 "$INIT_CREDS_FILE"
+
+echo -e "${GREEN}已產生 .env 及隨機憑證${NC}"
+echo "檔案位置: /opt/sdprs/.env (0600)"
+echo -e "${YELLOW}初始 dashboard 密碼已寫入: ${INIT_CREDS_FILE}${NC}"
+echo -e "${YELLOW}請立即記下並在首次登入後刪除該檔${NC}"
+echo ""
+echo "======================================"
+echo "  初始 dashboard 密碼: ${RANDOM_PASS}"
+echo "======================================"
 
 # ===== Step 4/6: MQTT 配置 =====
 echo -e "${GREEN}[Step 4/6] MQTT 配置...${NC}"
@@ -215,11 +257,12 @@ if [[ -n "${STATIC_IP}" ]]; then
 fi
 echo ""
 echo "下一步:"
-echo "1. 修改密碼: nano /opt/sdprs/.env"
-echo "2. 重啟服務: systemctl restart sdprs-server"
-echo "3. 查看日誌: journalctl -u sdprs-server -f"
+echo "1. 從 ${INIT_CREDS_FILE} 或上方輸出取得初始密碼並登入"
+echo "2. 首次登入後立即修改 DASHBOARD_PASS: nano /opt/sdprs/.env"
+echo "3. 重啟服務: systemctl restart sdprs-server"
+echo "4. 記下密碼後刪除初始憑證檔: rm ${INIT_CREDS_FILE}"
+echo "5. 查看日誌: journalctl -u sdprs-server -f"
 echo ""
-echo "預設登入:"
-echo "  帳號: admin"
-echo "  密碼: changeme-strong-password"
+echo "登入帳號: admin"
+echo "初始密碼: 請見上方 '初始 dashboard 密碼' 區塊"
 echo ""

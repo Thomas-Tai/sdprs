@@ -225,9 +225,41 @@ def get_settings() -> Settings:
     return settings
 
 
+# Known-insecure placeholder credential values. Prior versions of
+# scripts/setup_server.sh wrote the first three by default and did not
+# enforce rotation — startup with any of these permits auth bypass.
+KNOWN_INSECURE_VALUES = frozenset({
+    "changeme-strong-password",     # setup_server.sh legacy default
+    "changeme-session-secret",      # setup_server.sh legacy default
+    "changeme-random-secret-key",   # setup_server.sh legacy default
+    "changeme",
+    "your-secret-key",
+    "your-secret-key-change-in-production",
+    "your-edge-api-key-here",
+    "dev-secret-key-change-in-production",
+    "test-key",
+})
+
+SECRET_MIN_LENGTH = 32          # openssl rand -hex 32 → 64 chars
+SECRET_MIN_UNIQUE_CHARS = 8     # catches "aaaaaa...", "abababab..."
+PASSWORD_MIN_LENGTH = 8
+
+
 def validate_settings(settings: Settings) -> bool:
     """
     Validate that all required settings are properly configured.
+
+    Raises ValueError on any of:
+      * Missing / empty required field
+      * Value in KNOWN_INSECURE_VALUES
+      * Value containing "changeme" substring (case-insensitive)
+      * SECRET_KEY / EDGE_API_KEY shorter than SECRET_MIN_LENGTH
+      * SECRET_KEY / EDGE_API_KEY with fewer than SECRET_MIN_UNIQUE_CHARS
+      * DASHBOARD_PASS shorter than PASSWORD_MIN_LENGTH
+      * Out-of-range MQTT_PORT / RETENTION_DAYS / SERVER_PORT
+
+    Called from main.py lifespan startup — failing closed here prevents
+    the app from serving requests with insecure credentials.
     """
     required_fields = ["DASHBOARD_USER", "DASHBOARD_PASS", "EDGE_API_KEY", "SECRET_KEY"]
 
@@ -235,13 +267,41 @@ def validate_settings(settings: Settings) -> bool:
         value = getattr(settings, field, None)
         if not value:
             raise ValueError(f"Required setting {field} is not configured")
-        if value in [
-            "changeme", "your-secret-key", "test-key",
-            "dev-secret-key-change-in-production",
-            "your-edge-api-key-here",
-            "your-secret-key-change-in-production",
-        ]:
-            logger.warning(f"Setting {field} appears to have a placeholder value")
+        if value in KNOWN_INSECURE_VALUES:
+            raise ValueError(
+                f"{field} is set to a known-insecure placeholder value. "
+                f"Generate a real value (e.g. `openssl rand -hex 32`) "
+                f"and update your .env or deployment env vars. "
+                f"See MIGRATION.md for rotation guidance."
+            )
+        if "changeme" in value.lower():
+            raise ValueError(
+                f"{field} contains the placeholder text 'changeme'. "
+                f"Rotate to a random value before starting the server."
+            )
+
+    for field in ("SECRET_KEY", "EDGE_API_KEY"):
+        value = getattr(settings, field)
+        if len(value) < SECRET_MIN_LENGTH:
+            raise ValueError(
+                f"{field} too short ({len(value)} chars, "
+                f"need >= {SECRET_MIN_LENGTH}). "
+                f"Generate with `openssl rand -hex 32`."
+            )
+        if len(set(value)) < SECRET_MIN_UNIQUE_CHARS:
+            raise ValueError(
+                f"{field} has insufficient entropy "
+                f"(only {len(set(value))} unique chars, "
+                f"need >= {SECRET_MIN_UNIQUE_CHARS}). "
+                f"Generate with `openssl rand -hex 32`."
+            )
+
+    if len(settings.DASHBOARD_PASS) < PASSWORD_MIN_LENGTH:
+        raise ValueError(
+            f"DASHBOARD_PASS too short "
+            f"({len(settings.DASHBOARD_PASS)} chars, "
+            f"minimum {PASSWORD_MIN_LENGTH})."
+        )
 
     if settings.MQTT_PORT < 1 or settings.MQTT_PORT > 65535:
         raise ValueError(f"Invalid MQTT_PORT: {settings.MQTT_PORT}")
@@ -256,4 +316,8 @@ def validate_settings(settings: Settings) -> bool:
     return True
 
 
-__all__ = ["Settings", "get_settings", "validate_settings"]
+__all__ = [
+    "Settings", "get_settings", "validate_settings",
+    "KNOWN_INSECURE_VALUES",
+    "SECRET_MIN_LENGTH", "SECRET_MIN_UNIQUE_CHARS", "PASSWORD_MIN_LENGTH",
+]

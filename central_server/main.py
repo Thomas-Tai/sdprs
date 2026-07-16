@@ -53,13 +53,14 @@ async def lifespan(app: FastAPI):
     # ===== Startup =====
     logger.info("Starting SDPRS Central Server...")
     
-    # Validate settings at startup
+    # Validate settings at startup — fail closed on placeholder credentials
+    # or weak secrets. Prior behavior wrapped this in try/except ValueError
+    # and only logged a warning, which allowed the server to start with
+    # known-insecure defaults (auth bypass). See MIGRATION.md 2026-07-16
+    # SECURITY entry for rotation guidance on affected deployments.
     from .config import validate_settings
     settings = get_settings()
-    try:
-        validate_settings(settings)
-    except ValueError as e:
-        logger.warning(f"Settings validation warning: {e}")
+    validate_settings(settings)
 
     # Initialize database (use database.py module - single source of truth).
     # Sourced from Settings (same DB_PATH env var + default) so validation
