@@ -67,10 +67,10 @@ window.HISTORY_ALERTS = [];
 window.WEATHER = {
   available: false,
   typhoon: null,
-  wind: { speed: 0, gust: 0, dir: '', degree: 0 },
-  rain: { now: 0, hour: 0, day: 0 },
-  temp: 0, humidity: 0, pressure: null, visibility: null,
-  lightning: { count: 0, nearest: null },
+  wind: { speed: null, gust: null, dir: null, degree: null },
+  rain: { now: null, hour: null, day: null },
+  temp: null, humidity: null, pressure: null, visibility: null,
+  lightning: { count: null, nearest: null },
   source: '—',
   forecast: [],
 };

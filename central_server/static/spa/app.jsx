@@ -528,13 +528,7 @@ function App({ initialError = null }) {
   }, [muteState.global, setTweak]);
 
   const onUpdateNode = useCallbackA(async (id, patch) => {
-    try {
-      if (patch.location) await window.SDPRS_API.updateNodeLocation(id, patch.location);
-    } catch (e) {
-      showToast('更新失敗: ' + (e.message || e), 'warn');
-      return;
-    }
-    // Reflect immediately, then refresh from the server for canonical values.
+    if (patch.location) await window.SDPRS_API.updateNodeLocation(id, patch.location);
     setNodePanelNode(prev => prev && prev.id === id ? { ...prev, ...patch } : prev);
     showToast(`${id} 配置已更新`, 'ok');
     await refresh();

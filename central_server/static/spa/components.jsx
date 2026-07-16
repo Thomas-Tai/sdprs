@@ -1187,6 +1187,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
   const [locationError, setLocationError] = useState(null);
+  const [saving, setSaving] = useState(false);
   const panelRef = useRef(null);
   const headingRef = useRef(null);
   React.useEffect(() => {
@@ -1194,6 +1195,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
       setDraft({ location: node.location || '' });
       setEditing(false);
       setLocationError(null);
+      setSaving(false);
     }
   }, [node?.id]);
 
@@ -1217,21 +1219,22 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   // stale until the panel was re-opened.
   const items = history || (window.NODE_HISTORY?.[node?.id] || []);
 
-  const saveEdits = () => {
-    // Backend PATCH /api/nodes/{id} only accepts `location`. name/floor/area
-    // are DERIVED from location by api.jsx mapNode (see api.jsx:184-193), so
-    // only `location` is editable here — the other fields are read-only.
+  const saveEdits = async () => {
     const newLocation = (draft?.location || '').trim();
     if (!newLocation) {
-      // H-7: previously silently exited edit mode when the field was blank,
-      // which read as "discarded my change without saying why". Show an
-      // inline validation error instead.
       setLocationError('位置為必填');
       return;
     }
     setLocationError(null);
-    onUpdateNode && onUpdateNode(node.id, { location: newLocation });
-    setEditing(false);
+    setSaving(true);
+    try {
+      await onUpdateNode?.(node.id, { location: newLocation });
+      setEditing(false);
+    } catch (e) {
+      setLocationError('儲存失敗，請重試');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -1275,8 +1278,8 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                 </button>
               ) : (
                 <div className="flex gap-1">
-                  <button onClick={() => setEditing(false)} className="text-[10px] text-ink-muted hover:text-ink-primary px-1.5 h-5 rounded bg-surface-elevated">取消</button>
-                  <button onClick={saveEdits} className="text-[10px] text-white px-1.5 h-5 rounded bg-sev-info hover:bg-blue-600">儲存</button>
+                  <button onClick={() => setEditing(false)} disabled={saving} className="text-[10px] text-ink-muted hover:text-ink-primary px-1.5 h-5 rounded bg-surface-elevated disabled:opacity-50">取消</button>
+                  <button onClick={saveEdits} disabled={saving} aria-busy={saving} className="text-[10px] text-white px-1.5 h-5 rounded bg-sev-info hover:bg-blue-600 disabled:opacity-50">{saving ? '儲存中…' : '儲存'}</button>
                 </div>
               )}
             </div>
