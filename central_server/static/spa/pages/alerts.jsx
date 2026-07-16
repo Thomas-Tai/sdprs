@@ -75,7 +75,7 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
   );
 };
 
-const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote }) => {
+const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote, busy }) => {
   const [tab, setTab] = useState_p('active');
   const [filterSev, setFilterSev] = useState_p('all');
   const [checked, setChecked] = useState_p(new Set());
@@ -283,7 +283,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 
       {/* RIGHT: Detail */}
       <div className="flex flex-col min-h-0 bg-surface-base">
-        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId}/> : (
+        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy}/> : (
           <EmptyState icon={Icon.AlertCircle} title="選擇警報以查看詳情" hint="使用 ↑/↓ 鍵或滑鼠點選"/>
         )}
       </div>
@@ -398,7 +398,7 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
   );
 };
 
-const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert }) => {
+const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert, busy }) => {
   const node = window.NODES.find(n => n.id === alert.node);
   const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
@@ -407,15 +407,10 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
   // last template apply. Used so template chips do NOT clobber freeform
   // typing — see C-6 (template overwrite warning).
   const [noteEdited, setNoteEdited] = useState_p(false);
-  // Shared in-flight guard for the detail panel's individual actions — stops
-  // duplicate ack/resolve/snooze submissions on slow networks (audit A4).
-  const [busy, setBusy] = useState_p(false);
-  const guardedSnooze = async (id, m) => {
-    if (busy) return;
-    setBusy(true);
-    try { await onSnooze(id, m); }
-    finally { setBusy(false); }
-  };
+  // `busy` is a prop from app.jsx now (hoisted from a local useState). The
+  // ref-backed guard lives in App so keyboard shortcuts A/R share it with
+  // these buttons — a rapid A-A double-tap or a button-click-during-in-flight
+  // keyboard-A both hit the same guard (follow-up to audit A4).
   const applyTemplate = (t) => {
     // If operator hasn't touched the textarea (or it's empty), replace.
     // If they've typed something, append on a new line so their work isn't lost.
@@ -706,10 +701,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <>
               <button onClick={async () => {
                   if (busy) return;
-                  setBusy(true);
                   try { await onAck(alert.id); }
                   catch (e) { /* parent toasts; keep UI state so operator can retry */ }
-                  finally { setBusy(false); }
                 }}
                 disabled={busy}
                 title="我正在處理此事件 — 不會關閉警報。按下後自動跳至下一筆。"
@@ -725,14 +718,13 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <>
               <button onClick={async () => {
                   if (busy) return;
-                  setBusy(true);
                   try {
                     await onResolve(alert.id, resolveNote);
                     setResolveNote('');
                     setNoteEdited(false);
                   } catch (e) {
                     /* keep the drafted note so the operator doesn't lose their write-up */
-                  } finally { setBusy(false); }
+                  }
                 }}
                 disabled={busy || !resolveNote.trim()}
                 title="事件已結束 — 將從作用中列表移除"
@@ -754,7 +746,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
               alert={alert}
               open={snoozeOpen}
               setOpen={setSnoozeOpen}
-              onSnooze={guardedSnooze}
+              onSnooze={onSnooze}
               busy={busy}
             />
           )}

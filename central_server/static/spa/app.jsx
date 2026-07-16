@@ -311,21 +311,40 @@ function App({ initialError = null }) {
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, seen: true } : a));
   }, []);
 
+  // Shared in-flight guard for Ack/Resolve/Snooze dispatch. Hoisted from
+  // AlertDetail so the keyboard shortcuts A/R (app-level, this file) and the
+  // detail-panel buttons (alerts.jsx) share one source of truth — a rapid
+  // A-A double-tap or an "Ack button click during in-flight keyboard-A" both
+  // resolve to the same guard. The ref is the correctness gate (checked
+  // synchronously to close the double-fire race that a state-only guard would
+  // lose across the setState scheduling boundary); the state is only the
+  // visual signal to disable buttons in AlertDetail.
+  const alertBusyRef = useRefA(false);
+  const [alertBusy, setAlertBusy] = useStateA(false);
+
   const onAck = useCallbackA(async (id, advance = true) => {
+    if (alertBusyRef.current) return;
+    alertBusyRef.current = true;
+    setAlertBusy(true);
     try {
-      await window.SDPRS_API.ackAlert(id);
-    } catch (e) {
-      showToast('認領失敗: ' + (e.message || e), 'warn');
-      return;
+      try {
+        await window.SDPRS_API.ackAlert(id);
+      } catch (e) {
+        showToast('認領失敗: ' + (e.message || e), 'warn');
+        return;
+      }
+      setAckedIds(prev => new Set(prev).add(id));
+      // Operator engaged with the queue — clear the "N new" banner so a stale
+      // count doesn't linger after everything's been touched.
+      setNewAlertBannerCount(0);
+      showToast('已認領' + (advance ? ' → 下一筆' : ''), 'info');
+      const next = advance ? findNextUnack(id) : null;
+      await refresh();
+      if (next) setSelectedId(next);
+    } finally {
+      alertBusyRef.current = false;
+      setAlertBusy(false);
     }
-    setAckedIds(prev => new Set(prev).add(id));
-    // Operator engaged with the queue — clear the "N new" banner so a stale
-    // count doesn't linger after everything's been touched.
-    setNewAlertBannerCount(0);
-    showToast('已認領' + (advance ? ' → 下一筆' : ''), 'info');
-    const next = advance ? findNextUnack(id) : null;
-    await refresh();
-    if (next) setSelectedId(next);
   }, [showToast, findNextUnack, refresh]);
 
   const onResolve = useCallbackA(async (id, note) => {
@@ -333,32 +352,48 @@ function App({ initialError = null }) {
       showToast('需備註才能解決', 'warn');
       return;
     }
+    if (alertBusyRef.current) return;
+    alertBusyRef.current = true;
+    setAlertBusy(true);
     try {
-      await window.SDPRS_API.resolveAlert(id, note);
-    } catch (e) {
-      showToast('解決失敗: ' + (e.message || e), 'warn');
-      return;
+      try {
+        await window.SDPRS_API.resolveAlert(id, note);
+      } catch (e) {
+        showToast('解決失敗: ' + (e.message || e), 'warn');
+        return;
+      }
+      // Operator engaged with the queue — clear the "N new" banner too.
+      setNewAlertBannerCount(0);
+      showToast('警報已解決', 'ok');
+      const next = findNextUnack(id);
+      await refresh();
+      if (next) setSelectedId(next);
+    } finally {
+      alertBusyRef.current = false;
+      setAlertBusy(false);
     }
-    // Operator engaged with the queue — clear the "N new" banner too.
-    setNewAlertBannerCount(0);
-    showToast('警報已解決', 'ok');
-    const next = findNextUnack(id);
-    await refresh();
-    if (next) setSelectedId(next);
   }, [showToast, findNextUnack, refresh]);
 
   const onSnooze = useCallbackA(async (id, mins) => {
     const a = alerts.find(x => x.id === id);
     if (!a) return;
+    if (alertBusyRef.current) return;
+    alertBusyRef.current = true;
+    setAlertBusy(true);
     try {
-      await window.SDPRS_API.snoozeNode(a.node, mins);
-    } catch (e) {
-      showToast('延期失敗: ' + (e.message || e), 'warn');
-      return;
+      try {
+        await window.SDPRS_API.snoozeNode(a.node, mins);
+      } catch (e) {
+        showToast('延期失敗: ' + (e.message || e), 'warn');
+        return;
+      }
+      setMuteState(prev => ({ ...prev, nodes: prev.nodes.includes(a.node) ? prev.nodes : [...prev.nodes, a.node] }));
+      showToast(`${a.node} 已延期 ${mins} 分鐘`, 'warn');
+      await refresh();
+    } finally {
+      alertBusyRef.current = false;
+      setAlertBusy(false);
     }
-    setMuteState(prev => ({ ...prev, nodes: prev.nodes.includes(a.node) ? prev.nodes : [...prev.nodes, a.node] }));
-    showToast(`${a.node} 已延期 ${mins} 分鐘`, 'warn');
-    await refresh();
   }, [showToast, alerts, refresh]);
 
   useEffectA(() => {
@@ -543,7 +578,7 @@ function App({ initialError = null }) {
 
   const renderPage = () => {
     switch (page) {
-      case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote}/>;
+      case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy}/>;
       case 'monitor': return <window.MonitorPage activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
       case 'status': return <window.StatusPage onSelectNode={onSelectNode} onRefresh={refresh}/>;
       case 'pumps': return <window.PumpsPage onSelectNode={onSelectNode}/>;
