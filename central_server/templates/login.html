@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'self'; frame-ancestors 'none'">
     <title>登入 - SDPRS 防災監控系統</title>
-    
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Tailwind CSS (same-origin vendored copy; see central_server/static/vendor/) -->
+    <script src="/static/vendor/tailwind.min.js"></script>
 </head>
 <body class="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-800 to-gray-900">
     <div class="max-w-md w-full mx-4">
