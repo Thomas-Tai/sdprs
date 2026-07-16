@@ -166,3 +166,18 @@ html.focus-mode .bg-surface-elevated { background: #0a1020 !important; }
   to   { transform: translate(-50%, 0);     opacity: 1; }
 }
 .new-alert-banner { animation: slide-down .25s ease-out; }
+
+/* Screen-reader-only live region — visually hidden but announced by AT.
+   Used for toasts + banner announcements where the visual surface has
+   aria-hidden=true and the live region carries the accessible name. */
+.sr-only-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -7,12 +7,23 @@ const AuditPage = () => {
   const [operatorFilter, setOperatorFilter] = useState_p('all');
   const [actionFilter, setActionFilter] = useState_p('all');
   const [dateFilter, setDateFilter] = useState_p('all'); // all | today | 7d
+  const [exportState, setExportState] = useState_p(null);
+  React.useEffect(() => {
+    if (!exportState) return undefined;
+    const timer = setTimeout(() => setExportState(null), 3000);
+    return () => clearTimeout(timer);
+  }, [exportState]);
   const actionMeta = {
-    ALERT_CREATED: { tone: 'critical', label: '警報建立' },
-    ALERT_ACK: { tone: 'info', label: '認領' },
-    ALERT_RESOLVE: { tone: 'ok', label: '解決' },
-    NODE_SNOOZE: { tone: 'warn', label: '節點延期' },
-    LOGIN: { tone: 'muted', label: '登入' },
+    ACKNOWLEDGE:      { label: '已確認',   tone: 'info' },
+    RESOLVE:          { label: '已解決',   tone: 'ok' },
+    BULK_ACKNOWLEDGE: { label: '批次確認', tone: 'info' },
+    BULK_RESOLVE:     { label: '批次解決', tone: 'ok' },
+    SNOOZE:           { label: '節點靜音', tone: 'muted' },
+    UNSNOOZE:         { label: '解除靜音', tone: 'muted' },
+    LOCATION_EDIT:    { label: '位置編輯', tone: 'muted' },
+    HANDOVER_EDIT:    { label: '交接編輯', tone: 'muted' },
+    LOGIN:            { label: '登入',     tone: 'muted' },
+    LOGOUT:           { label: '登出',     tone: 'muted' },
   };
   const operators = useMemo_p(() => {
     const set = new Set();
@@ -69,8 +80,41 @@ const AuditPage = () => {
   });
   const filtersActive = meOnly || operatorFilter !== 'all' || actionFilter !== 'all' || dateFilter !== 'all';
   const dateLabel = dateFilter === 'all' ? '全部' : dateFilter === 'today' ? '今日' : '近 7 天';
+  const exportAuditCsv = async () => {
+    setExportState({ tone: 'info', msg: '匯出中...' });
+    try {
+      await window.SDPRS_API.exportAuditCsv({
+        limit: 1000,
+        type: actionFilter !== 'all' ? actionFilter : undefined,
+      });
+      setExportState({ tone: 'success', msg: '已匯出 CSV' });
+    } catch (e) {
+      const isForbidden = e?.status === 403 || String(e?.message || '').includes('403');
+      setExportState({
+        tone: 'error',
+        msg: isForbidden ? '需要管理員權限' : '匯出失敗，請重試',
+      });
+    }
+  };
   return (
     <div className="h-full flex flex-col min-h-0">
+      {exportState && (
+        <div
+          role={exportState.tone === 'error' ? 'alert' : 'status'}
+          className={`px-4 py-2 text-xs border-b flex items-center gap-3 flex-shrink-0 ${
+            exportState.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
+              : exportState.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
+              : 'bg-sev-info/15 text-sev-info border-sev-info/30'
+          }`}
+        >
+          <span>{exportState.msg}</span>
+          <button
+            aria-label="關閉匯出通知"
+            className="ml-auto text-current opacity-70 hover:opacity-100"
+            onClick={() => setExportState(null)}
+          >×</button>
+        </div>
+      )}
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">稽核紀錄</h1>
         <span className="text-xs text-ink-muted tnum">
@@ -82,14 +126,47 @@ const AuditPage = () => {
             className={`inline-flex items-center gap-1 h-7 px-2 rounded text-xs border transition-colors ${meOnly ? 'bg-sev-info/15 border-sev-info/40 text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
             <Icon.User size={12}/> 本班 · 我的動作
           </button>
-          <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip active={actionFilter !== 'all'} onClick={cycleAction}>動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip active={dateFilter !== 'all'} onClick={cycleDate}>日期: {dateLabel} <Icon.ChevronDown size={10}/></FilterChip>
+          <div className="inline-flex items-center">
+            <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>
+              操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.ChevronDown size={10}/>
+            </FilterChip>
+            {operatorFilter !== 'all' && (
+              <button
+                type="button"
+                aria-label="清除操作者篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setOperatorFilter('all'); }}
+              >×</button>
+            )}
+          </div>
+          <div className="inline-flex items-center">
+            <FilterChip active={actionFilter !== 'all'} onClick={cycleAction}>
+              動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.ChevronDown size={10}/>
+            </FilterChip>
+            {actionFilter !== 'all' && (
+              <button
+                type="button"
+                aria-label="清除動作篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setActionFilter('all'); }}
+              >×</button>
+            )}
+          </div>
+          <div className="inline-flex items-center">
+            <FilterChip active={dateFilter !== 'all'} onClick={cycleDate}>
+              日期: {dateLabel} <Icon.ChevronDown size={10}/>
+            </FilterChip>
+            {dateFilter !== 'all' && (
+              <button
+                type="button"
+                aria-label="清除日期篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setDateFilter('all'); }}
+              >×</button>
+            )}
+          </div>
           <button
-            onClick={() => window.SDPRS_API.exportAuditCsv({
-              limit: 1000,
-              type: actionFilter !== 'all' ? actionFilter : undefined,
-            })}
+            onClick={exportAuditCsv}
             title="下載目前條件的稽核紀錄 (CSV)"
             className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay">
             <Icon.Download size={12}/> 匯出 CSV

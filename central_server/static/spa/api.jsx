@@ -579,18 +579,28 @@
   const bulkResolveAlerts = (ids, note) => apiFetch('/api/alerts/bulk-resolve',
     jsonBody('POST', { ids: ids || [], note: note || null }));
 
-  // Audit CSV export — server sets Content-Disposition, so a plain anchor
-  // click keeps the session cookie and lets the browser handle the save
-  // dialog. Deliberately NOT fetch→blob→createObjectURL: that would strip
-  // the server-supplied filename and double our memory footprint for large
-  // exports. Silent by design — the browser owns the UX from here.
-  function exportAuditCsv(opts) {
+  // Audit CSV export — HEAD preflight to detect 403/401 (otherwise the
+  // browser would silently "download" the JSON error body as a .csv file
+  // and the caller's `await` would resolve with success). Server sets
+  // Content-Disposition on GET, so on preflight-success we hand off to a
+  // plain anchor click: keeps the session cookie, lets the browser handle
+  // the save dialog, and avoids the memory cost of fetch→blob→createObjectURL
+  // for large exports.
+  async function exportAuditCsv(opts) {
     const o = opts || {};
     const params = new URLSearchParams();
     if (o.limit != null) params.set('limit', String(o.limit));
     if (o.type) params.set('type', o.type);
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
+
+    const head = await fetch(url, { method: 'HEAD', credentials: 'same-origin' });
+    if (!head.ok) {
+      const err = new Error('audit export failed: ' + head.status);
+      err.status = head.status;
+      throw err;
+    }
+
     // YYYYMMDD from the ISO string (naive-UTC safe — no Date locale drift).
     const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const a = document.createElement('a');
@@ -605,6 +615,11 @@
 
   const snoozeNode = (nodeId, minutes, reason) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
     jsonBody('POST', { minutes, reason: reason || '操作員延期' }));
+
+  // Cancel an active snooze. Backend DELETE handler at nodes.py logs
+  // ACTION_UNSNOOZE for audit; no request body needed.
+  const unsnoozeNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
+    { method: 'DELETE' });
 
   const saveHandover = (note) => apiFetch('/api/handover/note', jsonBody('PUT', { note: note || '' }));
 
@@ -698,7 +713,7 @@
   window.SDPRS_API = {
     loadInitial, refreshLive, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
-    snoozeNode, saveHandover, updateNodeLocation,
+    snoozeNode, unsnoozeNode, saveHandover, updateNodeLocation,
     exportAuditCsv,
     openSocket,
   };

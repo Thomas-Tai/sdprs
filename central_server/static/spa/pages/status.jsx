@@ -2,10 +2,17 @@
 
 const { useState: useState_p, useMemo: useMemo_p } = React;
 
-const StatusPage = ({ onSelectNode }) => {
+const StatusPage = ({ onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
   const [locationFilter, setLocationFilter] = useState_p('all');
+  // Local toast (success/error feedback for snooze etc.). Auto-dismissed after 3s.
+  const [toast, setToast] = useState_p(null);
+  React.useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
   // Unique locations from the current node list — filter values are derived
   // so a new deployment doesn't need a config change.
   const locations = useMemo_p(() => {
@@ -36,6 +43,14 @@ const StatusPage = ({ onSelectNode }) => {
   const filtersActive = typeFilter !== 'all' || statusFilter !== 'all' || locationFilter !== 'all';
   return (
     <div className="h-full flex flex-col min-h-0">
+      {toast && (
+        <div className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
+          toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
+            : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
+            : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
+            : 'bg-sev-info/15 text-sev-info border-sev-info/30'
+        }`}>{toast.msg}</div>
+      )}
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">節點狀態</h1>
         <span className="text-xs text-ink-muted tnum">
@@ -43,9 +58,36 @@ const StatusPage = ({ onSelectNode }) => {
         </span>
         <div className="flex-1"></div>
         <div className="flex gap-1.5">
-          <FilterChip active={typeFilter !== 'all'} onClick={cycleType}>類型: {typeLabel} <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}>狀態: {statusLabel} <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}>位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span> <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={typeFilter !== 'all'} onClick={cycleType}>
+            類型: {typeLabel} <Icon.ChevronDown size={10}/>
+            {typeFilter !== 'all' && (
+              <button
+                aria-label="清除類型篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setTypeFilter('all'); }}
+              >×</button>
+            )}
+          </FilterChip>
+          <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}>
+            狀態: {statusLabel} <Icon.ChevronDown size={10}/>
+            {statusFilter !== 'all' && (
+              <button
+                aria-label="清除狀態篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setStatusFilter('all'); }}
+              >×</button>
+            )}
+          </FilterChip>
+          <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}>
+            位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span> <Icon.ChevronDown size={10}/>
+            {locationFilter !== 'all' && (
+              <button
+                aria-label="清除位置篩選"
+                className="ml-1 text-slate-500 hover:text-slate-200"
+                onClick={(e) => { e.stopPropagation(); setLocationFilter('all'); }}
+              >×</button>
+            )}
+          </FilterChip>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto scroll-thin">
@@ -103,7 +145,7 @@ const StatusPage = ({ onSelectNode }) => {
                     </span>
                   </td>
                   <td className={`px-3 py-2 text-right font-mono ${n.heartbeat > 60 ? 'text-sev-critical font-semibold' : n.heartbeat > 5 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
-                    {n.heartbeat > 60 ? Math.floor(n.heartbeat/60)+'m' : n.heartbeat+'s'}
+                    {n.heartbeat != null ? (n.heartbeat > 60 ? Math.floor(n.heartbeat/60)+'m' : n.heartbeat+'s') : '—'}
                   </td>
                   <td className={`px-3 py-2 text-right font-mono ${uploadIssue ? 'text-sev-critical font-semibold' : n.upload > 60 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
                     {n.upload > 60 ? Math.floor(n.upload/60)+'m' : n.upload+'s'}
@@ -112,7 +154,7 @@ const StatusPage = ({ onSelectNode }) => {
                   <td className="px-3 py-2 font-mono">
                     {n.type === 'camera' ? (
                       <span className={n.bitrate < 0.5 ? 'text-sev-critical' : n.bitrate < 1 ? 'text-sev-warn' : 'text-sev-ok'}>
-                        {n.bitrate.toFixed(1)}Mbps <span className="text-ink-muted">· {n.drops} drops</span>
+                        {n.bitrate != null ? n.bitrate.toFixed(1) : '—'}Mbps <span className="text-ink-muted">· {n.drops} drops</span>
                       </span>
                     ) : <span className="text-ink-muted">—</span>}
                   </td>
@@ -143,15 +185,17 @@ const StatusPage = ({ onSelectNode }) => {
                         onClick={e => {
                           e.stopPropagation();
                           if (window.SDPRS_API && window.SDPRS_API.snoozeNode) {
-                            Promise.resolve(window.SDPRS_API.snoozeNode(n.id, 30, '從節點狀態列表靜音'))
-                              .catch(err => alert('靜音失敗: ' + (err.message || err)));
+                            const minutes = 30;
+                            const reason = '從節點狀態列表靜音';
+                            Promise.resolve(window.SDPRS_API.snoozeNode(n.id, minutes, reason))
+                              .then(() => {
+                                setToast({ tone: 'success', msg: `${n.name || n.id} 已靜音 ${minutes} 分鐘` });
+                                if (typeof onRefresh === 'function') onRefresh();
+                              })
+                              .catch(err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` }));
                           }
                         }}
                         className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary"><Icon.BellOff size={12}/></button>
-                      {/* TODO(dashboard-audit-2026-07-15): needs product decision — node configuration UI (per-node thresholds, sensor flags). */}
-                      <button disabled title="尚未實作" onClick={e => e.stopPropagation()} className="w-6 h-6 rounded flex items-center justify-center text-ink-muted opacity-50 cursor-not-allowed"><Icon.Settings size={12}/></button>
-                      {/* TODO(dashboard-audit-2026-07-15): needs backend endpoint + safety confirm — POST /api/nodes/{id}/reboot. */}
-                      <button disabled title="尚未實作" onClick={e => e.stopPropagation()} className="w-6 h-6 rounded flex items-center justify-center text-ink-muted opacity-50 cursor-not-allowed"><Icon.RefreshCw size={12}/></button>
                     </div>
                   </td>
                 </tr>

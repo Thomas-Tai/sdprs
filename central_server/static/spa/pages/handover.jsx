@@ -2,6 +2,77 @@
 
 const { useState: useState_p, useEffect: useEffect_p } = React;
 
+function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, onCancel, onConfirm }) {
+  const dialogRef = React.useRef(null);
+  const onCancelRef = React.useRef(onCancel);
+  onCancelRef.current = onCancel;
+  useEffect_p(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      onCancelRef.current();
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      if (returnFocus?.isConnected) returnFocus.focus();
+    };
+  }, [open, returnFocus]);
+
+  if (!open) return null;
+  const btnClass = tone === 'danger'
+    ? 'bg-red-600 hover:bg-red-500'
+    : 'bg-sky-600 hover:bg-sky-500';
+  const handleDialogKeyDown = (e) => {
+    e.stopPropagation();
+    if (e.key !== 'Tab') return;
+    const buttons = Array.from(dialogRef.current?.querySelectorAll('button:not([disabled])') || []);
+    if (!buttons.length) return;
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  return (
+    <div
+      ref={dialogRef}
+      className="fixed inset-0 z-[110] bg-slate-950/70 flex items-center justify-center p-4"
+      onClick={onCancel}
+      onKeyDown={handleDialogKeyDown}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="handover-confirm-title"
+      aria-describedby="handover-confirm-message"
+    >
+      <div
+        className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id="handover-confirm-title" className="text-slate-100 text-lg font-semibold mb-2">{title}</h3>
+        <p id="handover-confirm-message" className="text-slate-300 text-sm mb-5 whitespace-pre-line">{message}</p>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800"
+          >取消</button>
+          <button
+            onClick={onConfirm}
+            className={`px-4 py-1.5 rounded-lg text-white ${btnClass}`}
+            autoFocus
+          >{confirmLabel || '確認'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const HandoverPage = () => {
   // Lazy init — mustn't crash if the loader hasn't populated HANDOVER yet.
   const [text, setText] = useState_p(() => (window.HANDOVER && window.HANDOVER.current) || '');
@@ -10,6 +81,10 @@ const HandoverPage = () => {
   const [savedAt, setSavedAt] = useState_p(() => window.HANDOVER && window.HANDOVER.pinned && window.HANDOVER.pinned.at);
   const [saving, setSaving] = useState_p(false);
   const [dirty, setDirty] = useState_p(false);
+  const [confirm, setConfirm] = useState_p(null);
+  const openConfirm = (options) => {
+    setConfirm({ ...options, returnFocus: document.activeElement });
+  };
   // Ticks so we re-poll window.HANDOVER whenever the app-level refresh fires
   // (app.jsx bumps its own tick and re-renders — this re-runs on every render).
   const remoteCurrent = (window.HANDOVER && window.HANDOVER.current) || '';
@@ -26,15 +101,26 @@ const HandoverPage = () => {
   }, [remoteCurrent, dirty]);
 
   const setTextTracked = (v) => { setText(v); setDirty(true); };
-  const adoptPeerCopy = () => {
-    setText(remoteCurrent);
-    setBaseline(remoteCurrent);
+  const replaceWithPeerCopy = () => {
+    const peerCopy = (window.HANDOVER && window.HANDOVER.current) || '';
+    setText(peerCopy);
+    setBaseline(peerCopy);
     setDirty(false);
+    setConfirm(null);
+  };
+  const adoptPeerCopy = () => {
+    openConfirm({
+      title: '覆蓋現有草稿？',
+      message: '目前草稿內容將被替換為對方版本，無法還原。',
+      confirmLabel: '覆蓋',
+      tone: 'danger',
+      onConfirm: replaceWithPeerCopy,
+    });
   };
 
   const s = window.SHIFT_SUMMARY;
   const today = new Date().toISOString().slice(0, 10);
-  const generateSummary = () => {
+  const writeGeneratedSummary = () => {
     const lines = [
       `本班次摘要 (${s.duration})`,
       `處理警報 ${s.alertsHandled} 筆 — 嚴重 ${s.critical} · 警告 ${s.warn} · 資訊 ${s.info}`,
@@ -46,15 +132,22 @@ const HandoverPage = () => {
       s.highlights.forEach(h => lines.push(`· ${h.node} ${h.label} (${h.count}×)`));
     }
     setTextTracked(lines.join('\n'));
+    setConfirm(null);
   };
-  const save = async () => {
-    // Save-time diff check — if the global changed since we captured baseline,
-    // warn before clobbering the peer's edit.
-    const latest = (window.HANDOVER && window.HANDOVER.current) || '';
-    if (latest !== baseline && latest !== text) {
-      const ok = window.confirm('伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎? (取消可先預覽對方版本)');
-      if (!ok) return;
+  const generateSummary = () => {
+    if (!text) {
+      writeGeneratedSummary();
+      return;
     }
+    openConfirm({
+      title: '覆蓋現有內容？',
+      message: '目前內容將被自動產生的本班次摘要取代，無法還原。',
+      confirmLabel: '覆蓋',
+      tone: 'danger',
+      onConfirm: writeGeneratedSummary,
+    });
+  };
+  const performSave = async () => {
     setSaving(true);
     try {
       await window.SDPRS_API.saveHandover(text);
@@ -67,6 +160,25 @@ const HandoverPage = () => {
       alert('儲存失敗: ' + (e.message || e));
     }
     setSaving(false);
+  };
+  const save = () => {
+    // Save-time diff check — if the global changed since we captured baseline,
+    // warn before clobbering the peer's edit.
+    const latest = (window.HANDOVER && window.HANDOVER.current) || '';
+    if (latest !== baseline && latest !== text) {
+      openConfirm({
+        title: '覆蓋對方版本？',
+        message: '伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎？取消可先預覽對方版本。',
+        confirmLabel: '仍要儲存',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          performSave();
+        },
+      });
+      return;
+    }
+    performSave();
   };
   return (
     <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
@@ -123,6 +235,7 @@ const HandoverPage = () => {
           value={text}
           onChange={e => setTextTracked(e.target.value)}
           rows="14"
+          aria-label="班次交接備註（單筆全域備註，24 小時後自動失效）"
           className="w-full bg-surface-panel border border-border-strong rounded p-3 text-sm font-mono leading-relaxed focus:border-sev-info focus:outline-none resize-none"
         />
         <div className="mt-3 flex items-center gap-2">
@@ -150,6 +263,11 @@ const HandoverPage = () => {
           ))}
         </div>
       </div>
+      <ConfirmDialog
+        open={!!confirm}
+        {...(confirm || {})}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 };

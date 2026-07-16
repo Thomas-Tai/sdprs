@@ -3,8 +3,13 @@
 const { useState: useState_p } = React;
 
 const WeatherPage = () => {
-  const w = window.WEATHER;
+  // Guard: window.WEATHER may be null before the first weather event arrives.
+  // All property accesses below must default so we don't throw pre-hydration.
+  const w = window.WEATHER || {};
   const fc = w.forecast || [];
+  const wind = w.wind || {};
+  const rain = w.rain || {};
+  const lightning = w.lightning || {};
   const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind)) : 1;
   const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain)) : 1;
   // TODO(dashboard-audit-2026-07-15): backend action for auto-mute on lightning.
@@ -45,42 +50,38 @@ const WeatherPage = () => {
             )}
           </div>
           <div className="flex-1"></div>
-          <div className="flex gap-1">
-            {/* TODO(dashboard-audit-2026-07-15): needs product decision — source switcher (CWA / SMG / manual override). */}
-            <button disabled title="尚未實作" className="px-2 h-6 text-xs bg-surface-elevated border border-border-strong rounded font-mono opacity-60 cursor-not-allowed">{w.source}</button>
-          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5">
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Wind size={10}/> 風速</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              <span className="text-4xl font-mono font-bold tnum">{w.wind.speed}</span>
+              <span className="text-4xl font-mono font-bold tnum">{wind.speed != null ? wind.speed : '—'}</span>
               <span className="text-ink-muted text-sm">km/h</span>
             </div>
-            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">陣風 {w.wind.gust} · {w.wind.dir}</div>
+            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">陣風 {wind.gust != null ? wind.gust : '—'} · {wind.dir || '—'}</div>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
               <span className="text-4xl font-mono font-bold tnum text-sev-info">
-                {w.rain.now != null ? w.rain.now : '—'}
+                {rain.now != null ? rain.now : '—'}
               </span>
               {/* api.jsx is splitting rain into 10min / 1h / 24h. `now` is 10-min accumulation once that lands. */}
               <span className="text-ink-muted text-sm">mm (10min)</span>
             </div>
             <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
-              24h 累計 {w.rain.day != null ? w.rain.day : '—'} mm
+              24h 累計 {rain.day != null ? rain.day : '—'} mm
             </div>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Zap size={10}/> 雷擊</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              <span className="text-4xl font-mono font-bold tnum text-sev-warn">{w.lightning.count != null ? w.lightning.count : '—'}</span>
+              <span className="text-4xl font-mono font-bold tnum text-sev-warn">{lightning.count != null ? lightning.count : '—'}</span>
               <span className="text-ink-muted text-sm">次/hr</span>
             </div>
             {(() => {
-              const near = w.lightning.nearest;
+              const near = lightning.nearest;
               if (near == null) return <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">無偵測</div>;
               // Only cry-wolf 警戒 when strike is close enough to actually matter.
               const alarming = near < 20;
@@ -94,10 +95,10 @@ const WeatherPage = () => {
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Thermometer size={10}/> 環境</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              <span className="text-4xl font-mono font-bold tnum">{w.temp}</span>
+              <span className="text-4xl font-mono font-bold tnum">{w.temp != null ? w.temp : '—'}</span>
               <span className="text-ink-muted text-sm">°C</span>
             </div>
-            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">濕度 {w.humidity}%{w.pressure != null ? ` · ${w.pressure}hPa` : ''}</div>
+            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">濕度 {w.humidity != null ? w.humidity : '—'}%{w.pressure != null ? ` · ${w.pressure}hPa` : ''}</div>
           </div>
         </div>
       </div>
@@ -116,7 +117,7 @@ const WeatherPage = () => {
         </div>
         <div className="bg-surface-panel border border-border-subtle rounded p-4 overflow-x-auto">
           <div className="flex gap-1 items-end" style={{ minWidth: '720px' }}>
-            {w.forecast.map((f, i) => (
+            {fc.map((f, i) => (
               <div key={i} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
                 <div className="text-[10px] text-sev-info font-mono tnum">{f.rain}</div>
                 <div className="w-full bg-sev-info/40 rounded-t" style={{ height: (f.rain / maxRain) * 60 + 'px' }}></div>

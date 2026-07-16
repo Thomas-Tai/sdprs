@@ -120,7 +120,7 @@ const sevMeta = {
   ok:       { label: '正常', color: 'sev-ok',       bar: 'sev-bar-ok',       Icon: () => window.Icon.CheckCircle({size:14}) },
   stale:    { label: '過期', color: 'sev-stale',    bar: 'sev-bar-stale',    Icon: () => window.Icon.Clock({size:14}) },
 };
-const alertTypeLabel = (t) => ({
+const alertTypeMap = {
   glass_break: '玻璃破裂',
   flood_critical: '淹水告警',
   flood_warn: '水位警戒',
@@ -128,7 +128,13 @@ const alertTypeLabel = (t) => ({
   temp_warn: '溫度警告',
   offline: '節點離線',
   upload_fail: '上傳失敗',
-}[t] || t);
+};
+function alertTypeLabel(type) {
+  const map = window.alertTypeMap || alertTypeMap;
+  if (type && map[type]) return map[type];
+  if (type) return String(type);
+  return '未知類型';
+}
 const stateMeta = {
   pending: { label: '待處理', cls: 'bg-sev-critical/15 text-sev-critical border-sev-critical/30' },
   acknowledged: { label: '已認領', cls: 'bg-sev-info/15 text-sev-info border-sev-info/30' },
@@ -149,7 +155,42 @@ const detectorHealthMeta = {
   unknown:  { label: '未知',         tone: 'muted' },
 };
 
+function nodeStatusTone(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'offline' || s === 'critical') return 'critical';
+  if (s === 'warning' || s === 'degraded') return 'warning';
+  if (s === 'online' || s === 'ok' || s === 'active') return 'success';
+  return 'muted';
+}
+
+const Z_LAYER = {
+  base:      10,
+  sticky:    20,
+  overlay:   30,
+  popover:   40,
+  drawer:    50,
+  modal:     60,
+  toast:     90,
+  critical: 100,
+  confirm:  110,
+};
+
+function formatDurationShort(seconds) {
+  if (seconds == null || !isFinite(seconds)) return '—';
+  const s = Math.abs(Number(seconds));
+  if (s < 60)    return `${Math.round(s)}秒`;
+  if (s < 3600)  return `${Math.round(s / 60)}分`;
+  if (s < 86400) return `${Math.round(s / 3600)}時`;
+  return `${Math.round(s / 86400)}天`;
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
-  fmtAge, ageColor, sevMeta, alertTypeLabel, stateMeta, detectorHealthMeta,
+  fmtAge, ageColor, sevMeta, alertTypeMap,
+  stateMeta, detectorHealthMeta,
 });
+
+window.alertTypeLabel = alertTypeLabel;
+window.nodeStatusTone = nodeStatusTone;
+window.Z_LAYER = Z_LAYER;
+window.formatDurationShort = formatDurationShort;

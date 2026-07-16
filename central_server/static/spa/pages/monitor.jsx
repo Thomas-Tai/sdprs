@@ -110,15 +110,22 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
 
 const MonitorPage = ({ activeAlerts, onSelectNode }) => {
   const [tab, setTab] = useState_p('all');
+  // Local toast for fullscreen failures etc. Auto-dismissed after 3s.
+  const [toast, setToast] = useState_p(null);
+  React.useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
   // Filter nodes by tab
   const allNodes = window.NODES;
   const cameraNodes = allNodes.filter(n => n.type === 'camera');
   const pumpNodes = allNodes.filter(n => n.type === 'pump');
   const visibleNodes = tab === 'cameras' ? cameraNodes : tab === 'pumps' ? pumpNodes : allNodes;
-  // Sort: OFFLINE > critical > warn > online
+  // Sort: OFFLINE > critical > warn > online (unknown statuses sink to the bottom via ?? 99)
   const sorted = [...visibleNodes].sort((a, b) => {
     const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
-    return rank[a.status] - rank[b.status];
+    return (rank[a.status] ?? 99) - (rank[b.status] ?? 99);
   });
 
   const summary = {
@@ -155,21 +162,13 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
         </div>
         <div className="flex-1"></div>
         <div className="flex items-center gap-2 text-xs">
-          {/* TODO(dashboard-audit-2026-07-15): needs product decision — grouping dimensions (location/floor/health/etc). */}
-          <button disabled title="尚未實作" className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded opacity-50 cursor-not-allowed">
-            <Icon.Filter size={12}/> 分組: <span className="text-ink-muted">無</span> <Icon.ChevronDown size={12}/>
-          </button>
-          {/* TODO(dashboard-audit-2026-07-15): needs product decision — configurable refresh cadence (1s / 5s / 15s / manual). */}
-          <button disabled title="尚未實作" className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded opacity-50 cursor-not-allowed">
-            <Icon.RefreshCw size={12}/> <span>1s</span>
-          </button>
           <button
             onClick={() => {
               const el = document.documentElement;
               if (document.fullscreenElement) {
                 document.exitFullscreen && document.exitFullscreen();
               } else if (el.requestFullscreen) {
-                el.requestFullscreen().catch(() => {});
+                el.requestFullscreen().catch(err => setToast({ tone: 'warn', msg: '全螢幕請求被瀏覽器拒絕' }));
               }
             }}
             className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
@@ -177,6 +176,14 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
           </button>
         </div>
       </div>
+      {toast && (
+        <div className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
+          toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
+            : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
+            : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
+            : 'bg-sev-info/15 text-sev-info border-sev-info/30'
+        }`}>{toast.msg}</div>
+      )}
       <div className="flex-1 overflow-y-auto scroll-thin p-3">
         {sorted.length === 0 ? (
           <div className="h-full flex items-center justify-center">
@@ -203,7 +210,7 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
                   <button onClick={() => setTab('pumps')} className="text-[10px] text-sev-info hover:underline">僅顯示抽水站 →</button>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-                  {[...pumpNodes].sort((a,b) => ({offline:0,critical:1,warn:2,online:3}[a.status]) - ({offline:0,critical:1,warn:2,online:3}[b.status]))
+                  {[...pumpNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
                     .map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} compact/>)}
                 </div>
               </div>
@@ -217,7 +224,7 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
                   <button onClick={() => setTab('cameras')} className="text-[10px] text-sev-info hover:underline">僅顯示攝影機 →</button>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-                  {[...cameraNodes].sort((a,b) => ({offline:0,critical:1,warn:2,online:3}[a.status]) - ({offline:0,critical:1,warn:2,online:3}[b.status]))
+                  {[...cameraNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
                     .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts}/>)}
                 </div>
               </div>

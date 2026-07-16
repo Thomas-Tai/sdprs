@@ -1,6 +1,6 @@
 // SDPRS — Alerts Page
 
-const { useState: useState_p, useMemo: useMemo_p } = React;
+const { useState: useState_p, useMemo: useMemo_p, useRef: useRef_p, useEffect: useEffect_p } = React;
 
 const SystemOKState = () => {
   const onlineCount = window.NODES.filter(n => n.status === 'online').length;
@@ -39,6 +39,7 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
     >
       <div className="w-6 flex-shrink-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
         <input type="checkbox" checked={checked} onChange={() => onCheck(alert.id)}
+          onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation(); }}
           className="w-3.5 h-3.5 rounded border-border-strong bg-surface-base text-sev-info focus:ring-sev-info"/>
       </div>
       <div className="w-4 flex-shrink-0 flex items-center justify-center">
@@ -177,8 +178,16 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               <Icon.Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-muted"/>
               <input id="global-search" type="text" value={search} onChange={e => setSearch(e.target.value)}
                 placeholder="搜尋..."
-                className="h-7 pl-7 pr-2 w-48 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
-              <span className="absolute right-2 top-1/2 -translate-y-1/2"><Kbd>/</Kbd></span>
+                className={`h-7 pl-7 ${search.length > 0 ? 'pr-7' : 'pr-2'} w-48 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none`}/>
+              {search.length > 0 ? (
+                <button
+                  aria-label="清除搜尋"
+                  onClick={() => setSearch('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink-primary text-sm leading-none"
+                >×</button>
+              ) : (
+                <span className="absolute right-2 top-1/2 -translate-y-1/2"><Kbd>/</Kbd></span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-1.5 px-3 py-2 flex-wrap">
@@ -193,11 +202,6 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             <FilterChip active={filterSev === 'info'} onClick={() => setFilterSev('info')}>
               <span className="w-1.5 h-1.5 rounded-full bg-sev-info"></span>資訊 <span className="font-mono tnum text-[10px] text-ink-muted">{counts.info}</span>
             </FilterChip>
-            <div className="w-px h-4 bg-border-subtle mx-1"></div>
-            {/* TODO(dashboard-audit-2026-07-15): needs product decision on which node/time/type dropdown values to expose. */}
-            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">節點 <Icon.ChevronDown size={10}/></button>
-            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">時間範圍 <Icon.ChevronDown size={10}/></button>
-            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">類型 <Icon.ChevronDown size={10}/></button>
           </div>
         </div>
 
@@ -263,11 +267,131 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   );
 };
 
+// ---------- SnoozeMenu ----------
+// Keyboard-accessible menu (WAI-ARIA menu pattern). ↑/↓ move focus among the
+// duration items, Enter/Space activate, Escape closes and returns focus to
+// the trigger, focus outside the menu also closes it.
+const SNOOZE_DURATIONS = [30, 60, 120];
+
+const SnoozeMenu = ({ alert, open, setOpen, onSnooze }) => {
+  const triggerRef = useRef_p(null);
+  const menuRef = useRef_p(null);
+  const itemRefs = useRef_p([]);
+  const [activeIdx, setActiveIdx] = useState_p(0);
+
+  useEffect_p(() => {
+    if (!open) return;
+    setActiveIdx(0);
+    // Move focus into the menu on next paint so the ↑/↓/Escape handlers below
+    // pick up the events instead of the underlying page shortcut layer.
+    const t = setTimeout(() => { itemRefs.current[0]?.focus(); }, 0);
+    const onDocClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)
+          && triggerRef.current && !triggerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', onDocClick); };
+  }, [open, setOpen]);
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = (activeIdx + 1) % SNOOZE_DURATIONS.length;
+      setActiveIdx(next);
+      itemRefs.current[next]?.focus();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = (activeIdx - 1 + SNOOZE_DURATIONS.length) % SNOOZE_DURATIONS.length;
+      setActiveIdx(prev);
+      itemRefs.current[prev]?.focus();
+      return;
+    }
+    if (e.key === 'Home') {
+      e.preventDefault(); setActiveIdx(0); itemRefs.current[0]?.focus(); return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      const last = SNOOZE_DURATIONS.length - 1;
+      setActiveIdx(last); itemRefs.current[last]?.focus(); return;
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen(o => !o)}
+        title="延期此節點 — 將不再發出告警音"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="h-9 px-3 bg-surface-elevated hover:bg-surface-overlay border border-border-strong rounded text-sm flex items-center gap-1.5 transition-colors"
+      >
+        <Icon.Clock size={14} aria-hidden="true"/> 延期節點 <Kbd aria-hidden="true">S</Kbd> <Icon.ChevronDown size={12} aria-hidden="true"/>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label={`延期 ${alert.node}`}
+          onKeyDown={onKeyDown}
+          className="absolute bottom-full mb-1 right-0 bg-surface-overlay border border-border-strong rounded shadow-xl py-1 min-w-[200px] z-10"
+        >
+          <div className="px-3 pt-1 pb-1.5 text-[10px] text-ink-muted">延期 {alert.node} · 期間將不發告警音</div>
+          {SNOOZE_DURATIONS.map((m, i) => (
+            <button
+              key={m}
+              ref={el => (itemRefs.current[i] = el)}
+              role="menuitem"
+              tabIndex={i === activeIdx ? 0 : -1}
+              onClick={async () => {
+                try {
+                  await onSnooze(alert.id, m);
+                  setOpen(false);
+                  triggerRef.current?.focus();
+                } catch (e) {
+                  /* keep menu open so operator can retry — parent already toasts */
+                }
+              }}
+              className="w-full px-3 py-1.5 text-left text-sm hover:bg-surface-panel focus:bg-surface-panel focus:outline-none focus:ring-1 focus:ring-sev-info flex items-center justify-between"
+            >
+              <span>{m} 分鐘</span><span className="font-mono text-xs text-ink-muted tnum" aria-hidden="true">{m}m</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert }) => {
   const node = window.NODES.find(n => n.id === alert.node);
   const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
   const [detailTab, setDetailTab] = useState_p('timeline');
+  // Tracks whether the operator has typed into the note textarea since the
+  // last template apply. Used so template chips do NOT clobber freeform
+  // typing — see C-6 (template overwrite warning).
+  const [noteEdited, setNoteEdited] = useState_p(false);
+  const applyTemplate = (t) => {
+    // If operator hasn't touched the textarea (or it's empty), replace.
+    // If they've typed something, append on a new line so their work isn't lost.
+    if (noteEdited && resolveNote.trim().length > 0) {
+      setResolveNote(resolveNote.replace(/\s+$/, '') + '\n' + t);
+    } else {
+      setResolveNote(t);
+    }
+    setNoteEdited(false);
+  };
   const history = window.NODE_HISTORY[alert.node] || [];
   const siblings = (allAlerts || []).filter(a => a.node === alert.node && a.id !== alert.id && a.state !== 'resolved');
   return (
@@ -294,9 +418,6 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           <div className="mb-2 flex items-center gap-2 text-xs bg-sev-warn/10 border border-sev-warn/30 rounded px-2 py-1.5">
             <Icon.Eye size={12} className="text-sev-warn"/>
             <span className="text-sev-warn font-medium">{alert.viewer} 正在查看此警報</span>
-            <div className="flex-1"></div>
-            {/* TODO(dashboard-audit-2026-07-15): needs product decision — takeover requires multi-viewer presence protocol + backend endpoint. */}
-            <button disabled title="尚未實作" className="text-[10px] font-mono text-ink-muted underline opacity-50 cursor-not-allowed">搶下處置權</button>
           </div>
         )}
         <div className="flex items-start gap-3">
@@ -360,8 +481,6 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           <div className="mt-2 bg-surface-panel border border-border-subtle rounded p-2">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">此節點近期事件 ({history.length})</span>
-              {/* TODO(dashboard-audit-2026-07-15): needs product decision — per-node history drill-down page. */}
-              <button disabled title="尚未實作" className="text-[10px] text-ink-muted opacity-50 cursor-not-allowed">檢視全部 →</button>
             </div>
             <div className="flex gap-1.5 overflow-x-auto scroll-thin pb-1">
               {history.map((h, i) => (
@@ -389,22 +508,20 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </div>
         )}
 
-        {/* Runbook — suggested actions */}
+        {/* Runbook — suggested actions (read-only summary + step list).
+            Action buttons removed 2026-07-16: they were disabled placeholders
+            pending runbook completion-tracking design. Steps still render as
+            informational cues so operators can follow them manually. */}
         {runbook && alert.state !== 'resolved' && (
           <div className="mt-2 bg-sev-info/5 border border-sev-info/30 rounded p-3">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-[10px] uppercase tracking-wider text-sev-info font-semibold flex items-center gap-1.5">
-                <Icon.ClipboardList size={11}/> 建議下一步 · Runbook
-              </div>
-              {/* TODO(dashboard-audit-2026-07-15): needs product decision — per-user runbook collapse persistence. */}
-              <button disabled title="尚未實作" className="text-[10px] text-ink-muted opacity-50 cursor-not-allowed">隱藏</button>
+            <div className="flex items-center gap-1.5 mb-2 text-[10px] uppercase tracking-wider text-sev-info font-semibold">
+              <Icon.ClipboardList size={11}/> 建議下一步 · Runbook
             </div>
             <p className="text-xs text-ink-secondary leading-relaxed mb-2.5">{runbook.summary}</p>
-            <div className="space-y-1">
-              {/* TODO(dashboard-audit-2026-07-15): needs runbook completion tracking design — steps are read-only until then. */}
-              {runbook.actions.map((a, i) => (
-                <button key={i} disabled title="尚未實作 — 需 runbook 完成度追蹤設計"
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded border text-left transition-colors opacity-70 cursor-not-allowed ${a.primary ? 'bg-sev-info/15 border-sev-info/40' : a.escalate ? 'bg-sev-critical/10 border-sev-critical/30' : 'bg-surface-elevated border-border-subtle'}`}>
+            <ol className="space-y-1">
+              {(runbook.actions || []).map((a, i) => (
+                <li key={i}
+                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded border ${a.primary ? 'bg-sev-info/10 border-sev-info/30' : a.escalate ? 'bg-sev-critical/10 border-sev-critical/30' : 'bg-surface-elevated border-border-subtle'}`}>
                   <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-mono font-bold flex-shrink-0 ${a.primary ? 'bg-sev-info text-white' : a.escalate ? 'bg-sev-critical text-white' : 'bg-surface-overlay text-ink-muted'}`}>{i+1}</span>
                   <div className="flex-1 min-w-0">
                     <div className={`text-xs font-medium ${a.primary ? 'text-sev-info' : a.escalate ? 'text-sev-critical' : 'text-ink-primary'}`}>
@@ -415,10 +532,9 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                     <div className="text-[10px] text-ink-muted mt-0.5">{a.hint}</div>
                   </div>
                   {a.est && <span className="text-[10px] font-mono tnum text-sev-ok bg-sev-ok/10 px-1.5 py-0.5 rounded">{a.est}</span>}
-                  <Icon.ChevronRight size={12} className="text-ink-muted flex-shrink-0"/>
-                </button>
+                </li>
               ))}
-            </div>
+            </ol>
           </div>
         )}
       </div>
@@ -531,7 +647,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <div className="text-[10px] text-ink-muted uppercase tracking-wider mb-1.5">處置模板 (數字鍵套用)</div>
             <div className="flex flex-wrap gap-1">
               {window.RESOLVE_TEMPLATES.map((t, i) => (
-                <button key={t} onClick={() => setResolveNote(t)}
+                <button key={t} onClick={() => applyTemplate(t)}
+                  title={noteEdited && resolveNote.trim().length > 0 ? '將附加到現有備註後 (換行)' : ''}
                   className={`inline-flex items-center gap-1 text-[11px] px-2 h-6 rounded border transition-colors ${resolveNote === t ? 'bg-sev-info/20 border-sev-info text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
                   <span className="kbd !h-3.5 !min-w-[14px] !text-[9px] !px-0.5">{i+1}</span>
                   {t}
@@ -542,15 +659,20 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         )}
 
         {alert.state !== 'resolved' && (
-          <textarea value={resolveNote} onChange={e => setResolveNote(e.target.value)}
+          <textarea value={resolveNote}
+            onChange={e => { setResolveNote(e.target.value); setNoteEdited(true); }}
             placeholder={alert.state === 'acknowledged' ? '處置備註 (解決時必填) — 可套用上方模板' : '備註 (選填)...'}
             rows="2"
+            aria-label={alert.state === 'acknowledged' ? '處置備註（解決時必填）' : '處置備註（選填）'}
             className="w-full px-2 py-1.5 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted resize-none focus:border-sev-info focus:outline-none"/>
         )}
         <div className="flex items-center gap-2">
           {alert.state === 'pending' && (
             <>
-              <button onClick={() => onAck(alert.id)}
+              <button onClick={async () => {
+                  try { await onAck(alert.id); }
+                  catch (e) { /* parent toasts; keep UI state so operator can retry */ }
+                }}
                 title="我正在處理此事件 — 不會關閉警報。按下後自動跳至下一筆。"
                 className="flex-1 h-9 bg-sev-info hover:bg-blue-600 text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
                 <Icon.Check size={16} strokeWidth={2.5}/>
@@ -562,18 +684,22 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           )}
           {alert.state === 'acknowledged' && (
             <>
-              <button onClick={() => onResolve(alert.id, resolveNote)}
-                disabled={!resolveNote}
+              <button onClick={async () => {
+                  try {
+                    await onResolve(alert.id, resolveNote);
+                    setResolveNote('');
+                    setNoteEdited(false);
+                  } catch (e) {
+                    /* keep the drafted note so the operator doesn't lose their write-up */
+                  }
+                }}
+                disabled={!resolveNote.trim()}
                 title="事件已結束 — 將從作用中列表移除"
                 className="flex-1 h-9 bg-sev-ok hover:bg-emerald-600 disabled:bg-sev-ok/30 disabled:cursor-not-allowed text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
                 <Icon.CheckCircle size={16} strokeWidth={2.5}/>
                 <span>解決</span>
-                {!resolveNote && <span className="text-[10px] opacity-80 font-normal">(需備註)</span>}
+                {!resolveNote.trim() && <span className="text-[10px] opacity-80 font-normal">(需備註)</span>}
                 <Kbd>R</Kbd>
-              </button>
-              {/* TODO(dashboard-audit-2026-07-15): needs backend endpoint — PATCH /api/alerts/{id}/unacknowledge (currently no reverse transition). */}
-              <button disabled title="尚未實作 — 需後端反向轉換端點" className="h-9 px-2.5 bg-surface-elevated border border-border-strong rounded text-xs text-ink-muted opacity-50 cursor-not-allowed">
-                撤銷
               </button>
             </>
           )}
@@ -583,23 +709,12 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             </div>
           )}
           {alert.state !== 'resolved' && (
-            <div className="relative">
-              <button onClick={() => setSnoozeOpen(o => !o)}
-                title="延期此節點 — 將不再發出告警音"
-                className="h-9 px-3 bg-surface-elevated hover:bg-surface-overlay border border-border-strong rounded text-sm flex items-center gap-1.5 transition-colors">
-                <Icon.Clock size={14}/> 延期節點 <Kbd>S</Kbd> <Icon.ChevronDown size={12}/>
-              </button>
-              {snoozeOpen && (
-                <div className="absolute bottom-full mb-1 right-0 bg-surface-overlay border border-border-strong rounded shadow-xl py-1 min-w-[200px] z-10">
-                  <div className="px-3 pt-1 pb-1.5 text-[10px] text-ink-muted">延期 {alert.node} · 期間將不發告警音</div>
-                  {[30,60,120].map(m => (
-                    <button key={m} onClick={() => { onSnooze(alert.id, m); setSnoozeOpen(false); }} className="w-full px-3 py-1.5 text-left text-sm hover:bg-surface-panel flex items-center justify-between">
-                      <span>{m} 分鐘</span><span className="font-mono text-xs text-ink-muted tnum">{m}m</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <SnoozeMenu
+              alert={alert}
+              open={snoozeOpen}
+              setOpen={setSnoozeOpen}
+              onSnooze={onSnooze}
+            />
           )}
         </div>
         {alert.state === 'resolved' && alert.note && (

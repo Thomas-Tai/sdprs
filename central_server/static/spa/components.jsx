@@ -32,6 +32,101 @@ window.safeSevMeta = safeSevMeta;
 window.safeStateMeta = safeStateMeta;
 window.safeDetectorHealthMeta = safeDetectorHealthMeta;
 
+// ---------- AudioController — synthetic-tone alert audio ----------
+// Zero external assets: uses the Web Audio API to generate oscillator tones.
+// The `static/audio/` directory is intentionally empty and Howler is NOT
+// loaded — this replaces the previous placebo pipeline. Real MP3 samples can
+// swap in later without changing the public surface (playCritical, playWarning,
+// playAck, playTest, setVolume, setMuted, isArmed, arm, subscribe).
+//
+// Browser autoplay policy: an AudioContext can't produce sound until the user
+// has interacted with the page. We attach a one-shot document click listener
+// below that calls arm() on the first gesture anywhere in the app, and expose
+// a subscribe() so the StatusStrip pill can reactively reflect armed state.
+const AudioController = (() => {
+  let ctx = null, gainNode = null;
+  let muted = false;
+  let volume = 0.7;
+  let armed = false;
+  const listeners = new Set();
+  const notify = () => listeners.forEach(fn => { try { fn(); } catch (_) {} });
+
+  const ensure = () => {
+    if (ctx) return ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try {
+      ctx = new AC();
+      gainNode = ctx.createGain();
+      gainNode.connect(ctx.destination);
+      gainNode.gain.value = volume;
+    } catch (_) { ctx = null; }
+    return ctx;
+  };
+
+  const beep = (freq, dur, wave = 'sine', delay = 0) => {
+    if (muted || !ensure()) return;
+    const start = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = wave;
+    osc.frequency.value = freq;
+    osc.connect(env);
+    env.connect(gainNode);
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(1, start + 0.02);
+    env.gain.linearRampToValueAtTime(0, start + dur);
+    osc.start(start);
+    osc.stop(start + dur + 0.05);
+  };
+
+  const api = {
+    arm: () => {
+      if (armed) return;
+      armed = true;
+      const c = ensure();
+      if (c && typeof c.resume === 'function') { try { c.resume(); } catch (_) {} }
+      notify();
+    },
+    isArmed: () => armed,
+    playCritical: () => { beep(880, 0.25); beep(660, 0.25, 'sine', 0.30); beep(880, 0.40, 'sine', 0.60); },
+    playWarning:  () => { beep(660, 0.20); beep(880, 0.30, 'sine', 0.25); },
+    playAck:      () => { beep(1200, 0.10, 'triangle'); },
+    playTest: (severity) => {
+      if (severity === 'critical') return api.playCritical();
+      if (severity === 'warning')  return api.playWarning();
+      return api.playAck();
+    },
+    setVolume: (v) => {
+      volume = Math.max(0, Math.min(1, (Number(v) || 0) / 100));
+      if (gainNode) gainNode.gain.value = volume;
+    },
+    setMuted: (m) => { muted = !!m; notify(); },
+    isMuted:  () => muted,
+    isAvailable: () => !!(window.AudioContext || window.webkitAudioContext),
+    subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+  };
+  return api;
+})();
+window.SDPRS_AUDIO = AudioController;
+
+// One-shot arm() on first user gesture anywhere in the app. Browsers block
+// AudioContext playback until the user interacts, so this hook lets audio
+// "just work" the moment the operator clicks/keys anything — no need for
+// them to hunt for the pill in the status strip.
+(() => {
+  if (typeof document === 'undefined') return;
+  const arm = () => {
+    try { AudioController.arm(); } catch (_) {}
+    document.removeEventListener('click', arm, true);
+    document.removeEventListener('keydown', arm, true);
+    document.removeEventListener('touchstart', arm, true);
+  };
+  document.addEventListener('click', arm, true);
+  document.addEventListener('keydown', arm, true);
+  document.addEventListener('touchstart', arm, true);
+})();
+
 // ---------- Atoms ----------
 
 const Kbd = ({ children }) => <kbd className="kbd noselect">{children}</kbd>;
@@ -184,6 +279,45 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
   const tones = { ok: 'bg-sev-ok/15 text-sev-ok border-sev-ok/40', warn: 'bg-sev-warn/15 text-sev-warn border-sev-warn/40', critical: 'bg-sev-critical/15 text-sev-critical border-sev-critical/40' };
   const activeMutes = (muted ? 1 : 0) + (muteState?.nodes?.length || 0) + (muteState?.lightning ? 1 : 0);
 
+  // Reactive audio-armed state — flips true after the first user gesture
+  // anywhere on the page (see AudioController's one-shot listener). The
+  // subscribe() hook keeps the pill in sync without prop-drilling.
+  const [audioArmed, setAudioArmed] = useState(() => !!(window.SDPRS_AUDIO && window.SDPRS_AUDIO.isArmed()));
+  useEffect(() => {
+    if (!window.SDPRS_AUDIO || typeof window.SDPRS_AUDIO.subscribe !== 'function') return;
+    const off = window.SDPRS_AUDIO.subscribe(() => setAudioArmed(window.SDPRS_AUDIO.isArmed()));
+    return () => { off && off(); };
+  }, []);
+
+  // Play a critical tone the moment a NEW unack alert appears. Uses a ref
+  // to hold the previous count so unrelated re-renders don't retrigger.
+  const prevUnackRef = useRef(unackCount);
+  useEffect(() => {
+    const prev = prevUnackRef.current;
+    prevUnackRef.current = unackCount;
+    if (muted || !window.SDPRS_AUDIO) return;
+    if (unackCount > prev) {
+      // A newly-arrived unack alert. Play at the "critical" cadence — the
+      // status strip doesn't have per-alert severity here, and the loudest
+      // tone is safer than silence in a 24/7 NOC context.
+      try { window.SDPRS_AUDIO.playCritical(); } catch (_) {}
+    }
+  }, [unackCount, muted]);
+
+  // Replay tone when the audio countdown resets (transitions from a small
+  // value UP to a larger one, e.g. 1 → 30). app.jsx owns the countdown ticker;
+  // we just react to the reset edge, which happens exactly when the
+  // "replay every 30s while unacked" loop cycles.
+  const prevReplayRef = useRef(audioReplayIn);
+  useEffect(() => {
+    const prev = prevReplayRef.current;
+    prevReplayRef.current = audioReplayIn;
+    if (muted || !window.SDPRS_AUDIO) return;
+    if (unackCount > 0 && prev != null && audioReplayIn != null && audioReplayIn > prev) {
+      try { window.SDPRS_AUDIO.playCritical(); } catch (_) {}
+    }
+  }, [audioReplayIn, unackCount, muted]);
+
   return (
     <div className="h-12 fixed inset-x-0 top-0 z-40 bg-surface-panel border-b border-border-subtle flex items-center px-4 gap-3 noselect">
       {/* Logo + wordmark */}
@@ -208,7 +342,7 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
             <Icon.Bell size={12} strokeWidth={2.5}/>
             <span>未認領 {unackCount}</span>
             {!muted && audioReplayIn != null && audioReplayIn > 0 && (
-              <span className="font-mono text-[10px] bg-black/30 px-1 rounded">♪ {audioReplayIn}s</span>
+              <span className="font-mono text-[10px] bg-black/30 px-1 rounded" aria-hidden="true">♪ {audioReplayIn}s</span>
             )}
           </button>
         )}
@@ -258,22 +392,45 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
           <Icon.Search size={12}/> <span>跳轉...</span> <Kbd>⌘K</Kbd>
         </button>
         <button onClick={onToggleFocus} title="夜深 / 專注模式 (Ctrl+.)"
-          className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${focusMode ? 'text-sev-info bg-sev-info/10' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}>
-          <Icon.Moon size={16}/>
+          aria-pressed={!!focusMode}
+          aria-label={focusMode ? '關閉專注模式' : '啟用專注模式（隱藏資訊級警報）'}
+          className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${focusMode ? 'text-sev-info bg-sev-info/10 ring-1 ring-sev-info/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}>
+          <Icon.Moon size={16} aria-hidden="true"/>
         </button>
-        <button onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
-          <Icon.Keyboard size={16}/>
+        <button onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" aria-label="開啟鍵盤捷徑說明" className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
+          <Icon.Keyboard size={16} aria-hidden="true"/>
         </button>
-        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Theme (T)" className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
-          {theme === 'dark' ? <Icon.Moon size={16}/> : <Icon.Sun size={16}/>}
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Theme (T)"
+          aria-label={theme === 'dark' ? '切換為淺色主題' : '切換為深色主題'}
+          className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
+          {theme === 'dark' ? <Icon.Moon size={16} aria-hidden="true"/> : <Icon.Sun size={16} aria-hidden="true"/>}
         </button>
+        {/* Audio-armed pill — browsers block AudioContext playback until the
+            operator interacts with the page. Shows armed status and lets the
+            operator arm audio explicitly if the auto-listener somehow missed. */}
+        {window.SDPRS_AUDIO && window.SDPRS_AUDIO.isAvailable() && (
+          <button
+            onClick={() => { try { window.SDPRS_AUDIO.arm(); } catch (_) {} }}
+            title={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效 (瀏覽器需要一次使用者互動)'}
+            disabled={audioArmed}
+            className={`hidden md:inline-flex items-center gap-1 h-6 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
+          >
+            {audioArmed ? '🔊 音效已啟用' : '🔇 點擊啟用音效'}
+          </button>
+        )}
         <button
           onClick={onOpenMuteDrawer}
           title={`音效 (M) — ${activeMutes} 個來源已抑制`}
-          className={`relative w-8 h-8 rounded flex items-center justify-center transition-colors ${activeMutes > 0 ? 'text-sev-warn hover:bg-sev-warn/10' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}
+          aria-pressed={activeMutes > 0}
+          aria-label={
+            muted
+              ? `開啟音效抽屜（目前全域靜音，${activeMutes} 個來源已抑制）`
+              : `開啟音效抽屜（${activeMutes} 個來源已抑制）`
+          }
+          className={`relative w-8 h-8 rounded flex items-center justify-center transition-colors ${activeMutes > 0 ? 'text-sev-warn hover:bg-sev-warn/10 ring-1 ring-sev-warn/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}
         >
-          {muted ? <Icon.VolumeX size={16}/> : <Icon.Volume2 size={16}/>}
-          {activeMutes > 0 && <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sev-warn text-[9px] font-bold text-black flex items-center justify-center tnum">{activeMutes}</span>}
+          {muted ? <Icon.VolumeX size={16} aria-hidden="true"/> : <Icon.Volume2 size={16} aria-hidden="true"/>}
+          {activeMutes > 0 && <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sev-warn text-[9px] font-bold text-black flex items-center justify-center tnum">{activeMutes}</span>}
         </button>
         <div className="w-px h-6 bg-border-subtle mx-1"></div>
         <button onClick={() => { if (confirm('登出?')) window.location.href = '/logout'; }} className="flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
@@ -415,7 +572,9 @@ const Footer = ({ data, handover }) => {
           </span>
         )}
         <span className="text-ink-secondary truncate">"{text}"</span>
-        <button className="text-ink-muted hover:text-ink-primary p-1 -m-1 flex-shrink-0"><Icon.Edit3 size={12}/></button>
+        {/* Footer note is edited via the Handover page — no inline pencil here
+            (removed 2026-07-16 as part of dead-button cleanup; the pencil had
+            no onClick and duplicated the Handover editor). */}
       </div>
     </div>
   );
@@ -511,6 +670,9 @@ const ShortcutsModal = ({ open, onClose }) => {
 
 const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const drawerRef = useRef(null);
+  const headingRef = useRef(null);
+  // Inline error for the "解除" unsnooze API call; keyed by node id.
+  const [unsnoozeErr, setUnsnoozeErr] = useState(null);
   // 30s tick so the "剩餘 X 分鐘" text refreshes while the drawer sits open.
   // Cheap — a single setState per drawer, only while mounted.
   const [, setNow] = useState(0);
@@ -519,14 +681,13 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     const id = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(id);
   }, [open]);
-  // Focus + Escape trap. On open, drop focus into the drawer so screen readers
-  // land there and keyboard-only ops can Tab through the controls.
+  // Focus + Escape trap. On open, focus lands on the panel's heading (not the
+  // ✕ close button) so screen readers announce the panel's purpose. See H-9.
   useEffect(() => {
-    if (!open || !drawerRef.current) return;
-    const first = drawerRef.current.querySelector(
-      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    );
-    first && first.focus();
+    if (!open) return;
+    if (headingRef.current) {
+      try { headingRef.current.focus(); } catch (_) {}
+    }
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -540,13 +701,52 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
   const activeCount = (muteState.global ? 1 : 0) + muteState.nodes.length + (muteState.lightning ? 1 : 0);
   const nearestKm = window.WEATHER?.lightning?.nearest;
-  const playTest = (kind) => {
-    // mock audio test — visual feedback only
+  // Test buttons: actually play a synthetic tone via AudioController AND keep
+  // the visual "▶ 播放測試: …" pulse so operators see confirmation even when
+  // the browser hasn't been armed yet.
+  const playTest = (severity, label) => {
     const node = document.getElementById('test-audio-feedback');
     if (node) {
-      node.textContent = `▶ 播放測試: ${kind}`;
+      node.textContent = `▶ 播放測試: ${label}`;
       setTimeout(() => { if (node) node.textContent = ''; }, 1500);
     }
+    if (window.SDPRS_AUDIO) {
+      try {
+        if (!window.SDPRS_AUDIO.isArmed()) window.SDPRS_AUDIO.arm();
+        window.SDPRS_AUDIO.playTest(severity);
+      } catch (_) { /* AudioContext refused — visual feedback still fires */ }
+    }
+  };
+  // Unsnooze a single node via api.jsx. Only mutate local state after the
+  // server confirms; otherwise the next poll (~20s) resurfaces the node and
+  // the operator's action looks like it did nothing.
+  const unsnoozeOne = async (nid) => {
+    setUnsnoozeErr(null);
+    if (!window.SDPRS_API || typeof window.SDPRS_API.unsnoozeNode !== 'function') {
+      setUnsnoozeErr({ nid, msg: '解除功能尚未就緒' });
+      return;
+    }
+    try {
+      await window.SDPRS_API.unsnoozeNode(nid);
+      setMuteState({ ...muteState, nodes: muteState.nodes.filter(x => x !== nid) });
+    } catch (err) {
+      console.error('unsnooze failed', err);
+      setUnsnoozeErr({ nid, msg: '伺服器解除失敗，請重試' });
+    }
+  };
+  // Unsnooze all snoozed nodes then clear local mute state. Errors on any
+  // node are collected and surfaced without wiping the remaining flags.
+  const unsnoozeAll = async () => {
+    setUnsnoozeErr(null);
+    const targets = [...muteState.nodes];
+    if (window.SDPRS_API && typeof window.SDPRS_API.unsnoozeNode === 'function' && targets.length > 0) {
+      const results = await Promise.allSettled(targets.map(nid => window.SDPRS_API.unsnoozeNode(nid)));
+      const failed = results.map((r, i) => r.status === 'rejected' ? targets[i] : null).filter(Boolean);
+      if (failed.length > 0) {
+        setUnsnoozeErr({ nid: null, msg: `${failed.length} 個節點解除失敗: ${failed.join(', ')}` });
+      }
+    }
+    setMuteState({ global: false, nodes: [], lightning: false, volume: muteState.volume ?? 70 });
   };
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
@@ -559,7 +759,11 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10">
-          <h2 className="text-base font-semibold flex items-center gap-2">
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-base font-semibold flex items-center gap-2 focus:outline-none"
+          >
             <Icon.VolumeX size={18} className={activeCount > 0 ? 'text-sev-warn' : ''}/>
             音效抑制 / 音量
           </h2>
@@ -571,13 +775,19 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
           <div>
             <div className="text-[10px] uppercase tracking-widest text-ink-muted font-semibold mb-2">音量</div>
             <div className="bg-surface-elevated border border-border-subtle rounded p-3">
-              <VolumeSlider value={muteState.volume ?? 70} onChange={(v) => setMuteState({ ...muteState, volume: v })}/>
+              <VolumeSlider
+                value={muteState.volume ?? 70}
+                onChange={(v) => {
+                  setMuteState({ ...muteState, volume: v });
+                  if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setVolume(v); } catch (_) {} }
+                }}
+              />
               <div className="flex items-center justify-between mt-3 text-xs">
                 <span className="text-ink-muted">測試音效:</span>
                 <div className="flex gap-1">
-                  <button onClick={() => playTest('嚴重')} className="px-2 h-6 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25">嚴重</button>
-                  <button onClick={() => playTest('警告')} className="px-2 h-6 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25">警告</button>
-                  <button onClick={() => playTest('確認')} className="px-2 h-6 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25">確認</button>
+                  <button onClick={() => playTest('critical', '嚴重')} className="px-2 h-6 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25">嚴重</button>
+                  <button onClick={() => playTest('warning', '警告')} className="px-2 h-6 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25">警告</button>
+                  <button onClick={() => playTest('ack', '確認')} className="px-2 h-6 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25">確認</button>
                 </div>
               </div>
               <div id="test-audio-feedback" className="text-[10px] text-sev-info font-mono tnum mt-1 h-4"></div>
@@ -602,7 +812,11 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                 <div className="text-xs text-ink-muted mt-0.5">影響所有警報音 (操作確認音不受影響)</div>
               </div>
               <button
-                onClick={() => setMuteState({ ...muteState, global: !muteState.global })}
+                onClick={() => {
+                  const next = !muteState.global;
+                  setMuteState({ ...muteState, global: next });
+                  if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setMuted(next); } catch (_) {} }
+                }}
                 className={`px-2.5 h-6 rounded text-xs font-medium ${muteState.global ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
               >
                 {muteState.global ? '靜音中' : '正常'}
@@ -651,12 +865,17 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                         )}
                       </div>
                       <button
-                        onClick={() => setMuteState({ ...muteState, nodes: muteState.nodes.filter(x => x !== nid) })}
+                        onClick={() => unsnoozeOne(nid)}
                         className="text-ink-muted hover:text-ink-primary text-xs px-2 h-6 rounded bg-surface-overlay"
                       >解除</button>
                     </div>
                   );
                 })}
+                {unsnoozeErr && (
+                  <div className="text-[10px] text-sev-critical mt-1 px-1">
+                    {unsnoozeErr.nid ? `${unsnoozeErr.nid}: ` : ''}{unsnoozeErr.msg}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -687,7 +906,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
           </div>
 
           <button
-            onClick={() => setMuteState({ global: false, nodes: [], lightning: false, volume: muteState.volume ?? 70 })}
+            onClick={unsnoozeAll}
             className="w-full mt-2 h-9 bg-sev-info hover:bg-blue-600 text-white rounded text-sm font-semibold"
           >
             全部解除
@@ -712,6 +931,7 @@ const EmptyState = ({ icon: IconComp = Icon.ShieldCheck, title, hint }) => (
 
 const FilterChip = ({ active, onClick, children, count }) => (
   <button onClick={onClick}
+    aria-pressed={!!active}
     className={`inline-flex items-center gap-1 px-2 h-6 rounded text-xs border transition-colors ${active ? 'bg-sev-info/15 text-sev-info border-sev-info/40' : 'bg-surface-elevated text-ink-secondary border-border-subtle hover:border-border-strong'}`}>
     {children}
     {count != null && <span className="font-mono tnum text-[10px] text-ink-muted">{count}</span>}
@@ -767,10 +987,13 @@ const NewAlertBanner = ({ count, onClick }) => {
   if (!count) return null;
   return (
     <button onClick={onClick}
+      role="alert"
+      aria-live="assertive"
+      aria-label={`${count} 個新警報 — 點擊或按上鍵跳轉`}
       className="new-alert-banner fixed top-16 left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors">
-      <Icon.ArrowUp size={14} strokeWidth={2.5}/>
-      <span className="text-sm font-semibold tnum">{count} 新警報</span>
-      <Kbd>↑</Kbd>
+      <Icon.ArrowUp size={14} strokeWidth={2.5} aria-hidden="true"/>
+      <span className="text-sm font-semibold tnum" aria-hidden="true">{count} 新警報</span>
+      <Kbd aria-hidden="true">↑</Kbd>
     </button>
   );
 };
@@ -960,25 +1183,27 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
 
 // ---------- Node Detail Side Panel (from monitor wall / status) ----------
 
-const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode }) => {
+const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSelectAlert, openAlerts, onUpdateNode }) => {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
+  const [locationError, setLocationError] = useState(null);
   const panelRef = useRef(null);
+  const headingRef = useRef(null);
   React.useEffect(() => {
     if (node) {
       setDraft({ location: node.location || '' });
       setEditing(false);
+      setLocationError(null);
     }
   }, [node?.id]);
 
-  // A11y: Escape closes; focus lands in the panel on open. Guard on `node`
-  // rather than `open` — this panel treats a truthy node as "open".
+  // A11y: Escape closes; focus lands on the panel heading (not the ✕ close
+  // button) so screen readers announce the node id/name first. See H-9.
   React.useEffect(() => {
-    if (!node || !panelRef.current) return;
-    const first = panelRef.current.querySelector(
-      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    );
-    first && first.focus();
+    if (!node) return;
+    if (headingRef.current) {
+      try { headingRef.current.focus(); } catch (_) {}
+    }
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -986,14 +1211,25 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
 
   if (!node) return null;
   const nodeAlerts = openAlerts.filter(a => a.node === node.id);
-  const history = window.NODE_HISTORY[node.id] || [];
+  // Prefer prop-supplied history (fresh from caller's useState); fall back to
+  // the window global for legacy call sites that haven't been updated yet.
+  // See C-8 — direct window reads were non-reactive so panel history looked
+  // stale until the panel was re-opened.
+  const items = history || (window.NODE_HISTORY?.[node?.id] || []);
 
   const saveEdits = () => {
     // Backend PATCH /api/nodes/{id} only accepts `location`. name/floor/area
     // are DERIVED from location by api.jsx mapNode (see api.jsx:184-193), so
     // only `location` is editable here — the other fields are read-only.
     const newLocation = (draft?.location || '').trim();
-    if (!newLocation) { setEditing(false); return; }
+    if (!newLocation) {
+      // H-7: previously silently exited edit mode when the field was blank,
+      // which read as "discarded my change without saying why". Show an
+      // inline validation error instead.
+      setLocationError('位置為必填');
+      return;
+    }
+    setLocationError(null);
     onUpdateNode && onUpdateNode(node.id, { location: newLocation });
     setEditing(false);
   };
@@ -1009,11 +1245,15 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
         onClick={e => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            className="flex items-center gap-2 focus:outline-none m-0 text-base font-normal"
+          >
             <span className="font-mono text-base font-bold">{node.id}</span>
             <span className={`w-2 h-2 rounded-full bg-sev-${node.status === 'offline' || node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok'}`}></span>
             <span className="text-sm text-ink-secondary">{node.name}</span>
-          </div>
+          </h2>
           <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
         </div>
         <div className="p-4 space-y-4">
@@ -1057,10 +1297,17 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
                   </label>
                   <input
                     value={draft?.location ?? ''}
-                    onChange={e => setDraft({ ...(draft || {}), location: e.target.value })}
+                    onChange={e => {
+                      setDraft({ ...(draft || {}), location: e.target.value });
+                      if (locationError) setLocationError(null);
+                    }}
                     placeholder="例: 3F · 西側走廊"
-                    className="w-full h-7 px-2 text-xs bg-surface-base border border-border-strong rounded focus:border-sev-info focus:outline-none"
+                    aria-invalid={!!locationError}
+                    className={`w-full h-7 px-2 text-xs bg-surface-base border rounded focus:outline-none ${locationError ? 'border-sev-critical focus:border-sev-critical' : 'border-border-strong focus:border-sev-info'}`}
                   />
+                  {locationError && (
+                    <div className="text-sev-critical text-xs mt-1">{locationError}</div>
+                  )}
                   <div className="text-[10px] text-ink-dim mt-1 flex items-center gap-1">
                     <Icon.Info size={10}/>
                     其他欄位變更請聯絡管理員
@@ -1136,34 +1383,54 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
             </div>
           )}
 
-          {/* Recent history */}
+          {/* Recent history — rows clickable when the item carries an alertId
+              (H-8). Fall back to a plain div when there's nothing to open, so
+              we don't render fake affordances. */}
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1.5">最近事件 ({history.length})</div>
-            {history.length === 0 ? (
+            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1.5">最近事件 ({items.length})</div>
+            {items.length === 0 ? (
               <div className="text-xs text-ink-muted text-center py-3 border border-dashed border-border-subtle rounded">無近期紀錄</div>
             ) : (
               <div className="space-y-1">
-                {history.map((h, i) => (
-                  <div key={i} className="flex items-center gap-2 p-2 rounded bg-surface-elevated text-xs">
-                    <span className="font-mono tnum text-ink-muted w-16 flex-shrink-0">{h.t}</span>
-                    <SeverityBadge sev={h.sev} withLabel={false}/>
-                    <span className="text-ink-secondary truncate flex-1">{window.alertTypeLabel(h.type)} · {h.resolution}</span>
-                  </div>
-                ))}
+                {items.map((h, i) => {
+                  const alertId = h.alertId || h.id;
+                  const clickable = !!(alertId && onSelectAlert);
+                  const rowCls = `flex items-center gap-2 p-2 rounded bg-surface-elevated text-xs w-full text-left ${clickable ? 'hover:bg-surface-overlay cursor-pointer' : ''}`;
+                  const body = (
+                    <>
+                      <span className="font-mono tnum text-ink-muted w-16 flex-shrink-0">{h.t}</span>
+                      <SeverityBadge sev={h.sev} withLabel={false}/>
+                      <span className="text-ink-secondary truncate flex-1">{window.alertTypeLabel(h.type)} · {h.resolution}</span>
+                      {clickable && <Icon.ChevronRight size={12} className="text-ink-muted flex-shrink-0"/>}
+                    </>
+                  );
+                  if (clickable) {
+                    return (
+                      <button key={i} onClick={() => onSelectAlert(alertId)} className={rowCls}>
+                        {body}
+                      </button>
+                    );
+                  }
+                  return <div key={i} className={rowCls}>{body}</div>;
+                })}
               </div>
             )}
           </div>
 
-          {/* Actions */}
-          <div className="grid grid-cols-3 gap-1.5">
-            <button className="h-8 bg-surface-elevated border border-border-strong rounded text-xs hover:bg-surface-overlay">
-              <Icon.BellOff size={12} className="inline mr-1"/> 延期
-            </button>
-            <button className="h-8 bg-surface-elevated border border-border-strong rounded text-xs hover:bg-surface-overlay">
-              <Icon.Settings size={12} className="inline mr-1"/> 配置
-            </button>
-            <button className="h-8 bg-surface-elevated border border-border-strong rounded text-xs hover:bg-surface-overlay">
-              <Icon.RefreshCw size={12} className="inline mr-1"/> 重啟
+          {/* Actions — the previous 延期 / 配置 / 重啟 trio was silent no-op
+              (no onClick handlers). Replaced 2026-07-16 with a single link
+              that closes the drawer and (if the caller wired onNavigate)
+              jumps to the Status page where node config lives. */}
+          <div>
+            <button
+              onClick={() => {
+                onClose();
+                if (typeof onNavigate === 'function') onNavigate('status');
+              }}
+              className="w-full h-8 bg-surface-elevated border border-border-strong rounded text-xs hover:bg-surface-overlay flex items-center justify-center gap-1.5"
+            >
+              <Icon.Settings size={12}/> 在狀態頁編輯設定
+              <Icon.ChevronRight size={12} className="text-ink-muted"/>
             </button>
           </div>
         </div>

@@ -1,6 +1,6 @@
 // SDPRS — Pumps Page
 
-const PumpsPage = () => {
+const PumpsPage = ({ onSelectNode }) => {
   const pumps = window.NODES.filter(n => n.type === 'pump');
   return (
     <div className="h-full overflow-y-auto scroll-thin p-4">
@@ -19,7 +19,12 @@ const PumpsPage = () => {
           const danger = p.level > 85;
           const warn = p.level > 70;
           return (
-            <div key={p.id} className={`bg-surface-panel border rounded p-4 ${danger ? 'border-sev-critical/40' : warn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
+            <div key={p.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelectNode && onSelectNode(p)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode && onSelectNode(p); } }}
+              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-slate-600 transition-colors ${danger ? 'border-sev-critical/40' : warn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
               <div className="flex items-start justify-between mb-3">
                 <div>
                   <div className="flex items-center gap-2">

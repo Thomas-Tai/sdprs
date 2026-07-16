@@ -23,6 +23,11 @@ function App({ initialError = null }) {
   const [alerts, setAlerts] = useStateA(window.ALERTS ?? []);
   // load-bearing: setNodes() forces re-render so window.NODES reads pick up new data. DO NOT remove.
   const [nodes, setNodes] = useStateA(window.NODES ?? []);
+  // C-8: NodeSidePanel history was previously read directly from
+  // window.NODE_HISTORY, which is non-reactive — the panel showed stale
+  // events until re-opened. Hoist history into React state so refresh() /
+  // WS events propagate to the panel automatically.
+  const [nodeHistory, setNodeHistory] = useStateA(window.NODE_HISTORY ?? {});
   const [selectedId, setSelectedId] = useStateA(window.ALERTS?.[0]?.id ?? null);
   const [liveSec, setLiveSec] = useStateA(0);
   const [shortcutsOpen, setShortcutsOpen] = useStateA(false);
@@ -204,6 +209,10 @@ function App({ initialError = null }) {
         const r = await window.SDPRS_API.refreshLive();
         setAlerts(r.alerts);
         setNodes(r.nodes);
+        // Push NODE_HISTORY into React state so NodeSidePanel re-renders
+        // when history changes (C-8). buildNodeHistory ran in api.jsx and
+        // wrote window.NODE_HISTORY — mirror the fresh copy here.
+        setNodeHistory(window.NODE_HISTORY ?? {});
         setLiveSec(0);
       } catch (e) {
         console.warn('[SDPRS] refresh failed', e);
@@ -385,10 +394,20 @@ function App({ initialError = null }) {
       const tag = e.target.tagName;
       const inField = tag === 'INPUT' || tag === 'TEXTAREA';
 
-      // Cmd+K / Ctrl+K (always)
+      // Cmd+K / Ctrl+K opens the palette from ANYWHERE, including inside inputs.
+      // This is the one shortcut that must survive the inField guard below.
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setCmdkOpen(true);
+        return;
+      }
+      // H-4: inside inputs, no shortcuts fire — Escape just blurs so typing
+      // "?" / "/" / "m" / "1" in the search box doesn't teleport the operator.
+      // Cmd/Ctrl+K is the only exception and was handled above.
+      if (inField) {
+        if (e.key === 'Escape') {
+          document.activeElement?.blur();
+        }
         return;
       }
       // Ctrl+. focus mode
@@ -405,20 +424,29 @@ function App({ initialError = null }) {
         return;
       }
 
+      // H-2: Escape closes ONLY the top-of-stack overlay so a nested modal
+      // (e.g. ShortcutsModal opened from within MuteDrawer) doesn't collapse
+      // its parent too. Priority (top-most first):
+      //   sessionExpired (non-dismissible) → cmdk → shortcuts → nodePanel →
+      //   mute → shift → mobileNav.
       if (e.key === 'Escape') {
-        setShortcutsOpen(false);
-        setMuteDrawerOpen(false);
-        setCmdkOpen(false);
-        setNodePanelNode(null);
-        setShiftBannerOpen(false);
-        setMobileNavOpen(false);
+        if (sessionExpired) return; // blocking modal — never Esc-dismissible
+        if (cmdkOpen) { setCmdkOpen(false); return; }
+        if (shortcutsOpen) { setShortcutsOpen(false); return; }
+        if (nodePanelNode) { setNodePanelNode(null); return; }
+        if (muteDrawerOpen) { setMuteDrawerOpen(false); return; }
+        if (shiftBannerOpen) { setShiftBannerOpen(false); return; }
+        if (mobileNavOpen) { setMobileNavOpen(false); return; }
         return;
       }
-      if (inField) return;
 
       if (e.key === '?') { e.preventDefault(); setShortcutsOpen(true); return; }
       if (e.key === '/') {
         e.preventDefault();
+        // H-5: when a modal owns the foreground, "/" would otherwise steal
+        // focus into that modal's own search input (e.g. the command palette).
+        // Bail so the shortcut stays a header-search shortcut only.
+        if (nodePanelNode || shortcutsOpen || muteDrawerOpen || cmdkOpen || sessionExpired) return;
         // TODO(dashboard-audit-2026-07-15): components.jsx should give the
         // header search input `id="global-search"` so this lookup is stable;
         // querySelector fallback matches the first such input anywhere on the
@@ -474,6 +502,9 @@ function App({ initialError = null }) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         const list = alerts.filter(a => a.state !== 'resolved');
+        // C-9: when every alert is resolved, list[nextIdx] is undefined and
+        // `.id` throws. Bail before indexing.
+        if (list.length === 0) return;
         const idx = list.findIndex(a => a.id === selectedId);
         const nextIdx = e.key === 'ArrowDown' ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
         setSelectedId(list[nextIdx].id);
@@ -481,7 +512,7 @@ function App({ initialError = null }) {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode]);
+  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode, sessionExpired, cmdkOpen, shortcutsOpen, nodePanelNode, muteDrawerOpen, shiftBannerOpen, mobileNavOpen]);
 
   // Sync the in-app "global mute" toggle back to persisted tweaks.muted.
   // Skip the first invocation: the initial value was seeded FROM tweaks.muted
@@ -520,8 +551,8 @@ function App({ initialError = null }) {
     switch (page) {
       case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote}/>;
       case 'monitor': return <window.MonitorPage activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
-      case 'status': return <window.StatusPage onSelectNode={onSelectNode}/>;
-      case 'pumps': return <window.PumpsPage/>;
+      case 'status': return <window.StatusPage onSelectNode={onSelectNode} onRefresh={refresh}/>;
+      case 'pumps': return <window.PumpsPage onSelectNode={onSelectNode}/>;
       case 'weather': return <window.WeatherPage/>;
       case 'handover': return <window.HandoverPage/>;
       case 'audit': return <window.AuditPage/>;
@@ -540,6 +571,7 @@ function App({ initialError = null }) {
         await window.SDPRS_API.loadInitial();
         setAlerts(window.ALERTS ?? []);
         setNodes(window.NODES ?? []);
+        setNodeHistory(window.NODE_HISTORY ?? {});
         setSelectedId(window.ALERTS?.[0]?.id ?? null);
       } catch (e) {
         console.error('[SDPRS] retry loadInitial failed:', e);
@@ -644,11 +676,26 @@ function App({ initialError = null }) {
       <window.ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)}/>
       <window.MuteDrawer open={muteDrawerOpen} onClose={() => setMuteDrawerOpen(false)} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
       <window.CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} alerts={alerts} nodes={nodes} onSelectAlert={setSelectedId} onNav={setPage} onCmd={onCmdkCommand}/>
-      <window.NodeSidePanel node={nodePanelNode} onClose={() => setNodePanelNode(null)} onJumpAlert={onJumpAlert} openAlerts={alerts.filter(a => a.state !== 'resolved')} onUpdateNode={onUpdateNode}/>
+      <window.NodeSidePanel
+        node={nodePanelNode}
+        history={nodePanelNode ? (nodeHistory[nodePanelNode.id] || []) : []}
+        onClose={() => setNodePanelNode(null)}
+        onJumpAlert={onJumpAlert}
+        openAlerts={alerts.filter(a => a.state !== 'resolved')}
+        onUpdateNode={onUpdateNode}/>
 
-      {/* Toast */}
+      {/* Toast — a11y: polite for info/ok, assertive for warn.
+          role="status" + aria-live announce silently to screen readers. */}
+      <div
+        aria-live={toast?.tone === 'warn' ? 'assertive' : 'polite'}
+        aria-atomic="true"
+        role={toast?.tone === 'warn' ? 'alert' : 'status'}
+        className="sr-only-live"
+      >
+        {toast?.message || ''}
+      </div>
       {toast && (
-        <div className="fixed bottom-14 right-4 z-50 animate-in">
+        <div className="fixed bottom-14 right-4 z-50 animate-in" aria-hidden="true">
           <div className={`bg-surface-overlay border rounded-lg px-3 py-2 shadow-2xl flex items-center gap-2 text-sm ${
             toast.tone === 'ok' ? 'border-sev-ok/50' : toast.tone === 'warn' ? 'border-sev-warn/50' : 'border-sev-info/50'
           }`}>
