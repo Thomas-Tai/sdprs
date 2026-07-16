@@ -184,10 +184,72 @@ def _pg_list_actions_sync(
     return out
 
 
+def get_snooze_provenance(node_ids: List[str]) -> Dict[str, Dict[str, str]]:
+    """Return {node_id: {"by": operator, "at": timestamp_iso}} for the most
+    recent SNOOZE action per node. Missing entries mean "never snoozed".
+
+    Callers should only merge this in when the node's ``snoozed_until`` is
+    non-null (currently snoozed) — otherwise a stale provenance would render
+    for a node that has since been unsnoozed. There is intentionally no
+    "current snooze only" filter here: this helper serves the raw provenance;
+    the calling site knows the current snooze state from the nodes table.
+    """
+    if not node_ids:
+        return {}
+    unique_ids = list({str(nid) for nid in node_ids if nid is not None})
+    if not unique_ids:
+        return {}
+    try:
+        if get_backend() == "postgresql":
+            rows = _pg_snooze_provenance_sync(unique_ids)
+        else:
+            rows = _sqlite_snooze_provenance(unique_ids)
+    except Exception as e:
+        logger.warning(f"Snooze provenance lookup failed: {e}")
+        return {}
+
+    # Rows are id DESC — first hit per target_id wins.
+    out: Dict[str, Dict[str, str]] = {}
+    for r in rows:
+        tid = r.get("target_id")
+        if not tid or tid in out:
+            continue
+        out[tid] = {"by": r.get("operator") or "", "at": r.get("timestamp") or ""}
+    return out
+
+
+def _sqlite_snooze_provenance(node_ids: List[str]) -> List[Dict[str, Any]]:
+    placeholders = ",".join("?" for _ in node_ids)
+    sql = (
+        f"SELECT operator, target_id, timestamp FROM operator_actions "
+        f"WHERE action_type = ? AND target_id IN ({placeholders}) "
+        f"ORDER BY id DESC"
+    )
+    with get_db_cursor() as cur:
+        cur.execute(sql, (ACTION_SNOOZE, *node_ids))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _pg_snooze_provenance_sync(node_ids: List[str]) -> List[Dict[str, Any]]:
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sqlalchemy.text(
+                "SELECT operator, target_id, timestamp FROM operator_actions "
+                "WHERE action_type = :atype AND target_id = ANY(:ids) "
+                "ORDER BY id DESC"
+            ),
+            {"atype": ACTION_SNOOZE, "ids": list(node_ids)},
+        )
+        return [dict(r) for r in result.mappings().fetchall()]
+
+
 __all__ = [
-    "log_action", "list_actions",
+    "log_action", "list_actions", "get_snooze_provenance",
     "ACTION_LOGIN", "ACTION_LOGOUT",
     "ACTION_ACKNOWLEDGE", "ACTION_RESOLVE", "ACTION_BULK_RESOLVE",
+    "ACTION_BULK_ACKNOWLEDGE",
     "ACTION_SNOOZE", "ACTION_UNSNOOZE",
     "ACTION_LOCATION_EDIT", "ACTION_HANDOVER_EDIT",
 ]

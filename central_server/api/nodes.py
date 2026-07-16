@@ -66,14 +66,13 @@ class NodeStatus(BaseModel):
     battery_voltage: Optional[float] = None
     power_source: Optional[str] = None
     snoozed_until: Optional[str] = None
-    # dashboard-audit-2026-07-15 frozen contract: SPA reads snoozed_by / snoozed_at
-    # to render "who snoozed and when" chips. There are NO snoozed_by/snoozed_at
-    # columns on the nodes table (only snoozed_until + snooze_reason); the schema
-    # keeps the fields so the SPA has a stable contract, but the current backend
-    # emits None for both. Sourcing them would need either a column addition
-    # (deferred per no-migration rule) or a per-node lookup into operator_actions
-    # WHERE action_type='SNOOZE' (adds a query per node — deferred pending
-    # coordinator decision).
+    # Populated by list_nodes from a batch operator_actions lookup — most
+    # recent ACTION_SNOOZE row per node (see audit_service.get_snooze_provenance).
+    # Absent for nodes never snoozed. SPA renders the "who snoozed and when"
+    # chip only when the node is currently snoozed (snoozed_until non-null in
+    # the future), so stale provenance for a since-unsnoozed node does not
+    # visibly leak. No schema migration — derived from the append-only
+    # operator_actions table.
     snoozed_by: Optional[str] = None
     snoozed_at: Optional[str] = None
 
@@ -129,6 +128,20 @@ async def list_nodes(
 
     db_nodes = _load_node_db()
 
+    # Batch fetch snooze provenance for every db node in one query — avoids
+    # N+1 vs a per-node lookup. Result is a {node_id: {by, at}} dict; nodes
+    # that have never been snoozed are absent (rendered as None on the wire).
+    from ..services.audit_service import get_snooze_provenance
+    _snooze_prov = get_snooze_provenance(list(db_nodes.keys()))
+
+    def _snooze_by(nid: str) -> Optional[str]:
+        entry = _snooze_prov.get(nid)
+        return entry["by"] if entry else None
+
+    def _snooze_at(nid: str) -> Optional[str]:
+        entry = _snooze_prov.get(nid)
+        return entry["at"] if entry else None
+
     result = []
     now = utcnow()
 
@@ -183,6 +196,8 @@ async def list_nodes(
             battery_voltage=db_row.get("battery_voltage"),
             power_source=db_row.get("power_source"),
             snoozed_until=_ts_to_iso(db_row.get("snoozed_until")),
+            snoozed_by=_snooze_by(node_id),
+            snoozed_at=_snooze_at(node_id),
         )
 
         result.append(node_status)
@@ -200,6 +215,8 @@ async def list_nodes(
             battery_voltage=row.get("battery_voltage"),
             power_source=row.get("power_source"),
             snoozed_until=_ts_to_iso(row.get("snoozed_until")),
+            snoozed_by=_snooze_by(nid),
+            snoozed_at=_snooze_at(nid),
         ))
 
     logger.debug(f"Returning {len(result)} nodes")

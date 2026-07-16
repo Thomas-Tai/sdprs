@@ -582,6 +582,11 @@ async def alert_rate(
                 buckets[idx]["count"] += 1
 
     # "Storm intensifying" hint: current bucket > 2x rolling-1hr-avg.
+    # Consumed by the legacy Jinja dashboard (templates/base.html:682 —
+    # #alert-rate-intensifying badge). The V2 SPA discards this field and
+    # re-derives its own "加劇中" indicator client-side from the bucket
+    # counts (components.jsx Sparkline/Footer) — see audit finding LOW #14.
+    # Keep the field until the legacy dashboard is fully retired.
     intensifying = False
     if buckets:
         recent_count = buckets[-1]["count"]
