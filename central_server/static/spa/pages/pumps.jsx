@@ -16,15 +16,22 @@ const PumpsPage = ({ onSelectNode }) => {
       ) : null}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {pumps.map(p => {
-          const danger = p.level > 85;
-          const warn = p.level > 70;
+          // Offline branches FIRST so a stale-but-high last-known level can't
+          // render as a healthy or critical pump — telemetry has stopped and
+          // the level is untrustworthy. Warn from status is honored even when
+          // the level is below the water-threshold rules.
+          const isOffline = p.status === 'offline';
+          const isCritical = !isOffline && (p.status === 'critical' || p.level > 85);
+          const isWarn = !isOffline && !isCritical && (p.status === 'warn' || p.level > 70);
+          const tone = isOffline ? 'stale' : isCritical ? 'critical' : isWarn ? 'warn' : 'ok';
+          const statusLabel = isOffline ? '離線' : p.status === 'critical' ? '嚴重' : p.level > 85 ? '高水位' : isWarn ? '警戒' : '正常';
           return (
             <div key={p.id}
               role="button"
               tabIndex={0}
               onClick={() => onSelectNode && onSelectNode(p)}
               onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode && onSelectNode(p); } }}
-              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-slate-600 transition-colors ${danger ? 'border-sev-critical/40' : warn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
+              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-slate-600 transition-colors ${isOffline ? 'border-sev-stale/40 opacity-70' : isCritical ? 'border-sev-critical/40' : isWarn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
               <div className="flex items-start justify-between mb-3">
                 <div>
                   <div className="flex items-center gap-2">
@@ -33,9 +40,9 @@ const PumpsPage = ({ onSelectNode }) => {
                   </div>
                   <div className="text-xs text-ink-muted mt-0.5">{p.location}</div>
                 </div>
-                <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-sev-${danger||p.status==='critical'?'critical':warn?'warn':'ok'}/15 text-sev-${danger||p.status==='critical'?'critical':warn?'warn':'ok'} border-sev-${danger||p.status==='critical'?'critical':warn?'warn':'ok'}/30`}>
-                  <span className={`w-1.5 h-1.5 rounded-full bg-sev-${danger||p.status==='critical'?'critical':warn?'warn':'ok'}`}></span>
-                  {p.status === 'critical' ? '嚴重' : danger ? '高水位' : warn ? '警戒' : '正常'}
+                <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-sev-${tone}/15 text-sev-${tone} border-sev-${tone}/30`}>
+                  <span className={`w-1.5 h-1.5 rounded-full bg-sev-${tone}`}></span>
+                  {statusLabel}
                 </span>
               </div>
 
@@ -65,8 +72,8 @@ const PumpsPage = ({ onSelectNode }) => {
 
               {/* Water level visualization */}
               <div className="relative h-32 bg-surface-base border border-border-subtle rounded overflow-hidden">
-                <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${danger ? 'bg-sev-critical/40' : warn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
-                  <div className={`h-1 ${danger ? 'bg-sev-critical' : warn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
+                <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${isOffline ? 'bg-sev-stale/30' : isCritical ? 'bg-sev-critical/40' : isWarn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
+                  <div className={`h-1 ${isOffline ? 'bg-sev-stale' : isCritical ? 'bg-sev-critical' : isWarn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
                 </div>
                 {/* Threshold markers */}
                 <div className="absolute right-2 top-1 text-[9px] font-mono text-ink-dim tnum">100</div>
@@ -79,7 +86,7 @@ const PumpsPage = ({ onSelectNode }) => {
                 </div>
                 {/* Center value */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <span className={`text-4xl font-mono font-bold tnum ${danger ? 'text-sev-critical' : warn ? 'text-sev-warn' : 'text-ink-primary'}`}>{p.level}<span className="text-base text-ink-muted">%</span></span>
+                  <span className={`text-4xl font-mono font-bold tnum ${isOffline ? 'text-sev-stale' : isCritical ? 'text-sev-critical' : isWarn ? 'text-sev-warn' : 'text-ink-primary'}`}>{p.level}<span className="text-base text-ink-muted">%</span></span>
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-2 mt-3 text-xs font-mono tnum">

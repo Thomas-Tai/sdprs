@@ -2,6 +2,31 @@
 
 const { useState: useState_p, useMemo: useMemo_p } = React;
 
+// Per-row snooze control. Local `busy` state guards against double-fire on
+// slow VPN; onKeyDown must stopPropagation so Enter/Space on the focused
+// button doesn't also bubble to the surrounding row's keyboard handler
+// (which would open the side panel).
+const SnoozeRowButton = ({ node, onDone, onError }) => {
+  const [busy, setBusy] = React.useState(false);
+  const trigger = () => {
+    if (busy) return;
+    if (!(window.SDPRS_API && window.SDPRS_API.snoozeNode)) return;
+    setBusy(true);
+    Promise.resolve(window.SDPRS_API.snoozeNode(node.id, 30, '從節點狀態列表靜音'))
+      .then(() => onDone && onDone(node, 30))
+      .catch(err => onError && onError(err))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <button
+      title="靜音 30 分鐘"
+      disabled={busy}
+      onClick={e => { e.stopPropagation(); trigger(); }}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+      className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"><Icon.BellOff size={12}/></button>
+  );
+};
+
 const StatusPage = ({ onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
@@ -180,22 +205,13 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
                   </td>
                   <td className="px-3 py-2 text-right pr-4">
                     <div className="inline-flex gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
-                      <button
-                        title="靜音 30 分鐘"
-                        onClick={e => {
-                          e.stopPropagation();
-                          if (window.SDPRS_API && window.SDPRS_API.snoozeNode) {
-                            const minutes = 30;
-                            const reason = '從節點狀態列表靜音';
-                            Promise.resolve(window.SDPRS_API.snoozeNode(n.id, minutes, reason))
-                              .then(() => {
-                                setToast({ tone: 'success', msg: `${n.name || n.id} 已靜音 ${minutes} 分鐘` });
-                                if (typeof onRefresh === 'function') onRefresh();
-                              })
-                              .catch(err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` }));
-                          }
+                      <SnoozeRowButton
+                        node={n}
+                        onDone={(node, minutes) => {
+                          setToast({ tone: 'success', msg: `${node.name || node.id} 已靜音 ${minutes} 分鐘` });
+                          if (typeof onRefresh === 'function') onRefresh();
                         }}
-                        className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary"><Icon.BellOff size={12}/></button>
+                        onError={err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` })}/>
                     </div>
                   </td>
                 </tr>
