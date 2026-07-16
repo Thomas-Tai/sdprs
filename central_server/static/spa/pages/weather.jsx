@@ -10,8 +10,11 @@ const WeatherPage = () => {
   const wind = w.wind || {};
   const rain = w.rain || {};
   const lightning = w.lightning || {};
-  const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind)) : 1;
-  const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain)) : 1;
+  // Filter nulls before Math.max — api.jsx C5 fix emits `null` for future
+  // hours whose data hasn't landed yet; a single NaN in Math.max poisons the
+  // whole axis and every bar height becomes `NaNpx` → blank chart.
+  const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind).filter(v => Number.isFinite(v))) : 1;
+  const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain).filter(v => Number.isFinite(v))) : 1;
   // TODO(dashboard-audit-2026-07-15): backend action for auto-mute on lightning.
   // Local state only until the pipeline (weather WS event -> snooze fan-out) ships.
   const [autoMuteLightning, setAutoMuteLightning] = useState_p(true);
@@ -117,15 +120,29 @@ const WeatherPage = () => {
         </div>
         <div className="bg-surface-panel border border-border-subtle rounded p-4 overflow-x-auto">
           <div className="flex gap-1 items-end" style={{ minWidth: '720px' }}>
-            {fc.map((f, i) => (
-              <div key={i} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
-                <div className="text-[10px] text-sev-info font-mono tnum">{f.rain}</div>
-                <div className="w-full bg-sev-info/40 rounded-t" style={{ height: (f.rain / maxRain) * 60 + 'px' }}></div>
-                <div className="w-full bg-sev-warn/40 rounded-t" style={{ height: (f.wind / maxWind) * 60 + 'px' }}></div>
-                <div className="text-[10px] text-sev-warn font-mono tnum">{f.wind}</div>
-                <div className="text-[10px] text-ink-muted font-mono tnum mt-1">{f.h}</div>
-              </div>
-            ))}
+            {fc.map((f, i) => {
+              // Distinguish "no data yet" (null from backend) from a genuine
+              // zero. Zero rain/wind should look like a flat bar; null should
+              // read as "we don't have this hour" (dashed placeholder + em-dash
+              // label) so operators don't misread absent data as calm weather.
+              const hasRain = Number.isFinite(f.rain);
+              const hasWind = Number.isFinite(f.wind);
+              return (
+                <div key={i} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
+                  <div className="text-[10px] text-sev-info font-mono tnum">{hasRain ? f.rain : '—'}</div>
+                  <div
+                    className={`w-full rounded-t ${hasRain ? 'bg-sev-info/40' : 'border-t border-dashed border-sev-info/40'}`}
+                    style={{ height: hasRain ? (f.rain / maxRain) * 60 + 'px' : '4px' }}
+                  ></div>
+                  <div
+                    className={`w-full rounded-t ${hasWind ? 'bg-sev-warn/40' : 'border-t border-dashed border-sev-warn/40'}`}
+                    style={{ height: hasWind ? (f.wind / maxWind) * 60 + 'px' : '4px' }}
+                  ></div>
+                  <div className="text-[10px] text-sev-warn font-mono tnum">{hasWind ? f.wind : '—'}</div>
+                  <div className="text-[10px] text-ink-muted font-mono tnum mt-1">{f.h}</div>
+                </div>
+              );
+            })}
           </div>
           <div className="flex items-center gap-4 mt-3 text-[10px] text-ink-muted">
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-sev-info/60"></span>雨量 mm/h</span>

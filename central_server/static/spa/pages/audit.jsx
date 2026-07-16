@@ -204,10 +204,16 @@ const AuditPage = () => {
               >×</button>
             )}
           </div>
+          {/* H-4: disable while an export is in flight (exportState.tone==='info'
+              is the "匯出中..." message set by exportAuditCsv). Prevents a
+              stressed operator on slow network from queueing 3-4 concurrent
+              generations + downloads + audit_export rows. */}
           <button
             onClick={exportAuditCsv}
+            disabled={exportState?.tone === 'info'}
+            aria-busy={exportState?.tone === 'info'}
             title="下載目前條件的稽核紀錄 (CSV)"
-            className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay">
+            className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-surface-elevated">
             <Icon.Download size={12}/> 匯出 CSV
           </button>
         </div>

@@ -73,14 +73,33 @@ function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, 
   );
 }
 
+// Draft key for crash-/close-/nav-recovery of an unsaved handover narrative
+// (H-2 fix). Cleared on successful save and on peer-copy adoption.
+const HANDOVER_DRAFT_KEY = 'sdprs.handover.draft';
+const readDraft = () => {
+  try { return window.localStorage.getItem(HANDOVER_DRAFT_KEY); } catch (_) { return null; }
+};
+const writeDraft = (v) => {
+  try { window.localStorage.setItem(HANDOVER_DRAFT_KEY, v); } catch (_) { /* quota / privacy mode */ }
+};
+const clearDraft = () => {
+  try { window.localStorage.removeItem(HANDOVER_DRAFT_KEY); } catch (_) { /* ignore */ }
+};
+
 const HandoverPage = () => {
   // Lazy init — mustn't crash if the loader hasn't populated HANDOVER yet.
-  const [text, setText] = useState_p(() => (window.HANDOVER && window.HANDOVER.current) || '');
+  // If a locally-saved draft exists (tab was closed / crashed mid-edit), restore
+  // it and mark dirty so beforeunload + peer-diff keep working.
+  const [text, setText] = useState_p(() => {
+    const draft = readDraft();
+    if (draft != null) return draft;
+    return (window.HANDOVER && window.HANDOVER.current) || '';
+  });
   // Snapshot of what the server had when we started editing — for the divergence check.
   const [baseline, setBaseline] = useState_p(() => (window.HANDOVER && window.HANDOVER.current) || '');
   const [savedAt, setSavedAt] = useState_p(() => window.HANDOVER && window.HANDOVER.pinned && window.HANDOVER.pinned.at);
   const [saving, setSaving] = useState_p(false);
-  const [dirty, setDirty] = useState_p(false);
+  const [dirty, setDirty] = useState_p(() => readDraft() != null);
   const [confirm, setConfirm] = useState_p(null);
   const openConfirm = (options) => {
     setConfirm({ ...options, returnFocus: document.activeElement });
@@ -99,6 +118,24 @@ const HandoverPage = () => {
       setBaseline(remoteCurrent);
     }
   }, [remoteCurrent, dirty]);
+
+  // H-2: persist dirty drafts to localStorage on every keystroke so tab close,
+  // browser crash, or in-app nav don't destroy a long narrative. Cleared when
+  // dirty flips false (saved or peer-adopted).
+  useEffect_p(() => {
+    if (!dirty) { clearDraft(); return undefined; }
+    writeDraft(text);
+    return undefined;
+  }, [text, dirty]);
+
+  // H-2: browser-level "unsaved changes" prompt on tab close / navigation while
+  // the draft is dirty. localStorage recovery handles in-app page switches too.
+  useEffect_p(() => {
+    if (!dirty) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
 
   const setTextTracked = (v) => { setText(v); setDirty(true); };
   const replaceWithPeerCopy = () => {
@@ -120,6 +157,28 @@ const HandoverPage = () => {
 
   const s = window.SHIFT_SUMMARY || {};
   const today = new Date().toISOString().slice(0, 10);
+
+  // H-3: surface 24h TTL expiry so the incoming operator isn't blindsided by
+  // a note that vanishes minutes into their shift. ageMin is captured at
+  // fetch time (api.jsx loadHandover) — only trust it when the on-screen text
+  // still matches what was fetched, otherwise a just-saved draft would show
+  // a stale "expiring" badge from the previous note's age.
+  const pinnedRef = window.HANDOVER && window.HANDOVER.pinned;
+  const pinnedText = (window.HANDOVER && window.HANDOVER.current) || '';
+  let expiryBadge = null;
+  if (pinnedRef && !dirty && text && text === pinnedText) {
+    const ageMinFromServer = Number(pinnedRef.ageMin) || 0;
+    const hoursLeft = 24 - ageMinFromServer / 60;
+    if (hoursLeft < 1) {
+      // < 1h: escalate to red so the incoming operator plainly sees the note
+      // is about to disappear and can copy anything critical elsewhere.
+      expiryBadge = { tone: 'critical', label: '1 小時內過期' };
+    } else if (hoursLeft < 4) {
+      // 1–4h: amber warning window — enough runway to save a refreshed copy.
+      expiryBadge = { tone: 'warn', label: `即將過期 (${Math.floor(hoursLeft)}h)` };
+    }
+  }
+
   const writeGeneratedSummary = () => {
     const lines = [
       `本班次摘要 (${s.duration})`,
@@ -245,6 +304,14 @@ const HandoverPage = () => {
           <span className="text-xs text-ink-muted ml-2">
             {savedAt ? <>最後儲存: <span className="font-mono tnum">{savedAt}</span></> : '尚未儲存'}
             {dirty && <span className="ml-2 text-sev-warn">· 未儲存變更</span>}
+            {expiryBadge && (
+              <span
+                className={`ml-2 inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-semibold bg-sev-${expiryBadge.tone}/15 text-sev-${expiryBadge.tone} border-sev-${expiryBadge.tone}/40`}
+                title="交接備註 24 小時後會自動失效"
+              >
+                {expiryBadge.label}
+              </span>
+            )}
           </span>
         </div>
       </div>
