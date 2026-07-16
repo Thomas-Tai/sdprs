@@ -21,17 +21,19 @@ const PumpsPage = ({ onSelectNode }) => {
           // the level is untrustworthy. Warn from status is honored even when
           // the level is below the water-threshold rules.
           const isOffline = p.status === 'offline';
-          const isCritical = !isOffline && (p.status === 'critical' || p.level > 85);
-          const isWarn = !isOffline && !isCritical && (p.status === 'warn' || p.level > 70);
-          const tone = isOffline ? 'stale' : isCritical ? 'critical' : isWarn ? 'warn' : 'ok';
-          const statusLabel = isOffline ? '離線' : p.status === 'critical' ? '嚴重' : p.level > 85 ? '高水位' : isWarn ? '警戒' : '正常';
+          // Online but no water reading — sensor untrusted, must not read as healthy
+          const isNoTelemetry = !isOffline && (p.level == null);
+          const isCritical = !isOffline && !isNoTelemetry && (p.status === 'critical' || p.level > 85);
+          const isWarn = !isOffline && !isNoTelemetry && !isCritical && (p.status === 'warn' || p.level > 70);
+          const tone = isOffline ? 'stale' : isNoTelemetry ? 'warn' : isCritical ? 'critical' : isWarn ? 'warn' : 'ok';
+          const statusLabel = isOffline ? '離線' : isNoTelemetry ? '無水位資料' : p.status === 'critical' ? '嚴重' : p.level > 85 ? '高水位' : isWarn ? '警戒' : '正常';
           return (
             <div key={p.id}
               role="button"
               tabIndex={0}
               onClick={() => onSelectNode && onSelectNode(p)}
               onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode && onSelectNode(p); } }}
-              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-slate-600 transition-colors ${isOffline ? 'border-sev-stale/40 opacity-70' : isCritical ? 'border-sev-critical/40' : isWarn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
+              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-slate-600 transition-colors ${isOffline ? 'border-sev-stale/40 opacity-70' : isNoTelemetry ? 'border-sev-warn/40' : isCritical ? 'border-sev-critical/40' : isWarn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
               <div className="flex items-start justify-between mb-3">
                 <div>
                   <div className="flex items-center gap-2">
@@ -71,10 +73,12 @@ const PumpsPage = ({ onSelectNode }) => {
               )}
 
               {/* Water level visualization */}
-              <div className="relative h-32 bg-surface-base border border-border-subtle rounded overflow-hidden">
-                <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${isOffline ? 'bg-sev-stale/30' : isCritical ? 'bg-sev-critical/40' : isWarn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
-                  <div className={`h-1 ${isOffline ? 'bg-sev-stale' : isCritical ? 'bg-sev-critical' : isWarn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
-                </div>
+              <div className={`relative h-32 bg-surface-base border rounded overflow-hidden ${isNoTelemetry ? 'border-dashed border-sev-warn/40' : 'border-border-subtle'}`}>
+                {!isNoTelemetry && (
+                  <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${isOffline ? 'bg-sev-stale/30' : isCritical ? 'bg-sev-critical/40' : isWarn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
+                    <div className={`h-1 ${isOffline ? 'bg-sev-stale' : isCritical ? 'bg-sev-critical' : isWarn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
+                  </div>
+                )}
                 {/* Threshold markers */}
                 <div className="absolute right-2 top-1 text-[9px] font-mono text-ink-dim tnum">100</div>
                 <div className="absolute right-2 bottom-1 text-[9px] font-mono text-ink-dim tnum">0</div>
@@ -86,7 +90,7 @@ const PumpsPage = ({ onSelectNode }) => {
                 </div>
                 {/* Center value */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <span className={`text-4xl font-mono font-bold tnum ${isOffline ? 'text-sev-stale' : isCritical ? 'text-sev-critical' : isWarn ? 'text-sev-warn' : 'text-ink-primary'}`}>{p.level}<span className="text-base text-ink-muted">%</span></span>
+                  <span className={`text-4xl font-mono font-bold tnum ${isOffline ? 'text-sev-stale' : isNoTelemetry ? 'text-sev-warn' : isCritical ? 'text-sev-critical' : isWarn ? 'text-sev-warn' : 'text-ink-primary'}`}>{isNoTelemetry ? '—' : <>{p.level}<span className="text-base text-ink-muted">%</span></>}</span>
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-2 mt-3 text-xs font-mono tnum">
