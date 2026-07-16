@@ -158,6 +158,30 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     }
   };
 
+  // Prune bulk-select set to intersect with the currently visible list
+  // whenever filter/tab/search change. Hidden IDs must never leak into a
+  // batch API call (audit finding C1).
+  useEffect_p(() => {
+    setChecked(prev => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(filtered.map(a => a.id));
+      let changed = false;
+      const next = new Set();
+      for (const id of prev) {
+        if (visible.has(id)) next.add(id); else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [filtered]);
+
+  // Reset per-selection state when the operator flips to a different alert,
+  // so snooze menu / resolve draft from the previous alert don't leak into
+  // the new one (audit findings A1, A3).
+  useEffect_p(() => {
+    setSnoozeOpen(false);
+    setResolveNote('');
+  }, [selectedId]);
+
   return (
     <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr]">
       {/* LEFT: List */}
@@ -259,7 +283,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 
       {/* RIGHT: Detail */}
       <div className="flex flex-col min-h-0 bg-surface-base">
-        {selected ? <AlertDetail alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId}/> : (
+        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId}/> : (
           <EmptyState icon={Icon.AlertCircle} title="選擇警報以查看詳情" hint="使用 ↑/↓ 鍵或滑鼠點選"/>
         )}
       </div>
@@ -273,7 +297,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 // the trigger, focus outside the menu also closes it.
 const SNOOZE_DURATIONS = [30, 60, 120];
 
-const SnoozeMenu = ({ alert, open, setOpen, onSnooze }) => {
+const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
   const triggerRef = useRef_p(null);
   const menuRef = useRef_p(null);
   const itemRefs = useRef_p([]);
@@ -331,10 +355,11 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze }) => {
       <button
         ref={triggerRef}
         onClick={() => setOpen(o => !o)}
+        disabled={busy}
         title="延期此節點 — 將不再發出告警音"
         aria-haspopup="menu"
         aria-expanded={open}
-        className="h-9 px-3 bg-surface-elevated hover:bg-surface-overlay border border-border-strong rounded text-sm flex items-center gap-1.5 transition-colors"
+        className="h-9 px-3 bg-surface-elevated hover:bg-surface-overlay border border-border-strong rounded text-sm flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Icon.Clock size={14} aria-hidden="true"/> 延期節點 <Kbd aria-hidden="true">S</Kbd> <Icon.ChevronDown size={12} aria-hidden="true"/>
       </button>
@@ -382,15 +407,25 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
   // last template apply. Used so template chips do NOT clobber freeform
   // typing — see C-6 (template overwrite warning).
   const [noteEdited, setNoteEdited] = useState_p(false);
+  // Shared in-flight guard for the detail panel's individual actions — stops
+  // duplicate ack/resolve/snooze submissions on slow networks (audit A4).
+  const [busy, setBusy] = useState_p(false);
+  const guardedSnooze = async (id, m) => {
+    if (busy) return;
+    setBusy(true);
+    try { await onSnooze(id, m); }
+    finally { setBusy(false); }
+  };
   const applyTemplate = (t) => {
     // If operator hasn't touched the textarea (or it's empty), replace.
     // If they've typed something, append on a new line so their work isn't lost.
+    // Do NOT reset noteEdited — that flag tracks operator typing, not template
+    // application, so a second template still appends after the first (A2).
     if (noteEdited && resolveNote.trim().length > 0) {
       setResolveNote(resolveNote.replace(/\s+$/, '') + '\n' + t);
     } else {
       setResolveNote(t);
     }
-    setNoteEdited(false);
   };
   const history = window.NODE_HISTORY[alert.node] || [];
   const siblings = (allAlerts || []).filter(a => a.node === alert.node && a.id !== alert.id && a.state !== 'resolved');
@@ -670,11 +705,15 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           {alert.state === 'pending' && (
             <>
               <button onClick={async () => {
+                  if (busy) return;
+                  setBusy(true);
                   try { await onAck(alert.id); }
                   catch (e) { /* parent toasts; keep UI state so operator can retry */ }
+                  finally { setBusy(false); }
                 }}
+                disabled={busy}
                 title="我正在處理此事件 — 不會關閉警報。按下後自動跳至下一筆。"
-                className="flex-1 h-9 bg-sev-info hover:bg-blue-600 text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
+                className="flex-1 h-9 bg-sev-info hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
                 <Icon.Check size={16} strokeWidth={2.5}/>
                 <span>認領</span>
                 <span className="text-[10px] opacity-80 font-normal">→ 下一筆</span>
@@ -685,15 +724,17 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           {alert.state === 'acknowledged' && (
             <>
               <button onClick={async () => {
+                  if (busy) return;
+                  setBusy(true);
                   try {
                     await onResolve(alert.id, resolveNote);
                     setResolveNote('');
                     setNoteEdited(false);
                   } catch (e) {
                     /* keep the drafted note so the operator doesn't lose their write-up */
-                  }
+                  } finally { setBusy(false); }
                 }}
-                disabled={!resolveNote.trim()}
+                disabled={busy || !resolveNote.trim()}
                 title="事件已結束 — 將從作用中列表移除"
                 className="flex-1 h-9 bg-sev-ok hover:bg-emerald-600 disabled:bg-sev-ok/30 disabled:cursor-not-allowed text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
                 <Icon.CheckCircle size={16} strokeWidth={2.5}/>
@@ -713,7 +754,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
               alert={alert}
               open={snoozeOpen}
               setOpen={setSnoozeOpen}
-              onSnooze={onSnooze}
+              onSnooze={guardedSnooze}
+              busy={busy}
             />
           )}
         </div>
