@@ -269,5 +269,124 @@ def test_snooze_node(client, monkeypatch):
     assert captured["args"][2] == "typhoon"
 
 
+# =============================================================================
+# Unsnooze endpoint coverage (DELETE /api/nodes/{id}/snooze)
+#
+# Mirrors the monkeypatch style of test_snooze_node above: the route does
+# `from ..database import set_node_snooze` etc. inside the function body, so
+# we patch the home modules' attributes rather than nodes_api's globals.
+# =============================================================================
+
+def test_unsnooze_endpoint_clears_db(client, monkeypatch, db_rows):
+    """DELETE /api/nodes/{id}/snooze must:
+    - return 200 with {"node_id": ..., "snoozed_until": None}
+    - call set_node_snooze(node_id, None, None) to clear the DB row
+    The route intentionally does NOT read back the DB row, so the JSON response
+    is the contract and the DB-clear call is the side effect we pin."""
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+    import central_server.services.audit_service as audit_service_module
+
+    captured = {}
+
+    def fake_set_snooze(node_id, until, reason):
+        captured["args"] = (node_id, until, reason)
+        # Mutate the fixture row so callers can verify the DB side effect too.
+        if node_id in db_rows:
+            db_rows[node_id]["snoozed_until"] = until
+            db_rows[node_id]["snooze_reason"] = reason
+        return True
+
+    monkeypatch.setattr(database, "set_node_snooze", fake_set_snooze)
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: None)
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.delete("/api/nodes/pump_node_01/snooze")
+    assert response.status_code == 200
+    assert response.json() == {"node_id": "pump_node_01", "snoozed_until": None}
+    assert captured["args"] == ("pump_node_01", None, None)
+    # DB row side effect: cleared.
+    assert db_rows["pump_node_01"]["snoozed_until"] is None
+
+
+def test_unsnooze_logs_action(client, monkeypatch):
+    """DELETE /api/nodes/{id}/snooze must call audit_service.log_action with
+    ACTION_UNSNOOZE, target_id=node_id, operator=the authenticated user."""
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+    import central_server.services.audit_service as audit_service_module
+
+    calls = []
+
+    def capture_log_action(operator, action_type, target_id=None, details=None):
+        calls.append({
+            "operator": operator,
+            "action_type": action_type,
+            "target_id": target_id,
+            "details": details,
+        })
+
+    monkeypatch.setattr(database, "set_node_snooze", lambda *a, **kw: True)
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: None)
+    monkeypatch.setattr(audit_service_module, "log_action", capture_log_action)
+
+    response = client.delete("/api/nodes/pump_node_01/snooze")
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["action_type"] == audit_service_module.ACTION_UNSNOOZE
+    assert calls[0]["target_id"] == "pump_node_01"
+    # The test fixture overrides get_current_user -> "test_user"
+    assert calls[0]["operator"] == "test_user"
+    assert calls[0]["details"] is None
+
+
+def test_unsnooze_publishes_mqtt_cleared_config(client, monkeypatch):
+    """DELETE /api/nodes/{id}/snooze must push (node_id, None, None) to the
+    edge via mqtt_svc.send_snooze_config so the edge stops suppressing audio
+    triggers locally. Mirrors the POST path which pushes (node_id, until,
+    reason) — DELETE is the inverse."""
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+    import central_server.services.audit_service as audit_service_module
+
+    class _FakeMqtt:
+        def __init__(self):
+            self.calls = []
+
+        def send_snooze_config(self, node_id, until, reason):
+            self.calls.append((node_id, until, reason))
+
+    fake_mqtt = _FakeMqtt()
+    monkeypatch.setattr(database, "set_node_snooze", lambda *a, **kw: True)
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: fake_mqtt)
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.delete("/api/nodes/pump_node_01/snooze")
+    assert response.status_code == 200
+    assert fake_mqtt.calls == [("pump_node_01", None, None)]
+
+
+def test_unsnooze_nonexistent_node_idempotent(client, monkeypatch):
+    """DELETE /api/nodes/{id}/snooze on a node that doesn't exist.
+
+    Current behavior (verified against api/nodes.py:508-526): the route does
+    NOT check the return value of set_node_snooze (unlike POST which raises
+    500 on failure), so it returns 200 with the cleared-shape response even
+    when the DB UPDATE affected 0 rows. Pinned here as the contract — flag
+    as a candidate for a 404 tightening in a follow-up if desired.
+    """
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+    import central_server.services.audit_service as audit_service_module
+
+    monkeypatch.setattr(database, "set_node_snooze", lambda *a, **kw: False)
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: None)
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.delete("/api/nodes/does-not-exist/snooze")
+    assert response.status_code == 200
+    assert response.json() == {"node_id": "does-not-exist", "snoozed_until": None}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
