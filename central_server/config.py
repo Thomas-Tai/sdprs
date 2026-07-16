@@ -80,6 +80,11 @@ if PYDANTIC_AVAILABLE:
         # Storage & retention
         RETENTION_DAYS: int = 30
         STORAGE_PATH: str = "./storage"
+        # Comma-separated list of subdirectories under STORAGE_PATH that
+        # retention should sweep for orphaned MP4s and empty-dir cleanup.
+        # Default preserves legacy behavior (only "events"); extend when
+        # new storage roots are added (e.g. "events,uploads,exports").
+        STORAGE_RETENTION_SUBDIRS: str = "events"
 
         # Server binding
         SERVER_HOST: str = "0.0.0.0"
@@ -164,6 +169,7 @@ else:
         DB_PATH: str
         RETENTION_DAYS: int
         STORAGE_PATH: str
+        STORAGE_RETENTION_SUBDIRS: str
         SERVER_HOST: str
         SERVER_PORT: int
         COOKIE_SECURE: bool
@@ -193,6 +199,7 @@ else:
             self.DB_PATH = _get_env_str("DB_PATH", "./data/sdprs.db")
             self.RETENTION_DAYS = _get_env_int("RETENTION_DAYS", 30)
             self.STORAGE_PATH = _get_env_str("STORAGE_PATH", "./storage")
+            self.STORAGE_RETENTION_SUBDIRS = _get_env_str("STORAGE_RETENTION_SUBDIRS", "events")
             self.SERVER_HOST = _get_env_str("SERVER_HOST", "0.0.0.0")
             self.SERVER_PORT = _get_env_int("SERVER_PORT", 8000)
             self.COOKIE_SECURE = _get_env_bool("COOKIE_SECURE", False)

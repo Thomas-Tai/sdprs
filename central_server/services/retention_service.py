@@ -11,7 +11,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -22,10 +22,33 @@ from ..timeutil import utcnow
 logger = logging.getLogger("retention_service")
 
 
+def _parse_retention_subdirs(raw: str) -> List[str]:
+    """Parse the STORAGE_RETENTION_SUBDIRS comma-separated setting.
+
+    Edge-case handling (matches the fix contract):
+    - Empty / whitespace-only input -> ["events"] (backward-compat).
+    - Whitespace around each entry is stripped.
+    - Empty entries between commas are skipped.
+    - Duplicates are dropped, first occurrence wins (order preserved).
+    """
+    if not raw or not raw.strip():
+        return ["events"]
+    seen: set = set()
+    result: List[str] = []
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result or ["events"]
+
+
 def run_retention_cleanup(
     db_path: str,
     storage_dir: str,
-    retention_days: int = 30
+    retention_days: int = 30,
+    subdirs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Execute retention cleanup for expired events.
@@ -39,7 +62,13 @@ def run_retention_cleanup(
         db_path: Path to SQLite database
         storage_dir: Root storage directory
         retention_days: Number of days to retain (default: 30)
-        
+        subdirs: Optional list of subdirectories under storage_dir to sweep
+            for orphaned MP4s and empty-dir cleanup. When None (default),
+            the list is read from get_settings().STORAGE_RETENTION_SUBDIRS
+            (comma-separated; empty/missing -> ["events"] for
+            backward-compat). Callers may pass an explicit list to
+            override env config (e.g. from tests or ad-hoc jobs).
+
     Returns:
         Dict with cleanup statistics:
         - deleted_events: Number of deleted database records
@@ -53,6 +82,35 @@ def run_retention_cleanup(
     cutoff_str = cutoff.isoformat()
 
     logger.info(f"Starting retention cleanup: cutoff={cutoff_str}, retention_days={retention_days}")
+
+    # Resolve which subdirs the on-disk sweep should visit. Prefer the
+    # explicit param (tests / ad-hoc callers) over the env-driven config.
+    if subdirs is None:
+        try:
+            from ..config import get_settings
+            subdirs = _parse_retention_subdirs(get_settings().STORAGE_RETENTION_SUBDIRS)
+        except Exception as e:
+            logger.warning(
+                f"Failed to load STORAGE_RETENTION_SUBDIRS from settings "
+                f"({e}); falling back to default ['events']"
+            )
+            subdirs = ["events"]
+    else:
+        # Explicit override — still normalize defensively so callers can pass
+        # a raw list without worrying about whitespace/empties/duplicates.
+        _seen: set = set()
+        _normalized: List[str] = []
+        for _s in subdirs:
+            if not isinstance(_s, str):
+                continue
+            _cleaned = _s.strip()
+            if not _cleaned or _cleaned in _seen:
+                continue
+            _seen.add(_cleaned)
+            _normalized.append(_cleaned)
+        subdirs = _normalized or ["events"]
+
+    logger.info(f"Retention sweep will cover subdirs: {subdirs}")
 
     errors = []
     deleted_files = 0
@@ -170,11 +228,15 @@ def run_retention_cleanup(
     if surviving_refs is None:
         logger.warning("Orphan sweep skipped: surviving-reference set unavailable")
     else:
-        events_sweep_dir = os.path.join(storage_dir, "events")
-        if os.path.isdir(events_sweep_dir):
+        # Iterate every configured subdir. A missing subdir on disk is a
+        # silent skip (Storage-F: newly-configured roots may not yet exist).
+        for subdir_name in subdirs:
+            sweep_dir = os.path.join(storage_dir, subdir_name)
+            if not os.path.isdir(sweep_dir):
+                continue
             try:
-                for node_dir_name in os.listdir(events_sweep_dir):
-                    node_path = os.path.join(events_sweep_dir, node_dir_name)
+                for node_dir_name in os.listdir(sweep_dir):
+                    node_path = os.path.join(sweep_dir, node_dir_name)
                     if not os.path.isdir(node_path):
                         continue
                     for filename in os.listdir(node_path):
@@ -194,17 +256,19 @@ def run_retention_cleanup(
                             # FAIL SAFE: uncertain status -> keep the file.
                             logger.warning(f"Orphan sweep skipped {file_path}: {e}")
             except Exception as e:
-                logger.error(f"Orphan sweep failed: {e}")
-                errors.append(f"Orphan sweep failed: {e}")
+                logger.error(f"Orphan sweep failed in {sweep_dir}: {e}")
+                errors.append(f"Orphan sweep failed in {sweep_dir}: {e}")
 
-    # Clean up empty directories
+    # Clean up empty directories — same subdir iteration as the orphan sweep
+    # so newly-emptied node dirs across every configured root get reclaimed.
     deleted_dirs = 0
-    events_dir = os.path.join(storage_dir, "events")
-    
-    if os.path.exists(events_dir):
+    for subdir_name in subdirs:
+        sweep_dir = os.path.join(storage_dir, subdir_name)
+        if not os.path.exists(sweep_dir):
+            continue
         try:
-            for node_dir_name in os.listdir(events_dir):
-                node_path = os.path.join(events_dir, node_dir_name)
+            for node_dir_name in os.listdir(sweep_dir):
+                node_path = os.path.join(sweep_dir, node_dir_name)
                 if os.path.isdir(node_path):
                     # Check if directory is empty
                     if not os.listdir(node_path):
@@ -215,8 +279,8 @@ def run_retention_cleanup(
                         except OSError as e:
                             logger.warning(f"Failed to remove directory {node_path}: {e}")
         except Exception as e:
-            logger.error(f"Directory cleanup failed: {e}")
-            errors.append(f"Directory cleanup failed: {e}")
+            logger.error(f"Directory cleanup failed in {sweep_dir}: {e}")
+            errors.append(f"Directory cleanup failed in {sweep_dir}: {e}")
     
     # Log summary
     logger.info(
