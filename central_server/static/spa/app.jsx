@@ -10,14 +10,20 @@ const DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "blue"
 }/*EDITMODE-END*/;
 
-function App() {
+function App({ initialError = null }) {
   const [tweaks, setTweak] = window.useTweaks(DEFAULTS);
+
+  // Bootstrap error surface — populated by bootstrap() below when loadInitial
+  // rejects; renders the retry UI in place of the full app so mount-time
+  // reads of window.ALERTS/NODES don't crash on undefined.
+  const [bootstrapError, setBootstrapError] = useStateA(initialError);
 
   const [page, setPageRaw] = useStateA('alerts');
   const [pageHistory, setPageHistory] = useStateA([]); // for Alt+← back
-  const [alerts, setAlerts] = useStateA(window.ALERTS);
-  const [nodes, setNodes] = useStateA(window.NODES);
-  const [selectedId, setSelectedId] = useStateA(window.ALERTS[0] ? window.ALERTS[0].id : null);
+  const [alerts, setAlerts] = useStateA(window.ALERTS ?? []);
+  // load-bearing: setNodes() forces re-render so window.NODES reads pick up new data. DO NOT remove.
+  const [nodes, setNodes] = useStateA(window.NODES ?? []);
+  const [selectedId, setSelectedId] = useStateA(window.ALERTS?.[0]?.id ?? null);
   const [liveSec, setLiveSec] = useStateA(0);
   const [shortcutsOpen, setShortcutsOpen] = useStateA(false);
   const [muteDrawerOpen, setMuteDrawerOpen] = useStateA(false);
@@ -26,31 +32,78 @@ function App() {
   const [nodePanelNode, setNodePanelNode] = useStateA(null);
   const [focusMode, setFocusMode] = useStateA(false);
   const [newAlertBannerCount, setNewAlertBannerCount] = useStateA(0);
-  const [muteState, setMuteState] = useStateA({
-    global: false,
-    nodes: [],
-    lightning: false,
-    volume: 70,
+  // Backend-signalled session expiry. Flips true when the /ws handler sends
+  // {type: 'auth_expired'} immediately before its 1008 close (see
+  // services/websocket_service.py). Renders a blocking modal + halts the
+  // openSocket reconnect loop so we don't 1008-thrash forever.
+  const [sessionExpired, setSessionExpired] = useStateA(false);
+  const [muteState, setMuteState] = useStateA(() => {
+    // Read persisted volume from localStorage so the slider survives reloads.
+    // VolumeSlider itself already pushes to Howler on change; app.jsx owns
+    // the persistence side (see the muteState.volume effect below).
+    let persistedVolume = 70;
+    try {
+      const raw = localStorage.getItem('sdprs.volume');
+      const v = parseInt(raw, 10);
+      if (Number.isFinite(v) && v >= 0 && v <= 100) persistedVolume = v;
+    } catch (_) { /* localStorage may be unavailable (private mode) */ }
+    return {
+      // Seed from persisted tweaks.muted so the mount-time sync effect below
+      // (setTweak('muted', muteState.global)) never clobbers a persisted true
+      // with our default false.
+      global: !!tweaks.muted,
+      nodes: [],
+      lightning: false,
+      volume: persistedVolume,
+    };
   });
   const [ackedIds, setAckedIds] = useStateA(new Set());
   const [toast, setToast] = useStateA(null);
   const [audioReplayIn, setAudioReplayIn] = useStateA(30);
+  // Mobile-only nav drawer. NavRail is `hidden md:flex`; on <md we overlay
+  // it via the `mobile-nav-open` root class + inline <style> override below,
+  // closing on backdrop click / Esc / nav select.
+  const [mobileNavOpen, setMobileNavOpen] = useStateA(false);
 
-  // Wrap setPage to track history
+  // Refs used by callbacks below (declared here so JSX/hooks can reference
+  // them). See setPage/goBack for the history flow, showToast for the timer,
+  // and the wallMode-aware keyboard handler for the ref-based skip guard.
+  const toastTimerRef = useRefA(null);
+  const prevPageRef = useRefA('alerts');
+  const skipNextHistoryPushRef = useRefA(false);
+  const pageHistoryRef = useRefA([]);
+  // Holds openSocket's teardown thunk so the auth_expired branch (below) can
+  // cancel the reconnect loop from OUTSIDE the useEffect cleanup path.
+  const wsStopRef = useRefA(null);
+
+  // StrictMode-safe setPage: no side effects inside the state updater.
+  // History push happens in a follow-up effect that reads prev via ref.
   const setPage = useCallbackA((p) => {
-    setPageRaw(prev => {
-      if (prev !== p) setPageHistory(h => [...h.slice(-9), prev]);
-      return p;
-    });
+    setPageRaw(p);
   }, []);
 
+  // Mirror pageHistory into a ref so goBack can read the current value
+  // without depending on the state (keeps the callback identity stable).
+  useEffectA(() => { pageHistoryRef.current = pageHistory; }, [pageHistory]);
+
+  // History push on page change. Skipped once immediately after goBack() so
+  // navigating backwards doesn't re-push the page we just left.
+  useEffectA(() => {
+    if (skipNextHistoryPushRef.current) {
+      skipNextHistoryPushRef.current = false;
+    } else if (prevPageRef.current !== page) {
+      setPageHistory(h => [...h.slice(-9), prevPageRef.current]);
+    }
+    prevPageRef.current = page;
+  }, [page]);
+
   const goBack = useCallbackA(() => {
-    setPageHistory(h => {
-      if (h.length === 0) return h;
-      const prev = h[h.length - 1];
-      setPageRaw(prev);
-      return h.slice(0, -1);
-    });
+    const h = pageHistoryRef.current;
+    if (h.length === 0) return;
+    const prev = h[h.length - 1];
+    skipNextHistoryPushRef.current = true;
+    setPageHistory(h.slice(0, -1));
+    setPageRaw(prev);
   }, []);
 
   // Apply theme/wall/focus classes
@@ -61,6 +114,24 @@ function App() {
     document.documentElement.classList.toggle('focus-mode', !!focusMode);
   }, [tweaks.theme, tweaks.wallMode, focusMode]);
 
+  // Mobile nav overlay toggle — CSS override below matches on this class.
+  useEffectA(() => {
+    document.documentElement.classList.toggle('mobile-nav-open', mobileNavOpen);
+  }, [mobileNavOpen]);
+
+  // Persist volume + push to Howler whenever muteState.volume changes.
+  // VolumeSlider (in components.jsx) already calls Howler internally for the
+  // slider-driven path; this effect covers persistence AND callers that
+  // mutate muteState.volume directly (e.g. bulk reset).
+  useEffectA(() => {
+    try {
+      localStorage.setItem('sdprs.volume', String(muteState.volume));
+      if (window.Howler && typeof window.Howler.volume === 'function') {
+        window.Howler.volume(Math.max(0, Math.min(1, muteState.volume / 100)));
+      }
+    } catch (_) { /* localStorage / Howler unavailable — safe to swallow */ }
+  }, [muteState.volume]);
+
   // liveSec = seconds since the last server contact; refresh() and WebSocket
   // pings reset it to 0. StatusStrip turns it into Live/Reconnecting/Disconnected.
   useEffectA(() => {
@@ -69,8 +140,10 @@ function App() {
   }, []);
 
   const unackCount = useMemoA(() => alerts.filter(a => a.state === 'pending').length, [alerts]);
-  const offlineCount = window.NODES.filter(n => n.status === 'offline').length;
-  const staleAckCount = useMemoA(() => alerts.filter(a => a.state === 'acknowledged' && a.ackAgeSec > window.STALE_ACK_THRESHOLD).length, [alerts]);
+  // Read from local `nodes` state (which mirrors window.NODES via setNodes)
+  // so this recomputes on refresh alongside its neighbours.
+  const offlineCount = useMemoA(() => nodes.filter(n => n.status === 'offline').length, [nodes]);
+  const staleAckCount = useMemoA(() => alerts.filter(a => a.state === 'acknowledged' && a.ackAgeSec > (window.STALE_ACK_THRESHOLD ?? 1500)).length, [alerts]);
 
   useEffectA(() => {
     document.title = unackCount > 0
@@ -84,6 +157,9 @@ function App() {
       return;
     }
     const id = setInterval(() => {
+      // Audio replay countdown intentionally cycles 30 → 1 → 30 without ever
+      // displaying "0". The reset happens at s === 1 so the operator never
+      // sees a stale zero between the wrap and the next tick.
       setAudioReplayIn(s => s <= 1 ? 30 : s - 1);
     }, 1000);
     return () => clearInterval(id);
@@ -91,7 +167,13 @@ function App() {
 
   const showToast = useCallbackA((message, tone = 'info') => {
     setToast({ message, tone, id: Date.now() });
-    setTimeout(() => setToast(null), 3000);
+    // Cancel any in-flight auto-hide so a rapid second toast isn't wiped
+    // by the first one's expiring timer.
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 3000);
   }, []);
 
   // --- Live-refresh coalescing + in-flight guard ----------------------------
@@ -157,16 +239,47 @@ function App() {
 
   // Live updates: coalesced refresh on every relevant WebSocket event, with a
   // slow poll as a safety net (it also keeps alert ages current between events).
+  //
+  // api.jsx openSocket exposes an options-object contract:
+  //   onNewAlert()          — new-alert banner + refresh
+  //   onEvent(type, data)   — everything else that matters to the operator.
+  //                           `ping` and `new_alert` do NOT reach onEvent.
+  // We coalesce every event into scheduleRefresh() (300ms debounced). This is
+  // what closes the "peer acks invisible until next 20s poll" gap.
   useEffectA(() => {
-    const stop = window.SDPRS_API.openSocket((msg) => {
-      if (!msg || !msg.type) return;
-      if (msg.type === 'ping') { setLiveSec(0); return; }
-      if (msg.type === 'new_alert') setNewAlertBannerCount(c => c + 1);
-      scheduleRefresh();
+    const stop = window.SDPRS_API.openSocket({
+      onNewAlert: () => {
+        setNewAlertBannerCount(c => c + 1);
+        scheduleRefresh();
+      },
+      onEvent: (type, _data) => {
+        if (type === 'auth_expired') {
+          // Server sent {type:'auth_expired'} right before its 1008 close.
+          // Do NOT scheduleRefresh() — the socket is about to close and any
+          // fetch will 401. Show the blocking modal and halt reconnect thrash.
+          // NOTE (dashboard-audit-2026-07-16): api.jsx's _WS_EVENT_TYPES
+          // whitelist currently doesn't include 'auth_expired', so this branch
+          // won't fire until a follow-up slice adds it to that set (or routes
+          // auth_expired to onEvent directly). Wiring is otherwise complete.
+          setSessionExpired(true);
+          if (wsStopRef.current) { wsStopRef.current(); wsStopRef.current = null; }
+          return;
+        }
+        if (type === 'alert_updated' || type === 'alert_acknowledged' || type === 'alert_resolved') {
+          scheduleRefresh();
+        } else if (type === 'node_status' || type === 'pump_status') {
+          // TODO(dashboard-audit-2026-07-15): swap for targeted state patches
+          // (single-node/single-pump updates) once we don't need a full refresh
+          // to reflect status changes. Full refresh for now is correct-but-heavy.
+          scheduleRefresh();
+        }
+      },
     });
+    wsStopRef.current = stop;
     const poll = setInterval(scheduleRefresh, 20000);
     return () => {
       stop();
+      wsStopRef.current = null;
       clearInterval(poll);
       if (refreshDebounce.current) { clearTimeout(refreshDebounce.current); refreshDebounce.current = null; }
     };
@@ -185,7 +298,11 @@ function App() {
   }, [alerts]);
 
   const markSeen = useCallbackA((id) => {
-    window.SDPRS_API.markSeen(id);
+    // Best-effort background write; a failure here shouldn't break the UI,
+    // but the promise MUST be caught or React logs it as an unhandled rejection.
+    Promise.resolve()
+      .then(() => window.SDPRS_API.markSeen(id))
+      .catch(err => console.warn('[app] markSeen failed', err));
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, seen: true } : a));
   }, []);
 
@@ -197,6 +314,9 @@ function App() {
       return;
     }
     setAckedIds(prev => new Set(prev).add(id));
+    // Operator engaged with the queue — clear the "N new" banner so a stale
+    // count doesn't linger after everything's been touched.
+    setNewAlertBannerCount(0);
     showToast('已認領' + (advance ? ' → 下一筆' : ''), 'info');
     const next = advance ? findNextUnack(id) : null;
     await refresh();
@@ -214,6 +334,8 @@ function App() {
       showToast('解決失敗: ' + (e.message || e), 'warn');
       return;
     }
+    // Operator engaged with the queue — clear the "N new" banner too.
+    setNewAlertBannerCount(0);
     showToast('警報已解決', 'ok');
     const next = findNextUnack(id);
     await refresh();
@@ -238,6 +360,12 @@ function App() {
     if (selectedId) markSeen(selectedId);
   }, [selectedId, markSeen]);
 
+  // Landing on the Alerts page counts as "operator saw the new-alert banner";
+  // clear the counter so the pill doesn't linger forever after they navigated in.
+  useEffectA(() => {
+    if (page === 'alerts') setNewAlertBannerCount(0);
+  }, [page]);
+
   const [resolveNote, setResolveNote] = useStateA('');
   useEffectA(() => { setResolveNote(''); }, [selectedId]);
 
@@ -252,6 +380,12 @@ function App() {
 
   useEffectA(() => {
     const handler = (e) => {
+      // Wall mode is a read-only NOC display; the operator has no context
+      // for hotkeys to act against, and stray keystrokes on the wall
+      // shouldn't teleport people around. Bail early instead of unmounting
+      // the effect so we don't tear/rebuild listeners on every mode toggle.
+      if (tweaks.wallMode) return;
+
       const tag = e.target.tagName;
       const inField = tag === 'INPUT' || tag === 'TEXTAREA';
 
@@ -281,30 +415,47 @@ function App() {
         setCmdkOpen(false);
         setNodePanelNode(null);
         setShiftBannerOpen(false);
+        setMobileNavOpen(false);
         return;
       }
       if (inField) return;
 
       if (e.key === '?') { e.preventDefault(); setShortcutsOpen(true); return; }
-      if (e.key === '/') { e.preventDefault(); document.querySelector('input[type="text"][placeholder*="搜尋"]')?.focus(); return; }
+      if (e.key === '/') {
+        e.preventDefault();
+        // TODO(dashboard-audit-2026-07-15): components.jsx should give the
+        // header search input `id="global-search"` so this lookup is stable;
+        // querySelector fallback matches the first such input anywhere on the
+        // page (currently the command palette input if that's open).
+        const el = document.getElementById('global-search')
+          || document.querySelector('input[type="text"][placeholder*="搜尋"]');
+        el?.focus();
+        return;
+      }
       if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(true); return; }
       if (e.key === 't' || e.key === 'T') { setTweak('theme', tweaks.theme === 'dark' ? 'light' : 'dark'); return; }
       if (e.shiftKey && (e.key === 'D' || e.key === 'd')) { setTweak('density', tweaks.density === 'compact' ? 'comfortable' : 'compact'); return; }
 
       const navMap = { '1': 'alerts', '2': 'monitor', '3': 'status', '4': 'pumps', '5': 'weather', '6': 'handover', '7': 'audit' };
       const sel = alerts.find(a => a.id === selectedId);
-      if (navMap[e.key] && !(page === 'alerts' && sel && sel.state === 'acknowledged' && /^[1-6]$/.test(e.key))) {
+      const inResolveTemplateFlow = page === 'alerts' && sel && sel.state === 'acknowledged';
+      // Suppress ALL number-key nav (1-7) while an acknowledged alert has focus —
+      // otherwise '7' would teleport the operator to Audit mid-resolve even though
+      // 1-6 are template shortcuts. '7' has no template; it just no-ops here.
+      if (navMap[e.key] && !(inResolveTemplateFlow && /^[1-7]$/.test(e.key))) {
         setPage(navMap[e.key]);
         return;
       }
-      if (page === 'alerts' && sel && sel.state === 'acknowledged' && /^[1-6]$/.test(e.key)) {
+      if (inResolveTemplateFlow && /^[1-6]$/.test(e.key)) {
         const idx = parseInt(e.key, 10) - 1;
-        if (window.RESOLVE_TEMPLATES[idx]) {
+        if (window.RESOLVE_TEMPLATES && window.RESOLVE_TEMPLATES[idx]) {
           setResolveNote(window.RESOLVE_TEMPLATES[idx]);
           showToast(`已套用模板: ${window.RESOLVE_TEMPLATES[idx]}`, 'info');
         }
         return;
       }
+      // '7' inside the resolve-template flow: intentionally swallowed (see above).
+      if (inResolveTemplateFlow && e.key === '7') return;
 
       if (page !== 'alerts' || !selectedId || !sel) return;
 
@@ -334,9 +485,18 @@ function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode]);
+  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode]);
 
+  // Sync the in-app "global mute" toggle back to persisted tweaks.muted.
+  // Skip the first invocation: the initial value was seeded FROM tweaks.muted
+  // above, so writing it back on mount is a no-op at best and, if the initial
+  // seed ever changes shape, a clobber. Ref-guard keeps the intent explicit.
+  const muteInitializedRef = useRefA(false);
   useEffectA(() => {
+    if (!muteInitializedRef.current) {
+      muteInitializedRef.current = true;
+      return;
+    }
     setTweak('muted', muteState.global);
   }, [muteState.global, setTweak]);
 
@@ -362,7 +522,7 @@ function App() {
 
   const renderPage = () => {
     switch (page) {
-      case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote}/>;
+      case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote}/>;
       case 'monitor': return <window.MonitorPage activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
       case 'status': return <window.StatusPage onSelectNode={onSelectNode}/>;
       case 'pumps': return <window.PumpsPage/>;
@@ -372,6 +532,44 @@ function App() {
       default: return null;
     }
   };
+
+  // Bootstrap error fallback. loadInitial() populates the window.* globals
+  // that downstream JSX reads; if it failed we render a retry UI instead of
+  // the full app so mount-time `.filter(...)` calls on undefined don't crash.
+  if (bootstrapError) {
+    const retry = async () => {
+      const err = bootstrapError;
+      setBootstrapError(null);
+      try {
+        await window.SDPRS_API.loadInitial();
+        setAlerts(window.ALERTS ?? []);
+        setNodes(window.NODES ?? []);
+        setSelectedId(window.ALERTS?.[0]?.id ?? null);
+      } catch (e) {
+        console.error('[SDPRS] retry loadInitial failed:', e);
+        setBootstrapError(e || err);
+      }
+    };
+    return (
+      <div className="h-screen w-screen flex items-center justify-center bg-surface-base text-ink-primary p-6">
+        <div className="max-w-md text-center space-y-4">
+          <div className="text-2xl font-bold text-sev-critical">無法載入初始資料</div>
+          <div className="text-sm text-ink-secondary">
+            伺服器暫時無法回應。請確認網路連線後重試。
+          </div>
+          <div className="text-xs font-mono text-ink-muted break-all">
+            {String(bootstrapError && (bootstrapError.message || bootstrapError))}
+          </div>
+          <button
+            onClick={retry}
+            className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
+          >
+            重試
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (tweaks.wallMode) {
     return <WallView alerts={alerts} liveSec={liveSec} unackCount={unackCount}/>;
@@ -392,22 +590,48 @@ function App() {
         onOpenMuteDrawer={() => setMuteDrawerOpen(true)}
         audioReplayIn={audioReplayIn}
         muteState={muteState}
-        operators={window.OPERATORS_ONLINE}
+        operators={window.OPERATORS_ONLINE ?? []}
         staleAckCount={staleAckCount}
         onOpenCmdK={() => setCmdkOpen(true)}
         focusMode={focusMode}
         onToggleFocus={() => setFocusMode(f => !f)}
       />
+      {/* Mobile nav overlay override — NavRail is `hidden md:flex`; this CSS
+          flips it visible when the root carries `mobile-nav-open` (toggled by
+          the useEffect above). Escaped `\:` matches the literal `md:flex`
+          class name Tailwind generates. */}
+      <style>{`
+        .mobile-nav-open nav.hidden.md\\:flex { display: flex !important; z-index: 50; }
+      `}</style>
+      {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
+      <button
+        type="button"
+        onClick={() => setMobileNavOpen(v => !v)}
+        aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
+        aria-expanded={mobileNavOpen}
+        className="md:hidden fixed top-1.5 left-2 z-[60] w-9 h-9 rounded bg-surface-elevated border border-border-subtle text-ink-primary text-lg leading-none flex items-center justify-center hover:bg-surface-overlay"
+      >
+        {mobileNavOpen ? '✕' : '☰'}
+      </button>
+      {/* Mobile backdrop — click anywhere off-nav to dismiss */}
+      {mobileNavOpen && (
+        <div
+          className="md:hidden fixed inset-0 z-40 bg-black/50"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
       <window.NavRail
-        page={page} setPage={setPage}
+        page={page}
+        setPage={(p) => { setPage(p); setMobileNavOpen(false); }}
         density={tweaks.density} setDensity={(v) => setTweak('density', v)}
         unackCount={unackCount}
         offlineCount={offlineCount}
       />
-      <main className="ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
+      <main className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
         {renderPage()}
       </main>
-      <window.Footer data={window.ALERT_RATE} handover={window.HANDOVER.pinned}/>
+      <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
 
       {/* Floating new-alert banner */}
       {page === 'alerts' && newAlertBannerCount > 0 && (
@@ -419,11 +643,11 @@ function App() {
       )}
 
       {/* Shift onboarding banner */}
-      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} onDismiss={() => setShiftBannerOpen(false)}/>}
+      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
 
       <window.ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)}/>
-      <window.MuteDrawer open={muteDrawerOpen} onClose={() => setMuteDrawerOpen(false)} muteState={muteState} setMuteState={setMuteState}/>
-      <window.CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} alerts={alerts} onSelectAlert={setSelectedId} onNav={setPage} onCmd={onCmdkCommand}/>
+      <window.MuteDrawer open={muteDrawerOpen} onClose={() => setMuteDrawerOpen(false)} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
+      <window.CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} alerts={alerts} nodes={nodes} onSelectAlert={setSelectedId} onNav={setPage} onCmd={onCmdkCommand}/>
       <window.NodeSidePanel node={nodePanelNode} onClose={() => setNodePanelNode(null)} onJumpAlert={onJumpAlert} openAlerts={alerts.filter(a => a.state !== 'resolved')} onUpdateNode={onUpdateNode}/>
 
       {/* Toast */}
@@ -448,7 +672,7 @@ function App() {
         <window.TweakToggle label="4K 牆面模式" value={tweaks.wallMode} onChange={(v) => setTweak('wallMode', v)}/>
         <window.TweakSection label="跳轉頁面" />
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:4}}>
-          {window.NAV_ITEMS.map(item => (
+          {(window.NAV_ITEMS ?? []).map(item => (
             <button key={item.id} onClick={() => setPage(item.id)}
               style={{
                 fontSize:11,padding:'5px 4px',borderRadius:6,
@@ -462,6 +686,35 @@ function App() {
           ))}
         </div>
       </window.TweaksPanel>
+
+      {/* Session-expiry modal — blocking, action-required. Rendered last so its
+          z-[100] sits above every other overlay (drawer/palette/toast are z-40..50).
+          No Escape handler by design: modal is required action, and we don't want
+          Esc to accidentally dismiss any parent overlay while it's up. */}
+      {sessionExpired && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="session-expiry-title"
+          className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
+        >
+          <div className="bg-surface-elevated border border-border-strong rounded-lg p-6 max-w-sm w-full shadow-2xl">
+            <h2 id="session-expiry-title" className="text-lg font-semibold text-ink-primary mb-2">
+              連線階段已逾時
+            </h2>
+            <p className="text-sm text-ink-secondary mb-4">
+              您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
+            </p>
+            <button
+              onClick={() => { window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname); }}
+              className="w-full h-9 bg-brand-primary text-white rounded font-medium hover:opacity-90"
+              autoFocus
+            >
+              前往登入頁
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -472,10 +725,14 @@ function App() {
 
 function WallView({ alerts, liveSec, unackCount }) {
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
-  const sorted = [...window.NODES].sort((a, b) => {
+  const sorted = [...(window.NODES ?? [])].sort((a, b) => {
     const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
-    return rank[a.status] - rank[b.status];
+    // Unknown/new status codes shouldn't NaN-sort themselves to random positions.
+    return (rank[a.status] ?? 99) - (rank[b.status] ?? 99);
   });
+  const weather = window.WEATHER ?? { typhoon: null, wind: {}, rain: {} };
+  const handoverPin = window.HANDOVER?.pinned ?? null;
+  const alertRate = window.ALERT_RATE ?? [];
   return (
     <div className="h-screen w-screen overflow-hidden bg-black text-ink-primary flex flex-col">
       {/* Top status strip — bigger */}
@@ -498,15 +755,15 @@ function WallView({ alerts, liveSec, unackCount }) {
         )}
         <div className="flex-1"></div>
         <div className="flex items-center gap-4 text-base">
-          {window.WEATHER.typhoon && (
+          {weather.typhoon && (
             <>
-              <span className="flex items-center gap-2 text-sev-warn font-bold"><Icon.Typhoon size={20}/> 颱風 {window.WEATHER.typhoon.name} · {window.WEATHER.typhoon.level}</span>
+              <span className="flex items-center gap-2 text-sev-warn font-bold"><Icon.Typhoon size={20}/> 颱風 {weather.typhoon.name} · {weather.typhoon.level}</span>
               <span className="text-ink-dim">|</span>
             </>
           )}
-          <span className="font-mono tnum">{window.WEATHER.wind.dir} {window.WEATHER.wind.speed} km/h</span>
+          <span className="font-mono tnum">{weather.wind?.dir} {weather.wind?.speed} km/h</span>
           <span className="text-ink-dim">|</span>
-          <span className="font-mono tnum text-sev-info">{window.WEATHER.rain.now} mm/h</span>
+          <span className="font-mono tnum text-sev-info">{weather.rain?.now} mm/h</span>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
         <div className="font-mono tnum text-base text-ink-secondary">{new Date().toLocaleTimeString('zh-TW', { hour12: false })}</div>
@@ -515,6 +772,9 @@ function WallView({ alerts, liveSec, unackCount }) {
       {/* Body: 3-column wall layout */}
       <div className="flex-1 grid grid-cols-[2fr_1fr_1fr] gap-3 p-3 min-h-0">
         {/* Monitor wall */}
+        {/* TODO(dashboard-audit-2026-07-15): wall truncates to the top 9 tiles
+            (3×3 grid). Fine for the current fleet; needs a UX decision for
+            larger deployments (paginate? shrink tiles? auto-cycle?). */}
         <div className="grid grid-cols-3 gap-3 min-h-0 overflow-hidden">
           {sorted.slice(0, 9).map(n => (
             <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
@@ -542,8 +802,11 @@ function WallView({ alerts, liveSec, unackCount }) {
             <span className="text-xs font-mono text-ink-muted tnum">{alerts.length} 筆</span>
           </div>
           <div className="flex-1 overflow-y-auto scroll-thin">
+            {/* TODO(dashboard-audit-2026-07-15): wall truncates to the top 12
+                alerts in the ticker. During a real storm the operator would
+                want scrolling or auto-cycling — needs a UX decision. */}
             {alerts.slice(0, 12).map(a => {
-              const m = window.sevMeta[a.sev];
+              const m = window.safeSevMeta(a.sev);
               return (
                 <div key={a.id} className={`px-3 py-2 border-b border-border-subtle ${m.bar} ${a.state === 'pending' && a.sev === 'critical' ? 'bg-sev-critical/5' : ''}`}>
                   <div className="flex items-center gap-2">
@@ -564,26 +827,26 @@ function WallView({ alerts, liveSec, unackCount }) {
           <div className="bg-surface-panel border border-sev-warn/30 rounded p-4 flex-1">
             <div className="text-xs uppercase tracking-wider text-sev-warn font-bold flex items-center gap-2"><Icon.Wind size={14}/> 風速</div>
             <div className="mt-2 flex items-baseline gap-1">
-              <span className="text-7xl font-mono font-black tnum text-sev-warn">{window.WEATHER.wind.speed}</span>
+              <span className="text-7xl font-mono font-black tnum text-sev-warn">{weather.wind?.speed ?? '—'}</span>
               <span className="text-ink-muted text-xl">km/h</span>
             </div>
-            <div className="text-sm text-ink-muted font-mono tnum mt-1">{window.WEATHER.wind.dir || '—'} {window.WEATHER.wind.degree}°</div>
+            <div className="text-sm text-ink-muted font-mono tnum mt-1">{weather.wind?.dir || '—'} {weather.wind?.degree}°</div>
           </div>
           <div className="bg-surface-panel border border-sev-info/30 rounded p-4 flex-1">
             <div className="text-xs uppercase tracking-wider text-sev-info font-bold flex items-center gap-2"><Icon.CloudRain size={14}/> 雨量</div>
             <div className="mt-2 flex items-baseline gap-1">
-              <span className="text-7xl font-mono font-black tnum text-sev-info">{window.WEATHER.rain.now}</span>
+              <span className="text-7xl font-mono font-black tnum text-sev-info">{weather.rain?.now ?? '—'}</span>
               <span className="text-ink-muted text-xl">mm/h</span>
             </div>
-            <div className="text-sm text-ink-muted font-mono tnum mt-1">日累計 {window.WEATHER.rain.day}mm</div>
+            <div className="text-sm text-ink-muted font-mono tnum mt-1">日累計 {weather.rain?.day ?? 0}mm</div>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-3">
             <div className="text-xs uppercase tracking-wider text-ink-muted font-bold mb-2">系統健康</div>
             <div className="grid grid-cols-2 gap-2 text-xs font-mono tnum">
-              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-ok"></span><span className="text-ink-secondary">線上</span><span className="ml-auto font-bold">{window.NODES.filter(n=>n.status==='online').length}</span></div>
-              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-warn"></span><span className="text-ink-secondary">警告</span><span className="ml-auto font-bold">{window.NODES.filter(n=>n.status==='warn').length}</span></div>
-              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-critical"></span><span className="text-ink-secondary">嚴重</span><span className="ml-auto font-bold">{window.NODES.filter(n=>n.status==='critical').length}</span></div>
-              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-critical animate-live-blink"></span><span className="text-ink-secondary">離線</span><span className="ml-auto font-bold">{window.NODES.filter(n=>n.status==='offline').length}</span></div>
+              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-ok"></span><span className="text-ink-secondary">線上</span><span className="ml-auto font-bold">{sorted.filter(n=>n.status==='online').length}</span></div>
+              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-warn"></span><span className="text-ink-secondary">警告</span><span className="ml-auto font-bold">{sorted.filter(n=>n.status==='warn').length}</span></div>
+              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-critical"></span><span className="text-ink-secondary">嚴重</span><span className="ml-auto font-bold">{sorted.filter(n=>n.status==='critical').length}</span></div>
+              <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-sev-critical animate-live-blink"></span><span className="text-ink-secondary">離線</span><span className="ml-auto font-bold">{sorted.filter(n=>n.status==='offline').length}</span></div>
             </div>
           </div>
         </div>
@@ -592,10 +855,12 @@ function WallView({ alerts, liveSec, unackCount }) {
       {/* Footer ticker */}
       <div className="h-8 bg-surface-panel border-t border-border-strong flex items-center px-4 gap-4 text-xs flex-shrink-0">
         <Icon.Activity size={12} className="text-ink-muted"/>
-        <window.Sparkline data={window.ALERT_RATE} width={180} height={20}/>
+        <window.Sparkline data={alertRate} width={180} height={20}/>
         <span className="text-ink-muted font-mono tnum">警報率 · 15min × 16</span>
         <div className="flex-1"></div>
-        <span className="text-ink-muted">上一班: <span className="text-ink-secondary font-mono tnum">{window.HANDOVER.pinned.by} @ {window.HANDOVER.pinned.at}</span> "<span className="text-ink-secondary">{window.HANDOVER.pinned.text}</span>"</span>
+        {handoverPin && (
+          <span className="text-ink-muted">上一班: <span className="text-ink-secondary font-mono tnum">{handoverPin.by} @ {handoverPin.at}</span> "<span className="text-ink-secondary">{handoverPin.text}</span>"</span>
+        )}
       </div>
     </div>
   );
@@ -603,11 +868,18 @@ function WallView({ alerts, liveSec, unackCount }) {
 
 // Load the first batch of live data, then mount. The loading spinner in
 // index.html stays visible until render() replaces #root.
+//
+// If loadInitial() rejects we STILL mount (with the failure passed down as
+// initialError) so the operator sees an in-app retry UI instead of the bare
+// spinner. Previously a rejection just logged and left mount to crash on
+// undefined `window.NODES.filter(...)` etc.
 (async function bootstrap() {
+  let initialError = null;
   try {
     await window.SDPRS_API.loadInitial();
   } catch (e) {
     console.error('[SDPRS] initial data load failed:', e);
+    initialError = e || new Error('loadInitial failed');
   }
-  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  ReactDOM.createRoot(document.getElementById('root')).render(<App initialError={initialError}/>);
 })();

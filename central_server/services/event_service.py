@@ -389,9 +389,127 @@ def get_event_counts(db: Optional[sqlite3.Connection] = None) -> Dict[str, int]:
     return counts
 
 
+def bulk_acknowledge_events(
+    alert_ids: List[int],
+    acknowledged_by: str,
+    notes: Optional[str] = None,
+) -> int:
+    """Flip a batch of events from PENDING to ACKNOWLEDGED in one UPDATE.
+
+    Contract mirrors bulk_resolve_events. Returns the number of rows actually
+    mutated (i.e. rows whose status was PENDING at the moment of the UPDATE);
+    ids already ACKNOWLEDGED/RESOLVED/PENDING_VIDEO are silently skipped by
+    the WHERE clause. Attribution and timestamp are stamped server-side.
+
+    ``notes=COALESCE(:notes, notes)`` — provided notes overwrite existing;
+    None keeps the row's existing notes untouched.
+    """
+    if not alert_ids:
+        return 0
+    acked_at = utcnow().isoformat()
+    if get_backend() == "postgresql":
+        return _bulk_acknowledge_events_pg(alert_ids, acknowledged_by, acked_at, notes)
+
+    db = get_db()
+    cursor = db.cursor()
+    placeholders = ",".join("?" for _ in alert_ids)
+    cursor.execute(
+        f"UPDATE events SET status = 'ACKNOWLEDGED', "
+        f"acknowledged_by = ?, acknowledged_at = ?, "
+        f"notes = COALESCE(?, notes) "
+        f"WHERE id IN ({placeholders}) AND status = 'PENDING'",
+        (acknowledged_by, acked_at, notes, *alert_ids),
+    )
+    count = cursor.rowcount
+    db.commit()
+    logger.info(f"Bulk-acknowledged {count} events by {acknowledged_by}")
+    return count
+
+
+def _bulk_acknowledge_events_pg(
+    alert_ids: List[int], acknowledged_by: str, acked_at: str, notes: Optional[str]
+) -> int:
+    """PostgreSQL branch of bulk_acknowledge_events (id = ANY(:ids) list binding)."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sqlalchemy.text(
+                "UPDATE events SET status = 'ACKNOWLEDGED', "
+                "acknowledged_by = :by, acknowledged_at = :at, "
+                "notes = COALESCE(:notes, notes) "
+                "WHERE id = ANY(:ids) AND status = 'PENDING'"
+            ),
+            {"by": acknowledged_by, "at": acked_at, "notes": notes, "ids": list(alert_ids)},
+        )
+        conn.commit()
+    count = result.rowcount or 0
+    logger.info(f"Bulk-acknowledged {count} events by {acknowledged_by} (PostgreSQL)")
+    return count
+
+
+def bulk_resolve_events(
+    alert_ids: List[int],
+    resolved_by: str,
+    notes: Optional[str] = None,
+) -> int:
+    """Flip a batch of events from PENDING/ACKNOWLEDGED to RESOLVED in one UPDATE.
+
+    Returns the number of rows actually mutated; already-RESOLVED and
+    PENDING_VIDEO rows are silently skipped by the WHERE predicate. Attribution
+    and timestamp are stamped server-side (never taken from the request body).
+    """
+    if not alert_ids:
+        return 0
+    resolved_at = utcnow().isoformat()
+    if get_backend() == "postgresql":
+        return _bulk_resolve_events_pg(alert_ids, resolved_by, resolved_at, notes)
+
+    db = get_db()
+    cursor = db.cursor()
+    placeholders = ",".join("?" for _ in alert_ids)
+    cursor.execute(
+        f"UPDATE events SET status = 'RESOLVED', "
+        f"resolved_by = ?, resolved_at = ?, "
+        f"notes = COALESCE(?, notes) "
+        f"WHERE id IN ({placeholders}) "
+        f"AND status IN ('PENDING', 'ACKNOWLEDGED')",
+        (resolved_by, resolved_at, notes, *alert_ids),
+    )
+    count = cursor.rowcount
+    db.commit()
+    logger.info(f"Bulk-resolved {count} events by {resolved_by}")
+    return count
+
+
+def _bulk_resolve_events_pg(
+    alert_ids: List[int], resolved_by: str, resolved_at: str, notes: Optional[str]
+) -> int:
+    """PostgreSQL branch of bulk_resolve_events."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sqlalchemy.text(
+                "UPDATE events SET status = 'RESOLVED', "
+                "resolved_by = :by, resolved_at = :at, "
+                "notes = COALESCE(:notes, notes) "
+                "WHERE id = ANY(:ids) "
+                "AND status IN ('PENDING', 'ACKNOWLEDGED')"
+            ),
+            {"by": resolved_by, "at": resolved_at, "notes": notes, "ids": list(alert_ids)},
+        )
+        conn.commit()
+    count = result.rowcount or 0
+    logger.info(f"Bulk-resolved {count} events by {resolved_by} (PostgreSQL)")
+    return count
+
+
 __all__ = [
     "list_events",
     "acknowledge_event",
     "resolve_event",
+    "bulk_acknowledge_events",
+    "bulk_resolve_events",
     "get_event_counts",
 ]

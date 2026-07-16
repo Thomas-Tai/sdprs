@@ -81,6 +81,9 @@ window.HANDOVER = {
   history: [],
 };
 window.AUDIT = [];
+// TODO(dashboard-audit-2026-07-15): source role from server (window.SDPRS_USER)
+//   — backend currently exposes SDPRS_USER as a bare string; if the login
+//   payload later includes {name, role}, replace 'op' with SDPRS_USER.role.
 window.OPERATOR = { name: window.SDPRS_USER || '', role: 'op', shiftStart: '', shiftRemaining: 0 };
 window.NODE_HISTORY = {};
 window.SHIFT_SUMMARY = {
@@ -95,9 +98,14 @@ const fmtAge = (sec) => {
   sec = Math.max(0, Math.round(sec || 0));
   if (sec < 60) return sec + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  return h + 'h ' + m + 'm';
+  if (sec < 86400) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return h + 'h ' + m + 'm';
+  }
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  return d + 'd ' + h + 'h';
 };
 const ageColor = (sec) => {
   if (sec < 300) return 'text-ink-secondary';

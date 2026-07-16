@@ -9,7 +9,7 @@ This module provides REST API endpoints for snapshot management:
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
@@ -103,6 +103,51 @@ def generate_placeholder_jpeg() -> bytes:
 _PLACEHOLDER_JPEG: bytes = generate_placeholder_jpeg()
 
 
+# ===== Snapshot-specific auth dependency =====
+#
+# The monitoring wall renders one <img> per node with a cache-buster query
+# param, so a session expiry produces a burst of 401s. Two hardening points:
+#   (a) `WWW-Authenticate: SDPRS-Session` marks the auth scheme so proxies /
+#       clients don't treat it as an anonymous unauthenticated resource.
+#   (b) `Cache-Control: no-store` prevents browsers from sticky-caching the
+#       401 response, which otherwise leaves broken-image icons across the
+#       wall even after the user logs back in.
+#
+# The SPA-side fix (listen for the /ws `auth_expired` message and force a
+# reload/re-login before firing any more snapshot fetches) belongs in
+# central_server/static/spa/api.jsx — a parallel agent's file — do NOT edit
+# it from here.
+
+_SNAPSHOT_401_HEADERS = {
+    "WWW-Authenticate": "SDPRS-Session",
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+}
+
+
+async def _verify_snapshot_auth(
+    request: Request,
+) -> str:
+    """Wrap verify_api_key_or_session so 401s carry no-store + auth-scheme
+    headers. Keeps the dual API-key/session gate unchanged (dashboard uses
+    session cookie, edge nodes use X-API-Key)."""
+    # Pull the api_key header manually so we don't have to import the private
+    # `api_key_header` scheme from auth.py — this dep intentionally has the
+    # same behavior as verify_api_key_or_session, just with header shaping
+    # applied to the failure case.
+    api_key: Optional[str] = request.headers.get("X-API-Key")
+    try:
+        return await verify_api_key_or_session(request=request, api_key=api_key)
+    except HTTPException as e:
+        if e.status_code == status.HTTP_401_UNAUTHORIZED:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=e.detail,
+                headers=_SNAPSHOT_401_HEADERS,
+            ) from e
+        raise
+
+
 # ===== API Endpoints =====
 
 @router.post("/edge/{node_id}/snapshot", status_code=status.HTTP_204_NO_CONTENT)
@@ -168,7 +213,7 @@ async def receive_snapshot(
 async def get_latest_snapshot(
     node_id: str,
     request: Request,
-    auth: str = Depends(verify_api_key_or_session)
+    auth: str = Depends(_verify_snapshot_auth)
 ) -> Response:
     """
     Get the latest snapshot JPEG for a node.

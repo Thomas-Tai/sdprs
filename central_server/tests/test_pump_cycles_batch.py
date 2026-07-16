@@ -10,8 +10,9 @@ eliminating the dashboard's per-pump N+1 request pattern.
 Mirrors test_nodes_api.py's collection-safe conventions: required env vars set
 before importing the app, a minimal FastAPI app exposing just the nodes router,
 `get_current_user` bypassed via dependency_overrides, and the module-level DB
-functions (`get_all_nodes` / `get_pump_readings`) monkeypatched so the test
-needs neither a live broker nor a real database.
+functions (`get_all_nodes` / `get_pump_readings_multi` for batch,
+`get_pump_readings` for the single-node comparison endpoint) monkeypatched so
+the test needs neither a live broker nor a real database.
 """
 import sys
 from pathlib import Path
@@ -82,10 +83,21 @@ def client(monkeypatch, nodes_rows, readings_by_node):
     app.dependency_overrides[get_current_user] = lambda: "test_user"
 
     monkeypatch.setattr(nodes_api, "get_all_nodes", lambda: list(nodes_rows))
+    # Single-node path (used by test_batch_matches_single_endpoint).
     monkeypatch.setattr(
         nodes_api,
         "get_pump_readings",
         lambda node_id, start, end, limit: list(readings_by_node.get(node_id, [])),
+    )
+    # Batch path — nodes_api.pump_cycles_batch now calls get_pump_readings_multi
+    # (one query WHERE node_id IN (...) / = ANY on PG) instead of iterating
+    # per-node get_pump_readings — the audit follow-up eliminated the N+1.
+    monkeypatch.setattr(
+        nodes_api,
+        "get_pump_readings_multi",
+        lambda node_ids, start, end, limit: {
+            nid: list(readings_by_node.get(nid, [])) for nid in node_ids
+        },
     )
 
     with TestClient(app) as test_client:
@@ -119,12 +131,13 @@ def test_batch_pump_with_no_readings_is_zero(client, monkeypatch, nodes_rows):
     """A pump node with no readings in-window is still PRESENT (identified by
     node_type == 'pump') with count 0 and alert False."""
     # pump_node_02 has no readings; pump_node_01 keeps its 4-reading set.
+    _p01 = _readings(["ON", "OFF", "ON", "OFF"])
     monkeypatch.setattr(
         nodes_api,
-        "get_pump_readings",
-        lambda node_id, start, end, limit: (
-            _readings(["ON", "OFF", "ON", "OFF"]) if node_id == "pump_node_01" else []
-        ),
+        "get_pump_readings_multi",
+        lambda node_ids, start, end, limit: {
+            nid: (list(_p01) if nid == "pump_node_01" else []) for nid in node_ids
+        },
     )
 
     response = client.get("/api/pumps/cycles?window=1h")
@@ -155,10 +168,10 @@ def test_batch_alert_threshold(client, monkeypatch, nodes_rows):
 
     monkeypatch.setattr(
         nodes_api,
-        "get_pump_readings",
-        lambda node_id, start, end, limit: (
-            list(heavy) if node_id == "pump_node_01" else []
-        ),
+        "get_pump_readings_multi",
+        lambda node_ids, start, end, limit: {
+            nid: (list(heavy) if nid == "pump_node_01" else []) for nid in node_ids
+        },
     )
 
     response = client.get("/api/pumps/cycles?window=24h")

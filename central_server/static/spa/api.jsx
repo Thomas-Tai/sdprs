@@ -11,8 +11,29 @@
 (function () {
   // ---- low-level fetch ---------------------------------------------------
 
+  const FETCH_TIMEOUT_MS = 10_000;
+
   async function apiFetch(path, opts = {}) {
-    const res = await fetch(path, { credentials: 'same-origin', ...opts });
+    // Fetch has no built-in timeout — a stuck TCP handshake would hang a request
+    // (and any downstream Promise.all) forever. 10s is generous vs. our
+    // ~1s p99 API latency; adjust per-call via opts.timeoutMs if needed.
+    const ac = new AbortController();
+    const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : FETCH_TIMEOUT_MS;
+    const t = setTimeout(() => ac.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(path, { credentials: 'same-origin', signal: ac.signal, ...opts });
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        const err = new Error('timeout after ' + timeoutMs + 'ms on ' + path);
+        err.status = 0;
+        err.timeout = true;
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
     if (res.status === 401) {
       window.location.href = '/login';
       throw new Error('unauthorized');
@@ -41,7 +62,10 @@
   function parseTs(s) {
     if (!s) return null;
     let str = String(s).trim().replace(' ', 'T');
-    if (!/([zZ])$|([+-]\d\d:?\d\d)$/.test(str)) str += 'Z';
+    // Match trailing zone: 'Z', ±HH:MM, ±HHMM, or the bare 2-digit ±HH
+    // (Postgres' `+00` shorthand). Without the last alternative, `2026-07-15T12:00:00+00`
+    // would get an extra 'Z' tacked on and parse as "12:00:00+00Z" = NaN.
+    if (!/([zZ])$|([+-]\d\d:?\d\d)$|([+-]\d\d)$/.test(str)) str += 'Z';
     const d = new Date(str);
     return isNaN(d.getTime()) ? null : d;
   }
@@ -60,10 +84,31 @@
     return dirs[Math.round(((deg % 360) / 45)) % 8];
   };
   const round = (n) => (n == null ? null : Math.round(n));
+  // Like round(), but distinguishes "no data" from "legit zero". Sensor down
+  // must show as null (→ "—" in UI), NOT as 0 (which would falsely mean
+  // "reading is zero"). `n || 0` and `round(n) || 0` both collapsed those.
+  const roundOrNull = (v) => {
+    if (v == null) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.round(n);
+  };
 
   // Tracks which pending alerts the operator has already looked at; survives
   // the periodic re-fetch (which rebuilds the alert objects from scratch).
+  // Capped FIFO so a long-running shift can't leak unboundedly.
+  const _SEEN_CAP = 1000;
   const _seen = new Set();
+  const _seenAdd = (id) => {
+    if (id == null) return;
+    if (_seen.has(id)) return;
+    _seen.add(id);
+    if (_seen.size > _SEEN_CAP) {
+      // Set iteration order is insertion order → first value is oldest.
+      const oldest = _seen.values().next().value;
+      _seen.delete(oldest);
+    }
+  };
 
   // ---- mappers -----------------------------------------------------------
 
@@ -95,9 +140,7 @@
       detail: 'conf=' + (vc != null ? vc.toFixed(2) : '—') +
               (db != null ? ' db=' + Math.round(db) : ''),
     });
-    if (e.status !== 'PENDING_VIDEO') {
-      timeline.push({ t: fmtClock(parseTs(created)), label: 'JSON_SENT', detail: 'mqtt→central' });
-    }
+    timeline.push({ t: fmtClock(parseTs(created)), label: 'JSON_SENT', detail: 'mqtt→central' });
     if (e.mp4_path) {
       timeline.push({
         t: '—', label: 'UPLOADED',
@@ -148,7 +191,7 @@
     }
 
     const offline = n.status !== 'ONLINE';
-    const level = n.water_level != null ? Math.round(n.water_level) : null;
+    const level = roundOrNull(n.water_level);
     const visualHealth = n.visual_health || 'unknown';
     const audioHealth = n.audio_health || 'unknown';
     let status = 'online';
@@ -182,12 +225,12 @@
       status,
       heartbeat: hb != null ? Math.round(hb) : 999,
       upload: up != null ? Math.round(up) : 999,
-      temp: n.cpu_temp != null ? Math.round(n.cpu_temp) : null,
+      temp: roundOrNull(n.cpu_temp),
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate != null ? ss.bitrate : 0,
       drops: ss.dropped_frames != null ? ss.dropped_frames
            : ss.drops != null ? ss.drops : 0,
-      level: level != null ? level : 0,
+      level, // null = sensor down / no reading (was previously coerced to 0 → misleading)
       cycles: n._cycles != null ? n._cycles : 0,
       cycleHistory: null,
       raining: n.raining,
@@ -197,7 +240,14 @@
       power: n.power_source || 'mains',
       trend: null,
       flow: null,
-      snoozeMin: n.snoozed_until ? Math.max(0, Math.round((parseTs(n.snoozed_until) - Date.now()) / 60000)) : 0,
+      snoozeMin: (() => {
+        if (!n.snoozed_until) return 0;
+        const t = parseTs(n.snoozed_until);
+        if (t == null || Number.isNaN(t)) return 0; // malformed ISO → don't render "NaNm"
+        return Math.max(0, Math.round((t - Date.now()) / 60000));
+      })(),
+      snoozedBy: n.snoozed_by != null ? n.snoozed_by : null,
+      snoozedAt: n.snoozed_at != null ? n.snoozed_at : null,
       visualHealth,
       audioHealth,
       // Used by the tile view as an <img> cache-buster — changes each time the
@@ -209,14 +259,31 @@
 
   function mapWeather(current, forecast, typhoon) {
     if (!current) {
-      return { ...window.WEATHER, available: false };
+      // Same shape as the populated return so destructuring (`w.wind.speed`
+      // etc.) never crashes. All leaves null so consumers can render "—"
+      // instead of quoting a stale value carried over from the last poll.
+      return {
+        available: false,
+        typhoon: null,
+        wind: { speed: null, gust: null, dir: '', degree: null },
+        rain: { now: null, hour: null, day: null },
+        temp: null,
+        humidity: null,
+        pressure: null,
+        visibility: null,
+        lightning: { count: 0, nearest: null },
+        source: '—',
+        stale: true,
+        station: '',
+        forecast: [],
+      };
     }
     const fc = (forecast || []).slice(0, 16).map((b) => {
       const d = parseTs(b.start_time);
       return {
         h: d ? String(d.getHours()).padStart(2, '0') : '--',
-        wind: round((b.wind_speed_ms || 0) * 3.6) || 0,
-        rain: round(b.rainfall_mm) || 0,
+        wind: roundOrNull(b.wind_speed_ms != null ? b.wind_speed_ms * 3.6 : null),
+        rain: roundOrNull(b.rainfall_mm),
       };
     });
     return {
@@ -229,18 +296,28 @@
         bearing: typhoon.bearing_to_site_deg,
       } : null,
       wind: {
-        speed: round((current.wind_speed_ms || 0) * 3.6) || 0,
-        gust: 0,
+        speed: roundOrNull(current.wind_speed_ms != null ? current.wind_speed_ms * 3.6 : null),
+        // TODO(dashboard-audit-2026-07-15): backend has no gust field yet
+        // (weather_service.CurrentWeather has wind_speed_ms only). Bind
+        // when Open-Meteo/CWA gust ingestion lands. Do NOT default to 0 —
+        // that reads as "no gust during a typhoon" which is a safety lie.
+        gust: null,
         dir: compass(current.wind_direction_deg),
-        degree: current.wind_direction_deg || 0,
+        degree: current.wind_direction_deg != null ? current.wind_direction_deg : null,
       },
       rain: {
-        now: round(current.rainfall_24h_mm) || 0,
-        hour: round(current.rainfall_24h_mm) || 0,
-        day: round(current.rainfall_24h_mm) || 0,
+        // Backend only exposes rainfall_24h_mm (see services/weather_service.py
+        // CurrentWeather). The "10min" and "1h" buckets don't exist yet, so
+        // leave now/hour null rather than reusing the 24h value under other
+        // labels (the audit specifically flagged that lie).
+        // TODO(dashboard-audit-2026-07-15): bind now/hour when backend
+        // exposes rainfall_10min_mm / rainfall_1h_mm.
+        now: null,
+        hour: null,
+        day: roundOrNull(current.rainfall_24h_mm),
       },
-      temp: round(current.temperature_c) || 0,
-      humidity: current.humidity_pct || 0,
+      temp: roundOrNull(current.temperature_c),
+      humidity: current.humidity_pct != null ? current.humidity_pct : null,
       pressure: null,
       visibility: null,
       lightning: { count: 0, nearest: null },
@@ -259,6 +336,9 @@
     const ts = parseTs(r.timestamp || r.created_at || r.t);
     return {
       t: ts ? fmtClock(ts) : (r.timestamp || r.t || '—'),
+      // Full timestamp (ms since epoch) used by the audit date filter.
+      // Null if the row didn't carry a parseable timestamp.
+      ts: ts != null && !Number.isNaN(ts) ? ts : null,
       by: r.operator || r.by || 'system',
       action: r.action || r.action_type || '—',
       target: r.target != null ? r.target : (r.target_id != null ? r.target_id : '—'),
@@ -307,14 +387,31 @@
     } catch (e) { return new Array(16).fill(0); }
   }
 
+  // 503 = feature disabled server-side (no CWA_API_KEY); expected in dev.
+  // Anything else is a real error and worth a console warn so operators
+  // see it while /api/weather/* is silently returning stub data.
+  function _weatherLog(endpoint, err) {
+    const s = err && err.status;
+    if (s === 503) return; // expected when the weather integration is off
+    console.warn('[api] weather ' + endpoint + ' failed:', s || err.message);
+  }
+
   async function loadWeather() {
-    let current = null, forecast = [], typhoon = null;
-    try { current = await apiFetch('/api/weather/current'); } catch (e) { /* 503 = disabled */ }
-    try {
-      const f = await apiFetch('/api/weather/forecast');
-      forecast = (f && f.buckets) || [];
-    } catch (e) { /* ignore */ }
-    try { typhoon = await apiFetch('/api/weather/typhoon'); } catch (e) { /* ignore */ }
+    // Parallel — the 3 endpoints are independent, and the slowest one (typhoon
+    // hits an upstream API) was gating the other two under sequential await.
+    const results = await Promise.allSettled([
+      apiFetch('/api/weather/current'),
+      apiFetch('/api/weather/forecast'),
+      apiFetch('/api/weather/typhoon'),
+    ]);
+    const endpoints = ['current', 'forecast', 'typhoon'];
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') _weatherLog(endpoints[i], r.reason);
+    });
+    const current = results[0].status === 'fulfilled' ? results[0].value : null;
+    const fRes = results[1].status === 'fulfilled' ? results[1].value : null;
+    const forecast = (fRes && fRes.buckets) || [];
+    const typhoon = results[2].status === 'fulfilled' ? results[2].value : null;
     return mapWeather(current, forecast, typhoon);
   }
 
@@ -339,12 +436,26 @@
   }
 
   async function loadAudit() {
+    // 403 = non-admin session; page renders a "無權限" empty state driven by
+    // window.AUDIT.forbidden. apiFetch throws Error('HTTP 403 on ...') with
+    // .status = 403 (see apiFetch above) — we tolerate both shapes just in
+    // case a caller re-wraps the error before it reaches here.
+    window.AUDIT = window.AUDIT || [];
     try {
       const a = await apiFetch('/api/audit?limit=200');
       const rows = (a && a.rows) || [];
-      return rows.map(mapAuditRow);
+      const entries = rows.map(mapAuditRow);
+      entries.forbidden = false;
+      window.AUDIT = entries;
+      return entries;
     } catch (e) {
-      return []; // 403 for non-admin — audit page just shows empty
+      const status = e && e.status;
+      const msg = e && e.message ? String(e.message) : '';
+      const is403 = status === 403 || msg.indexOf('403') !== -1;
+      const entries = [];
+      entries.forbidden = !!is403;
+      window.AUDIT = entries;
+      return entries;
     }
   }
 
@@ -406,27 +517,48 @@
 
   // Re-fetches the volatile data (alerts, nodes, rate). Returns the new
   // arrays so app.jsx can push them into React state.
+  //
+  // In-flight guard: if a WS event and the poll timer both call refreshLive
+  // in the same tick (or a slow request outlasts the interval), we return
+  // the pending promise instead of stacking a second identical fan-out.
+  let refreshLiveInFlight = null;
   async function refreshLive() {
-    const results = await Promise.allSettled([loadNodes(), loadAlerts(), loadHistory(), loadRate()]);
-    const [nodes, alerts, history, rate] =
-      results.map((r) => (r.status === 'fulfilled' ? r.value : null));
-    if (nodes) window.NODES = nodes;
-    if (alerts) window.ALERTS = alerts;
-    if (history) {
-      window.HISTORY_ALERTS = history;
-      window.NODE_HISTORY = buildNodeHistory(history);
-    }
-    if (rate) window.ALERT_RATE = rate;
-    window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
-    return {
-      nodes: window.NODES,
-      alerts: window.ALERTS,
-      history: window.HISTORY_ALERTS,
-      rate: window.ALERT_RATE,
-    };
+    if (refreshLiveInFlight) return refreshLiveInFlight;
+    refreshLiveInFlight = (async () => {
+      const results = await Promise.allSettled([loadNodes(), loadAlerts(), loadHistory(), loadRate()]);
+      const [nodes, alerts, history, rate] =
+        results.map((r) => (r.status === 'fulfilled' ? r.value : null));
+      if (nodes) window.NODES = nodes;
+      if (alerts) window.ALERTS = alerts;
+      if (history) {
+        window.HISTORY_ALERTS = history;
+        window.NODE_HISTORY = buildNodeHistory(history);
+      }
+      if (rate) window.ALERT_RATE = rate;
+      window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
+      return {
+        nodes: window.NODES,
+        alerts: window.ALERTS,
+        history: window.HISTORY_ALERTS,
+        rate: window.ALERT_RATE,
+      };
+    })()
+      .catch((err) => {
+        // Symmetry with loadInitial — log but don't propagate an unhandled
+        // rejection to the poll timer / WS handler.
+        console.warn('[api] refreshLive failed', err);
+        return {
+          nodes: window.NODES,
+          alerts: window.ALERTS,
+          history: window.HISTORY_ALERTS,
+          rate: window.ALERT_RATE,
+        };
+      })
+      .finally(() => { refreshLiveInFlight = null; });
+    return refreshLiveInFlight;
   }
 
-  function markSeen(id) { _seen.add(id); }
+  function markSeen(id) { _seenAdd(id); }
 
   // ---- mutations ---------------------------------------------------------
 
@@ -438,6 +570,39 @@
   const resolveAlert = (id, note) => apiFetch('/api/alerts/' + id + '/resolve',
     jsonBody('PATCH', { notes: note || null }));
 
+  // Bulk operations — server iterates the id list under one session, so
+  // attribution is still server-derived. Returns `{acked}` / `{resolved}`
+  // with the count actually mutated (server skips already-terminal rows).
+  const bulkAckAlerts = (ids, note) => apiFetch('/api/alerts/bulk-ack',
+    jsonBody('POST', { ids: ids || [], note: note || null }));
+
+  const bulkResolveAlerts = (ids, note) => apiFetch('/api/alerts/bulk-resolve',
+    jsonBody('POST', { ids: ids || [], note: note || null }));
+
+  // Audit CSV export — server sets Content-Disposition, so a plain anchor
+  // click keeps the session cookie and lets the browser handle the save
+  // dialog. Deliberately NOT fetch→blob→createObjectURL: that would strip
+  // the server-supplied filename and double our memory footprint for large
+  // exports. Silent by design — the browser owns the UX from here.
+  function exportAuditCsv(opts) {
+    const o = opts || {};
+    const params = new URLSearchParams();
+    if (o.limit != null) params.set('limit', String(o.limit));
+    if (o.type) params.set('type', o.type);
+    const qs = params.toString();
+    const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
+    // YYYYMMDD from the ISO string (naive-UTC safe — no Date locale drift).
+    const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'audit_' + ymd + '.csv';
+    // Some browsers (Firefox pre-93) require the anchor to be in the DOM.
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   const snoozeNode = (nodeId, minutes, reason) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
     jsonBody('POST', { minutes, reason: reason || '操作員延期' }));
 
@@ -448,21 +613,78 @@
 
   // ---- websocket ---------------------------------------------------------
 
-  // Opens the live event socket. `onEvent({type,data})` fires for every
-  // server message; it auto-reconnects with a short backoff.
-  function openSocket(onEvent) {
+  // Backend event types dispatched to `onEvent(type, data)`. `new_alert` is
+  // routed to `onNewAlert(alertObj)` (mapped through mapAlert). `ping` is
+  // internal — pure keepalive, never surfaced.
+  const _WS_EVENT_TYPES = new Set([
+    'alert_updated', 'alert_acknowledged', 'alert_resolved',
+    'node_status', 'pump_status',
+    'auth_expired',
+  ]);
+  // A server that accepts the socket then closes it (auth-drop, upstream
+  // proxy hiccup) would trigger a 1 req/s reconnect flood if we reset the
+  // backoff on `onopen`. Only reset after this many ms of stable connection.
+  const _WS_STABLE_MS = 30_000;
+
+  // Opens the live event socket.
+  //
+  // Two call shapes for backward compat:
+  //   openSocket({ onNewAlert, onEvent })   — new contract
+  //   openSocket(fn)                        — legacy; fn treated as onNewAlert
+  //
+  // `onNewAlert(alertObj)` fires for `new_alert` (alert is mapAlert-normalised).
+  // `onEvent(type, data)` fires for the 5 telemetry types above. `ping` is
+  // handled internally. Auto-reconnects with exponential backoff (max 15s).
+  function openSocket(arg) {
+    let onNewAlert = null, onEvent = null;
+    if (typeof arg === 'function') {
+      onNewAlert = arg; // legacy positional call
+    } else if (arg && typeof arg === 'object') {
+      onNewAlert = typeof arg.onNewAlert === 'function' ? arg.onNewAlert : null;
+      onEvent = typeof arg.onEvent === 'function' ? arg.onEvent : null;
+    }
+
     let ws = null, closed = false, retry = 1000;
+    let stableTimer = null;
+    const clearStable = () => { if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; } };
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const connect = () => {
       if (closed) return;
       try { ws = new WebSocket(proto + '//' + location.host + '/ws'); }
       catch (e) { setTimeout(connect, retry); return; }
-      ws.onopen = () => { retry = 1000; };
+      ws.onopen = () => {
+        // Delay backoff reset — see _WS_STABLE_MS comment.
+        clearStable();
+        stableTimer = setTimeout(() => { retry = 1000; stableTimer = null; }, _WS_STABLE_MS);
+      };
       ws.onmessage = (ev) => {
         let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
-        try { onEvent(msg); } catch (e) { console.warn('[SDPRS] ws handler error', e); }
+        const type = msg && msg.type;
+        if (!type) return;
+        if (type === 'ping') return; // keepalive; never surface
+        try {
+          if (type === 'new_alert') {
+            if (onNewAlert) {
+              // Backend sends a thin notification (see api/alerts.py):
+              //   { type: "new_alert", data: { alert_id, node_id, timestamp, status } }
+              // It's a signal to refetch, NOT a full event — mapAlert would
+              // return an object full of nulls. Pass the payload as-is so
+              // app.jsx can bump banner counters / trigger refreshLive.
+              onNewAlert(msg.data != null ? msg.data : msg);
+            }
+          } else if (_WS_EVENT_TYPES.has(type)) {
+            if (onEvent) {
+              const data = (msg.data != null ? msg.data : msg);
+              onEvent(type, data);
+            }
+          }
+          // else: unknown type — ignore silently for forward-compat
+        } catch (e) {
+          console.warn('[SDPRS] ws handler error for', type, e);
+        }
       };
       ws.onclose = () => {
+        clearStable();
         if (closed) return;
         setTimeout(connect, retry);
         retry = Math.min(retry * 2, 15000);
@@ -470,12 +692,14 @@
       ws.onerror = () => { if (ws) ws.close(); };
     };
     connect();
-    return () => { closed = true; if (ws) ws.close(); };
+    return () => { closed = true; clearStable(); if (ws) ws.close(); };
   }
 
   window.SDPRS_API = {
     loadInitial, refreshLive, markSeen,
-    ackAlert, resolveAlert, snoozeNode, saveHandover, updateNodeLocation,
+    ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
+    snoozeNode, saveHandover, updateNodeLocation,
+    exportAuditCsv,
     openSocket,
   };
 })();

@@ -10,6 +10,34 @@
   site's internet uplink may be down. Fonts fall back to the OS stack
   (Microsoft JhengHei / Consolas) declared in the Tailwind config below.
 -->
+<!--
+  Pre-Tailwind theme reset. `class="dark"` above keeps the no-JS path dark;
+  if the operator's persisted theme is light, flip the class BEFORE Tailwind
+  loads so we don't flash dark. Runtime tweak system (see tweaks-panel.jsx)
+  doesn't use localStorage today (postMessage-only), so this is defensive
+  scaffolding — safe to leave in place for future localStorage-backed themes.
+  TODO(dashboard-audit-2026-07-15): once tweak values live in localStorage,
+  read the same key here to make this actually protective.
+-->
+<script>
+  (function() {
+    try {
+      var t = localStorage.getItem('theme');
+      if (t === 'light') {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.classList.add('light');
+      }
+    } catch (e) { /* localStorage blocked — keep dark default */ }
+  })();
+</script>
+<style>
+  /* Toast entrance — replaces the non-existent Tailwind `animate-in` utility. */
+  @keyframes sdprs-toast-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-in { animation: sdprs-toast-in 0.2s ease-out both; }
+</style>
 <script src="/static/spa/vendor/tailwind.min.js"></script>
 <script>
   tailwind.config = {
@@ -64,8 +92,17 @@
   };
 </script>
 <link rel="stylesheet" href="/static/spa/styles.css">
-<!-- Logged-in user, injected server-side by the dashboard route. -->
-<script>window.SDPRS_USER = __SDPRS_USER__;</script>
+<!-- Logged-in user, injected server-side by the dashboard route.
+     Wrapped in try/catch because a bare identifier (unsubstituted placeholder)
+     is a ReferenceError that would kill the entire <head> script parse. -->
+<script>
+  try {
+    window.SDPRS_USER = __SDPRS_USER__;
+  } catch (e) {
+    console.error('[SDPRS] SDPRS_USER placeholder not substituted by server');
+    window.SDPRS_USER = null;
+  }
+</script>
 <script src="/static/spa/vendor/react.production.min.js"></script>
 <script src="/static/spa/vendor/react-dom.production.min.js"></script>
 <script src="/static/spa/vendor/babel.min.js"></script>

@@ -11,21 +11,30 @@ This module provides REST API endpoints for alert management:
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
 from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id
-from ..database import insert_event, get_event, update_event_status, get_event_created_ats
+from ..database import (
+    insert_event,
+    get_event,
+    update_event_status,
+    get_event_created_ats,
+    get_events_by_statuses,
+    get_events_by_ids,
+)
 from ..config import get_settings
 from ..timeutil import utcnow
 from ..services.websocket_service import ws_manager
 from ..services.event_service import (
     resolve_event as resolve_event_db,
     acknowledge_event as acknowledge_event_db,
+    bulk_acknowledge_events as bulk_acknowledge_events_db,
+    bulk_resolve_events as bulk_resolve_events_db,
 )
 
 # Configure logging
@@ -73,21 +82,35 @@ class AlertDetail(BaseModel):
 class ResolveRequest(BaseModel):
     """Request model for resolving an alert.
 
-    `resolved_by` is accepted-but-ignored for backward compatibility with
-    the legacy Jinja template (templates/alert_detail.html) which still
-    sends it. Attribution is derived server-side from the authenticated
-    user (get_current_user) so a client cannot spoof who resolved an
-    alert in the DB, the WebSocket broadcast, or the tamper-evident audit
-    log. See Theme 2 (trust boundary) finding.
+    Attribution is derived server-side from the authenticated user
+    (get_current_user) so a client cannot spoof who resolved an alert in
+    the DB, the WebSocket broadcast, or the tamper-evident audit log.
+    See Theme 2 (trust boundary) finding.
+
+    Note: legacy clients may still send `resolved_by` in the body — Pydantic
+    ignores extra fields by default, so those requests remain accepted; the
+    value is dropped rather than trusted. The schema no longer advertises
+    the field so new callers cannot mistake it for a supported input.
     """
-    resolved_by: Optional[str] = Field(None, description="Deprecated/ignored: attribution is derived from the authenticated session")
     notes: Optional[str] = Field(None, description="Optional resolution notes")
 
 
 class BulkResolveRequest(BaseModel):
-    """Item 10: bulk resolve. Server iterates and aggregates per-id failures."""
-    ids: list[int] = Field(..., min_length=1, max_length=200)
-    notes: Optional[str] = Field(None, max_length=500)
+    """Frozen contract shape (dashboard-audit-2026-07-15): single-transaction
+    bulk resolve. ``ids`` accepts int or str on the wire (the SPA serialises
+    AlertDetail.id — a JS number — as JSON integers, but external callers may
+    send strings; `_coerce_int_ids` normalises both). ``note`` overwrites the
+    DB ``notes`` column via COALESCE when non-null; None keeps existing notes.
+    """
+    ids: list[Union[int, str]] = Field(..., description="Alert IDs to resolve (int or numeric string)")
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class BulkAckRequest(BaseModel):
+    """Frozen contract shape: single-transaction bulk acknowledge. Same wire
+    shape as BulkResolveRequest; only PENDING rows get flipped."""
+    ids: list[Union[int, str]] = Field(..., description="Alert IDs to acknowledge (int or numeric string)")
+    note: Optional[str] = Field(None, max_length=500)
 
 
 def _row_to_alert_detail(event: dict) -> AlertDetail:
@@ -419,9 +442,9 @@ async def resolve_alert(
     - **alert_id**: The alert ID to resolve
     - **notes**: Optional resolution notes
 
-    Attribution (`resolved_by`) is always the authenticated session user;
-    any `resolved_by` in the request body is accepted for backward
-    compatibility but ignored.
+    Attribution (`resolved_by`) is always the authenticated session user.
+    The field is not exposed on the request schema; legacy clients that still
+    send it get their value silently dropped (Pydantic extras are ignored).
     """
     logger.info(f"Resolving alert {alert_id} by {user}")
 
@@ -525,14 +548,25 @@ async def alert_rate(
 
     # Pre-build buckets so empty windows render as 0 (gives the sparkline the
     # full timeline shape; a zero-rate moment is itself information).
+    #
+    # Bucket alignment is deterministic across hosts: we anchor to `end` snapped
+    # UP to the next bucket boundary, then walk backwards `window_s / bucket_s`
+    # slots. Two invariants this preserves:
+    #   (a) exactly window_s/bucket_s buckets (4h/15m -> 16, not 15) — the
+    #       previous `while t < end` loop dropped the final open bucket.
+    #   (b) UTC-anchored .timestamp() (via tzinfo=UTC) so host local tz does
+    #       not shift the bins. Naive `.timestamp()` treats the datetime as
+    #       local time, which drifts on non-UTC hosts.
     buckets: list[dict] = []
-    t = start.replace(microsecond=0)
-    # Snap to bucket boundary so consecutive refreshes don't show shifting bins.
-    snap_s = bucket_s - (int(t.timestamp()) % bucket_s)
-    t = t + _td(seconds=snap_s)
-    while t < end:
-        buckets.append({"bucket_start": t.isoformat() + "Z", "count": 0})
-        t = t + _td(seconds=bucket_s)
+    # Snap end UP to the next bucket boundary (no-op when already aligned).
+    end_utc_ts = int(end.replace(tzinfo=timezone.utc).timestamp())
+    end_snap_ts = end_utc_ts + ((bucket_s - (end_utc_ts % bucket_s)) % bucket_s)
+    first_ts = end_snap_ts - window_s
+    for offset in range(0, window_s, bucket_s):
+        # Naive-UTC datetime (matches timeutil.utcnow() contract) via UTC-aware
+        # fromtimestamp then strip tz — keeps the sort/compare invariants.
+        bt = datetime.fromtimestamp(first_ts + offset, tz=timezone.utc).replace(tzinfo=None)
+        buckets.append({"bucket_start": bt.isoformat() + "Z", "count": 0})
 
     if buckets:
         # NOTE: get_event_created_ats returns a list of raw created_at strings,
@@ -561,60 +595,138 @@ async def alert_rate(
     return {"buckets": buckets, "intensifying": intensifying, "bucket_seconds": bucket_s}
 
 
+def _coerce_int_ids(raw_ids: list[str]) -> list[int]:
+    """Coerce a list[str] of alert IDs to a list[int] for DB binding.
+
+    The frozen wire contract passes IDs as strings, but the events.id column
+    is a SERIAL/AUTOINCREMENT integer. Non-numeric entries are silently
+    dropped — they cannot match any row anyway, and a strict raise would let
+    a single bad UI value break the whole batch. Empty-list handling stays
+    in the endpoint (400 "invalid ids").
+    """
+    out: list[int] = []
+    for x in raw_ids or []:
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+@router.post("/alerts/bulk-ack")
+async def bulk_ack_alerts(
+    body: BulkAckRequest,
+    request: Request,
+    user: str = Depends(get_current_user),
+):
+    """Bulk acknowledge (dashboard-audit-2026-07-15 frozen contract).
+
+    Flips every PENDING row in ``body.ids`` to ACKNOWLEDGED in one UPDATE.
+    Returns ``{"acked": <int>}`` — the actual rowcount of the UPDATE, i.e.
+    only rows whose status was PENDING at commit time. Attribution
+    (acknowledged_by) is always the session user; a client-supplied note
+    overwrites the row's ``notes`` column via COALESCE.
+
+    Pre-selects the target IDs so we can push per-id WebSocket updates the
+    SPA already handles (existing ``alert_updated`` topic). The bulk UPDATE
+    is authoritative — a race between the SELECT and UPDATE just means we
+    may broadcast slightly stale info (harmless; SPA re-reconciles on the
+    next list poll or WebSocket event).
+    """
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="invalid ids")
+
+    int_ids = _coerce_int_ids(body.ids)
+    if not int_ids:
+        raise HTTPException(status_code=400, detail="invalid ids")
+
+    # Pre-select by id (not top-N of PENDING) so older selected rows still
+    # receive their per-id broadcast — audit finding MED #3.
+    affected_before: list[int] = []
+    try:
+        rows = get_events_by_ids(int_ids)
+        affected_before = [r["id"] for r in rows if r.get("status") == "PENDING"]
+    except Exception as e:
+        logger.debug(f"pre-select for bulk-ack broadcast failed: {e}")
+
+    count = bulk_acknowledge_events_db(
+        alert_ids=int_ids,
+        acknowledged_by=user,
+        notes=body.note,
+    )
+
+    for aid in affected_before:
+        try:
+            await ws_manager.broadcast({
+                "type": "alert_updated",
+                "data": {"alert_id": aid, "status": "ACKNOWLEDGED",
+                         "acknowledged_by": user},
+            })
+        except Exception as ws_error:
+            logger.warning(f"WebSocket broadcast failed: {ws_error}")
+
+    from ..services.audit_service import log_action, ACTION_BULK_ACKNOWLEDGE
+    log_action(user, ACTION_BULK_ACKNOWLEDGE, target_id=None, details={
+        "requested": len(body.ids),
+        "acked": count,
+        "note": body.note,
+    })
+    return {"acked": count}
+
+
 @router.post("/alerts/bulk-resolve")
 async def bulk_resolve_alerts(
     body: BulkResolveRequest,
     request: Request,
     user: str = Depends(get_current_user),
 ):
-    """Item 10: resolve up to 200 alerts in one request.
+    """Bulk resolve (dashboard-audit-2026-07-15 frozen contract).
 
-    Per-id failures are collected into the response (HTTP 207 Multi-Status
-    style); the request itself succeeds as long as the input was well-formed.
-    Audit log records both the bulk umbrella action and per-id actions so
-    a later review can reconstruct exactly what was processed.
+    Flips every PENDING/ACKNOWLEDGED row in ``body.ids`` to RESOLVED in one
+    UPDATE. Returns ``{"resolved": <int>}`` — the actual rowcount, so
+    already-RESOLVED/PENDING_VIDEO ids don't inflate the total.
     """
-    succeeded: list[int] = []
-    failures: list[dict] = []
-    for alert_id in body.ids:
-        try:
-            ev = get_event(alert_id)
-            if ev is None:
-                failures.append({"id": alert_id, "reason": "not_found"})
-                continue
-            if ev["status"] not in ("PENDING", "ACKNOWLEDGED"):
-                failures.append({"id": alert_id, "reason": f"status={ev['status']}"})
-                continue
-            ok = resolve_event_db(alert_id=alert_id, resolved_by=user, notes=body.notes)
-            if not ok:
-                failures.append({"id": alert_id, "reason": "db_error"})
-                continue
-            succeeded.append(alert_id)
-            try:
-                await ws_manager.broadcast({
-                    "type": "alert_resolved",
-                    "data": {"alert_id": alert_id, "resolved_by": user},
-                })
-            except Exception as ws_error:
-                logger.warning(f"WebSocket broadcast failed: {ws_error}")
-        except Exception as e:
-            failures.append({"id": alert_id, "reason": f"exception:{type(e).__name__}"})
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="invalid ids")
 
-    from ..services.audit_service import log_action, ACTION_BULK_RESOLVE, ACTION_RESOLVE
-    log_action(user, ACTION_BULK_RESOLVE, target_id=None, details={
-        "succeeded": succeeded, "failures": failures, "notes": body.notes,
-    })
-    for sid in succeeded:
-        log_action(user, ACTION_RESOLVE, target_id=sid, details={"bulk": True})
+    int_ids = _coerce_int_ids(body.ids)
+    if not int_ids:
+        raise HTTPException(status_code=400, detail="invalid ids")
 
-    # 207 only when there's a partial failure — full success returns 200,
-    # full failure returns 207 with the breakdown so caller can show errors.
-    status_code = status.HTTP_200_OK if not failures else 207
-    from fastapi.responses import JSONResponse
-    return JSONResponse(
-        status_code=status_code,
-        content={"succeeded": succeeded, "failures": failures, "total": len(body.ids)},
+    # Pre-select by id (not top-N of PENDING/ACKNOWLEDGED) so older selected
+    # rows still receive their per-id broadcast — audit finding MED #3.
+    affected_before: list[int] = []
+    try:
+        rows = get_events_by_ids(int_ids)
+        affected_before = [
+            r["id"] for r in rows
+            if r.get("status") in ("PENDING", "ACKNOWLEDGED")
+        ]
+    except Exception as e:
+        logger.debug(f"pre-select for bulk-resolve broadcast failed: {e}")
+
+    count = bulk_resolve_events_db(
+        alert_ids=int_ids,
+        resolved_by=user,
+        notes=body.note,
     )
+
+    for aid in affected_before:
+        try:
+            await ws_manager.broadcast({
+                "type": "alert_resolved",
+                "data": {"alert_id": aid, "resolved_by": user},
+            })
+        except Exception as ws_error:
+            logger.warning(f"WebSocket broadcast failed: {ws_error}")
+
+    from ..services.audit_service import log_action, ACTION_BULK_RESOLVE
+    log_action(user, ACTION_BULK_RESOLVE, target_id=None, details={
+        "requested": len(body.ids),
+        "resolved": count,
+        "note": body.note,
+    })
+    return {"resolved": count}
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertDetail)
@@ -660,17 +772,22 @@ async def list_alerts(
         # Support comma-separated multi-status (e.g. PENDING,ACKNOWLEDGED for active-only)
         statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
         if len(statuses) > 1:
-            events = []
-            for s in statuses:
-                events.extend(get_events_by_status(s, limit=limit + offset))
-            events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
-            events = events[offset:offset + limit]
+            # Single-query multi-status (fixes the dashboard-audit-2026-07-15
+            # TODO). Prev: fanned out N per-status queries, fetched
+            # O(N*(limit+offset)) rows and re-sorted in Python — a real N+1
+            # under PG. Now: one `WHERE status IN (...)` (SQLite) or
+            # `WHERE status = ANY(:statuses)` (PG) with ORDER BY + LIMIT/OFFSET
+            # pushed to the DB. Sort/limit semantics identical to the old code:
+            # timestamp DESC, then slice [offset:offset+limit].
+            events = get_events_by_statuses(statuses, limit=limit, offset=offset)
         else:
+            # Single-status early return — the common case (SPA polls a single
+            # status per filter chip). One query, DB does the ORDER BY.
             events = get_events_by_status(statuses[0], limit=limit + offset)
             events = events[offset:offset + limit]
     else:
         events = get_all_events(limit=limit, offset=offset)
-    
+
     return [_row_to_alert_detail(e) for e in events]
 
 

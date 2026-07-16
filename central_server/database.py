@@ -569,6 +569,61 @@ def get_all_events(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     return [dict(row) for row in cursor.fetchall()]
 
 
+def get_events_by_statuses(
+    statuses: List[str], limit: int = 100, offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Get events whose status is in ``statuses`` (single query — no N+1 fan-out).
+
+    Replaces the ``for s in statuses: get_events_by_status(s, ...)`` loop that
+    dashboard-audit-2026-07-15 called out in api/alerts.py: that pattern fetched
+    O(N*(limit+offset)) rows and re-sorted in Python. This helper does the
+    filter+ORDER BY+LIMIT/OFFSET on the DB (PG: ``= ANY(:statuses)`` bound
+    natively; SQLite: expanded ``IN (?,?,?)`` placeholders).
+    """
+    if not statuses:
+        return []
+    if _backend == "postgresql":
+        return _pg_fetch_many_sync(
+            "SELECT * FROM events WHERE status = ANY(:statuses) "
+            "ORDER BY timestamp DESC LIMIT :limit OFFSET :offset",
+            {"statuses": list(statuses), "limit": limit, "offset": offset},
+        )
+    db = get_db()
+    cursor = db.cursor()
+    placeholders = ",".join("?" for _ in statuses)
+    cursor.execute(
+        f"SELECT * FROM events WHERE status IN ({placeholders}) "
+        f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        (*statuses, limit, offset),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_events_by_ids(ids: List[int]) -> List[Dict[str, Any]]:
+    """Fetch events by primary key set (single query — no ORDER/LIMIT filter).
+
+    Used by bulk-ack/resolve to pre-select the actual selected rows for per-id
+    WebSocket broadcast. Previously `get_events_by_statuses` was mis-used with
+    a top-N-of-PENDING window, which silently dropped selected rows older than
+    the top window — audit finding MED #3.
+    """
+    if not ids:
+        return []
+    if _backend == "postgresql":
+        return _pg_fetch_many_sync(
+            "SELECT * FROM events WHERE id = ANY(:ids)",
+            {"ids": list(ids)},
+        )
+    db = get_db()
+    cursor = db.cursor()
+    placeholders = ",".join("?" for _ in ids)
+    cursor.execute(
+        f"SELECT * FROM events WHERE id IN ({placeholders})",
+        tuple(ids),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
 # =============================================================================
 # Node Operations  (unified SQLite / PostgreSQL)
 # =============================================================================
@@ -786,6 +841,53 @@ def get_pump_readings(node_id: str, start: str, end: str,
         (node_id, start, end, limit),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def get_pump_readings_multi(
+    node_ids: List[str], start: str, end: str, limit: int = 50000
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Batch pump-reading fetch grouped by node_id — one SQL round trip.
+
+    Fixes the N+1 in api/nodes.py pump_cycles_batch (dashboard-audit-2026-07-15
+    TODO): the previous implementation called get_pump_readings once per pump
+    node. This helper issues a single SELECT and groups in Python.
+
+    Return shape: ``{node_id: [{timestamp, water_level, pump_state, raining,
+    sensor_conflict}, ...], ...}``. Missing nodes are ABSENT from the dict;
+    callers should treat ``dict.get(nid, [])`` as "no readings in window".
+    The per-row shape matches ``get_pump_readings`` (node_id is stripped from
+    each row after grouping) so ``_count_pump_cycles`` runs unchanged.
+    """
+    if not node_ids:
+        return {}
+    if _backend == "postgresql":
+        rows = _pg_fetch_many_sync(
+            "SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict "
+            "FROM pump_readings WHERE node_id = ANY(:ids) "
+            "AND timestamp BETWEEN :s AND :e "
+            "ORDER BY node_id, timestamp ASC LIMIT :lim",
+            {"ids": list(node_ids), "s": start, "e": end, "lim": limit},
+        )
+    else:
+        db = get_db()
+        cursor = db.cursor()
+        placeholders = ",".join("?" for _ in node_ids)
+        cursor.execute(
+            f"SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict "
+            f"FROM pump_readings WHERE node_id IN ({placeholders}) "
+            f"AND timestamp BETWEEN ? AND ? "
+            f"ORDER BY node_id, timestamp ASC LIMIT ?",
+            (*node_ids, start, end, limit),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        nid = r.pop("node_id", None)
+        if nid is None:
+            continue
+        grouped.setdefault(nid, []).append(r)
+    return grouped
 
 
 def update_node_heartbeat(node_id: str, metadata: Optional[Dict[str, Any]] = None):

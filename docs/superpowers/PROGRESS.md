@@ -5,6 +5,8 @@
 **Repo:** `sdprs/` (its own git repo; parent folder is not versioned) · **Remote:** `github.com/Thomas-Tai/sdprs`
 **Current branch/commit:** `main` @ `c0ff3b1` — pushed to `origin/main`. Entry-21 slice ready to commit locally (not yet pushed).
 
+**Related audits:** [Dashboard Audit 2026-07-15](dashboard_audit_2026_07_15.md) — 72 findings across 7 tranches (WS contract, bootstrap error boundary, snapshot z-order, snooze provenance, N+1, etc.), most already addressed in the round-1/round-2 parallel-agent slices; see the doc for the full punch list and remaining deferred items.
+
 > Canonical, living progress tracker for the `docs/superpowers` workstream.
 > Task-by-task execution detail for the pump-merge effort lives in
 > `.superpowers/sdd/progress.md` (SDD ledger). This file is the higher-altitude

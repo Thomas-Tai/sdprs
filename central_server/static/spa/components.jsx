@@ -2,26 +2,54 @@
 
 const { useState, useEffect, useRef, useMemo } = React;
 
+// ---------- Safe meta lookups ----------
+// Backend can send severities / states / detector-health values the UI has not
+// yet been taught about (schema drift, edge sending a preview enum, etc.).
+// Rather than render nothing (null-return) or crash on `.bar`/`.tone`, degrade
+// to a labelled placeholder so operators still see *something*.
+const safeSevMeta = (sev) => {
+  const m = window.sevMeta && window.sevMeta[sev];
+  if (m) return m;
+  return window.sevMeta && window.sevMeta.info
+    ? { ...window.sevMeta.info, label: sev || '未知' }
+    : { label: sev || '未知', color: 'ink-muted', bar: 'sev-bar-info',
+        Icon: () => (window.Icon ? window.Icon.HelpCircle({size:14}) : null) };
+};
+const safeStateMeta = (state) => {
+  const m = window.stateMeta && window.stateMeta[state];
+  if (m) return m;
+  return { label: state || '未知',
+           cls: 'bg-surface-elevated text-ink-muted border-border-subtle' };
+};
+const safeDetectorHealthMeta = (v) => {
+  const meta = window.detectorHealthMeta || {};
+  return meta[v] || meta.unknown || { label: v || '未知', tone: 'muted' };
+};
+
+// Expose the safe helpers so pages.jsx / app.jsx call sites (rendered rows,
+// wall-view ticker, alert-detail header) don't crash on unknown severities.
+window.safeSevMeta = safeSevMeta;
+window.safeStateMeta = safeStateMeta;
+window.safeDetectorHealthMeta = safeDetectorHealthMeta;
+
 // ---------- Atoms ----------
 
 const Kbd = ({ children }) => <kbd className="kbd noselect">{children}</kbd>;
 
 const SeverityBadge = ({ sev, withLabel = true, size = 'sm' }) => {
-  const m = window.sevMeta[sev];
-  if (!m) return null;
+  const m = safeSevMeta(sev);
   const Ico = m.Icon;
   const sz = size === 'md' ? 'text-sm px-2 py-0.5' : 'text-[10px] px-1.5 py-0.5';
   return (
     <span className={`inline-flex items-center gap-1 rounded border font-medium tnum bg-${m.color}/15 text-${m.color} border-${m.color}/30 ${sz}`}>
-      <Ico />
+      {Ico && <Ico />}
       {withLabel && <span>{m.label}</span>}
     </span>
   );
 };
 
 const StateBadge = ({ state }) => {
-  const m = window.stateMeta[state];
-  if (!m) return null;
+  const m = safeStateMeta(state);
   return <span className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border font-medium ${m.cls}`}>{m.label}</span>;
 };
 
@@ -57,27 +85,52 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
 // Used by NodeCard tile (pages.jsx), the big monitor wall (app.jsx), and
 // the node detail side panel (components.jsx). Each slot needs the same
 // behaviour: show a live JPEG for cameras that have uploaded a snapshot,
-// fall back to an icon otherwise. Spawns a 1 Hz interval that bumps a
-// counter used as the img src cache-buster — decoupled from the /api/nodes
-// safety-net poll so refresh matches the edge upload rate. Ticker is gated
-// on wantsLiveImg so pump tiles and offline cameras don't run intervals
-// they'd only throw away.
+// fall back to an icon otherwise.
+//
+// Shared 1 Hz tick: instead of every tile spawning its own setInterval
+// (which used to mean ~30 drifting timers on the monitor wall), all live
+// tiles subscribe to a single module-level ticker below. The ticker only
+// runs while at least one tile is subscribed, and each tile still gates
+// its subscription on wantsLiveImg so pump tiles and offline cameras
+// don't re-render for a signal they'd ignore. Callback receives Date.now()
+// which drops straight into the ?t= cache-buster.
 // Server encoding: picamera2's misnamed "RGB888" numpy array is already
 // B,G,R; the edge adapter passes it straight through to cv2.imencode.
 // If colours ever look magenta again, check edge_glass/utils/camera.py.
+const _snapshotTickListeners = new Set();
+let _snapshotTickId = null;
+const _snapshotTickInterval = 1000; // ms — matches previous per-tile cadence
+function _startSnapshotTick() {
+  if (_snapshotTickId != null) return;
+  _snapshotTickId = setInterval(() => {
+    const now = Date.now();
+    _snapshotTickListeners.forEach(cb => { try { cb(now); } catch (e) {} });
+  }, _snapshotTickInterval);
+}
+function _stopSnapshotTickIfIdle() {
+  if (_snapshotTickListeners.size === 0 && _snapshotTickId != null) {
+    clearInterval(_snapshotTickId);
+    _snapshotTickId = null;
+  }
+}
 const SnapshotImage = ({ node, iconSize = 48 }) => {
   const frozen = node.status === 'offline' || node.upload > 60;
   const wantsLiveImg = node.type === 'camera' && !frozen;
-  const [tick, setTick] = React.useState(0);
+  const [ts, setTs] = React.useState(() => Date.now());
   React.useEffect(() => {
     if (!wantsLiveImg) return;
-    const id = setInterval(() => setTick(t => t + 1), 1000);
-    return () => clearInterval(id);
+    const cb = (now) => setTs(now);
+    _snapshotTickListeners.add(cb);
+    _startSnapshotTick();
+    return () => {
+      _snapshotTickListeners.delete(cb);
+      _stopSnapshotTickIfIdle();
+    };
   }, [wantsLiveImg]);
   if (wantsLiveImg && node.snapshotTimestamp) {
     return (
       <img
-        src={`/api/edge/${node.id}/snapshot/latest?t=${tick}`}
+        src={`/api/edge/${node.id}/snapshot/latest?t=${ts}`}
         alt={`${node.name || node.id} snapshot`}
         className="absolute inset-0 w-full h-full object-cover"
       />
@@ -95,10 +148,8 @@ const SnapshotImage = ({ node, iconSize = 48 }) => {
 // dead/stale mic. Renders nothing for pump nodes.
 const DetectorHealth = ({ node }) => {
   if (!node || node.type !== 'camera') return null;
-  const meta = window.detectorHealthMeta || {};
-  const fallback = meta.unknown || { label: '未知', tone: 'muted' };
-  const v = meta[node.visualHealth] || fallback;
-  const a = meta[node.audioHealth] || fallback;
+  const v = safeDetectorHealthMeta(node.visualHealth);
+  const a = safeDetectorHealthMeta(node.audioHealth);
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
       <Pill tone={v.tone} dot><span className="text-ink-muted">視覺</span> {v.label}</Pill>
@@ -202,7 +253,7 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
 
       {/* Right cluster */}
       <div className="flex items-center gap-1">
-        {operators && operators.length > 1 && <OperatorsCluster operators={operators} currentUser="alice.chen"/>}
+        {operators && operators.length > 1 && <OperatorsCluster operators={operators} currentUser={window.SDPRS_USER || ''}/>}
         <button onClick={onOpenCmdK} title="命令面板 (⌘K / Ctrl+K)" className="hidden md:flex items-center gap-1 h-7 px-2 ml-1 rounded border border-border-subtle bg-surface-elevated hover:bg-surface-overlay text-xs text-ink-muted transition-colors">
           <Icon.Search size={12}/> <span>跳轉...</span> <Kbd>⌘K</Kbd>
         </button>
@@ -253,8 +304,12 @@ const NAV_ITEMS = [
 ];
 
 const NavRail = ({ page, setPage, density, setDensity, unackCount, offlineCount }) => {
+  // TODO(dashboard-audit-2026-07-15): mobile nav drawer — currently the rail
+  // just hides on <md. app.jsx <main> should mirror this (ml-0 md:ml-56) and
+  // add a hamburger toggle that slides this nav in. Layout-only fix here so
+  // portrait mobile doesn't crush the content underneath.
   return (
-    <nav className="w-56 fixed left-0 top-12 bottom-10 bg-surface-panel border-r border-border-subtle flex flex-col noselect">
+    <nav className="hidden md:flex w-56 fixed left-0 top-12 bottom-10 bg-surface-panel border-r border-border-subtle flex-col noselect">
       <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-ink-muted font-semibold">操作站</div>
       <div className="flex-1 px-2 space-y-0.5 overflow-y-auto scroll-thin">
         {NAV_ITEMS.map(item => {
@@ -301,11 +356,17 @@ const NavRail = ({ page, setPage, density, setDensity, unackCount, offlineCount 
 // ---------- Footer ----------
 
 const Sparkline = ({ data, width = 240, height = 28 }) => {
+  if (!Array.isArray(data) || data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-7 text-[10px] text-ink-muted font-mono tnum" style={{ width, height }}>
+        無資料
+      </div>
+    );
+  }
   const max = Math.max(...data, 1);
-  const barW = width / data.length;
-  const avg = data.reduce((a,b)=>a+b,0)/data.length;
+  const avg = data.reduce((a,b)=>a+b,0) / data.length;
   const cur = data[data.length-1];
-  const surge = cur > avg * 2;
+  const surge = avg > 0 && cur > avg * 2;
   return (
     <div className="flex items-end gap-px h-7" style={{ width, height }}>
       {data.map((v, i) => {
@@ -320,19 +381,24 @@ const Sparkline = ({ data, width = 240, height = 28 }) => {
 };
 
 const Footer = ({ data, handover }) => {
-  const avg = data.reduce((a,b)=>a+b,0)/data.length;
-  const cur = data[data.length-1];
-  const surge = cur > avg * 2;
-  const ageMin = handover.ageMin ?? 0;
-  const ageH = (ageMin / 60).toFixed(1);
-  const ageTone = ageMin > 720 ? 'critical' : ageMin > 240 ? 'warn' : 'ok';
-  const ageCls = ageTone === 'critical' ? 'text-sev-critical bg-sev-critical/15 border border-sev-critical/40' : ageTone === 'warn' ? 'text-ink-muted' : 'text-ink-muted';
+  const arr = Array.isArray(data) && data.length ? data : [0];
+  const avg = arr.reduce((a,b)=>a+b,0) / arr.length;
+  const cur = arr[arr.length-1];
+  const surge = avg > 0 && cur > avg * 2;
+  const ageMin = handover?.ageMin ?? null;
+  const ageH = ageMin != null ? (ageMin / 60).toFixed(1) : null;
+  const ageTone = ageMin == null ? 'muted'
+    : ageMin > 720 ? 'critical' : ageMin > 240 ? 'warn' : 'ok';
+  const ageCls = ageTone === 'critical' ? 'text-sev-critical bg-sev-critical/15 border border-sev-critical/40' : 'text-ink-muted';
+  const by = handover?.by ?? '—';
+  const at = handover?.at ?? '';
+  const text = handover?.text ?? '尚無交接事項';
   return (
     <div className="h-10 fixed inset-x-0 bottom-0 z-30 bg-surface-panel border-t border-border-subtle flex items-center px-4 gap-4 text-xs noselect">
       <div className="flex items-center gap-2.5">
         <Icon.Activity size={14} className="text-ink-muted"/>
         <span className="text-ink-muted">警報率</span>
-        <Sparkline data={data} />
+        <Sparkline data={arr} />
         <span className="font-mono tnum text-ink-secondary"><span className="text-ink-muted">15min × 16</span></span>
         {surge && (
           <Pill tone="critical" className="!h-5 !text-[10px]"><Icon.ArrowUp size={10} strokeWidth={2.5}/> 加劇中 · {(cur/avg).toFixed(1)}× 均值</Pill>
@@ -342,11 +408,13 @@ const Footer = ({ data, handover }) => {
       <div className="flex items-center gap-2 max-w-[720px] min-w-0">
         <Icon.ClipboardList size={14} className="text-sev-warn flex-shrink-0"/>
         <span className="text-ink-muted whitespace-nowrap">上一班備註:</span>
-        <span className="font-mono text-ink-dim text-[11px] tnum">{handover.by} @ {handover.at}</span>
-        <span className={`inline-flex items-center px-1 h-4 rounded font-mono text-[10px] tnum flex-shrink-0 ${ageCls}`}>
-          {ageMin < 60 ? `${ageMin}m 前` : `${ageH}h 前`}
-        </span>
-        <span className="text-ink-secondary truncate">"{handover.text}"</span>
+        <span className="font-mono text-ink-dim text-[11px] tnum">{by}{at ? ` @ ${at}` : ''}</span>
+        {ageMin != null && (
+          <span className={`inline-flex items-center px-1 h-4 rounded font-mono text-[10px] tnum flex-shrink-0 ${ageCls}`}>
+            {ageMin < 60 ? `${ageMin}m 前` : `${ageH}h 前`}
+          </span>
+        )}
+        <span className="text-ink-secondary truncate">"{text}"</span>
         <button className="text-ink-muted hover:text-ink-primary p-1 -m-1 flex-shrink-0"><Icon.Edit3 size={12}/></button>
       </div>
     </div>
@@ -376,6 +444,12 @@ const SHORTCUTS = [
 
 const ShortcutsModal = ({ open, onClose }) => {
   const [q, setQ] = useState('');
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
   if (!open) return null;
   const matches = SHORTCUTS.filter(s =>
     !q || s.label.toLowerCase().includes(q.toLowerCase()) || s.keys.some(k => k.toLowerCase().includes(q.toLowerCase())) || s.cat.toLowerCase().includes(q.toLowerCase())
@@ -383,7 +457,13 @@ const ShortcutsModal = ({ open, onClose }) => {
   const byCat = matches.reduce((acc, s) => { (acc[s.cat] = acc[s.cat] || []).push(s); return acc; }, {});
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
-      <div className="bg-surface-panel border border-border-strong rounded-lg max-w-2xl w-full" onClick={e => e.stopPropagation()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="鍵盤捷徑"
+        className="bg-surface-panel border border-border-strong rounded-lg max-w-2xl w-full"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
           <h2 className="text-base font-semibold flex items-center gap-2"><Icon.Keyboard size={18}/> 鍵盤捷徑</h2>
           <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
@@ -429,9 +509,37 @@ const ShortcutsModal = ({ open, onClose }) => {
 
 // ---------- Mute Drawer ----------
 
-const MuteDrawer = ({ open, onClose, muteState, setMuteState }) => {
+const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
+  const drawerRef = useRef(null);
+  // 30s tick so the "剩餘 X 分鐘" text refreshes while the drawer sits open.
+  // Cheap — a single setState per drawer, only while mounted.
+  const [, setNow] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, [open]);
+  // Focus + Escape trap. On open, drop focus into the drawer so screen readers
+  // land there and keyboard-only ops can Tab through the controls.
+  useEffect(() => {
+    if (!open || !drawerRef.current) return;
+    const first = drawerRef.current.querySelector(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    first && first.focus();
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
   if (!open) return null;
+  // Prefer prop-supplied nodes (React state from caller — always fresh); fall
+  // back to window.NODES only if the caller didn't wire it up. Callers should
+  // pass `nodes={nodes}` from useState so refreshes reach the drawer.
+  // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
+  // call site (app.jsx / pages.jsx) passes the `nodes` prop.
+  const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
   const activeCount = (muteState.global ? 1 : 0) + muteState.nodes.length + (muteState.lightning ? 1 : 0);
+  const nearestKm = window.WEATHER?.lightning?.nearest;
   const playTest = (kind) => {
     // mock audio test — visual feedback only
     const node = document.getElementById('test-audio-feedback');
@@ -442,7 +550,14 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState }) => {
   };
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
-      <div className="w-[380px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin" onClick={e => e.stopPropagation()}>
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="音效抑制 / 音量"
+        className="w-[380px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10">
           <h2 className="text-base font-semibold flex items-center gap-2">
             <Icon.VolumeX size={18} className={activeCount > 0 ? 'text-sev-warn' : ''}/>
@@ -503,7 +618,22 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState }) => {
             ) : (
               <div className="space-y-1.5">
                 {muteState.nodes.map(nid => {
-                  const n = window.NODES.find(nn => nn.id === nid);
+                  const n = nodeList.find(nn => nn.id === nid);
+                  // n.snoozeMin is computed in api.jsx mapNode from
+                  // snoozed_until − now(), so it drifts between polls; the
+                  // 30s tick above nudges the re-render. snoozedBy /
+                  // snoozedAt are now surfaced by api.jsx mapNode — only
+                  // render provenance when snoozedBy is truthy (never fake).
+                  const remain = n?.snoozeMin;
+                  const snoozeAtText = n?.snoozedAt
+                    ? (() => {
+                        try {
+                          return new Date(n.snoozedAt).toLocaleTimeString('zh-TW', {
+                            hour: '2-digit', minute: '2-digit', hour12: false,
+                          });
+                        } catch (_) { return ''; }
+                      })()
+                    : '';
                   return (
                     <div key={nid} className="flex items-center gap-2 bg-surface-elevated border border-border-subtle rounded p-2.5">
                       <div className="flex-1">
@@ -511,7 +641,14 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState }) => {
                           <span className="font-mono text-sm font-semibold">{nid}</span>
                           <span className="text-xs text-ink-secondary">{n?.name}</span>
                         </div>
-                        <div className="text-[10px] text-ink-muted font-mono tnum mt-0.5">剩餘 {n?.snoozeMin || 22} 分鐘 · alice 於 02:14 設定</div>
+                        <div className="text-[10px] text-ink-muted font-mono tnum mt-0.5">
+                          {remain != null && remain > 0 ? `剩餘 ${remain} 分鐘` : '靜音中'}
+                        </div>
+                        {n?.snoozedBy && (
+                          <div className="text-[10px] text-ink-muted font-mono tnum mt-0.5 opacity-70">
+                            由 {n.snoozedBy}{snoozeAtText ? ` 於 ${snoozeAtText}` : ''} 設定
+                          </div>
+                        )}
                       </div>
                       <button
                         onClick={() => setMuteState({ ...muteState, nodes: muteState.nodes.filter(x => x !== nid) })}
@@ -535,7 +672,9 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState }) => {
                 </div>
                 <div className="text-xs text-ink-muted mt-0.5">10km 內偵測到雷擊時自動抑制</div>
                 {muteState.lightning && (
-                  <div className="text-[10px] text-sev-warn mt-1 font-mono tnum">● 觸發中 — 最近雷擊 18km</div>
+                  <div className="text-[10px] text-sev-warn mt-1 font-mono tnum">
+                    ● 觸發中{nearestKm != null ? ` — 最近雷擊 ${nearestKm}km` : ''}
+                  </div>
                 )}
               </div>
               <button
@@ -630,63 +769,98 @@ const NewAlertBanner = ({ count, onClick }) => {
 
 // ---------- Shift Banner (start/end of shift) ----------
 
-const ShiftBanner = ({ shiftSummary, onDismiss }) => (
-  <div className="fixed top-14 right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden">
-    <div className="px-4 py-2.5 bg-sev-info/15 border-b border-sev-info/30 flex items-center justify-between">
-      <div className="flex items-center gap-2 text-sev-info">
-        <Icon.ClipboardList size={14}/>
-        <span className="text-sm font-semibold">班次接班摘要 · alice.chen</span>
+const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
+  const s = shiftSummary || {};
+  const operator = s.operator ?? window.SDPRS_USER ?? '—';
+  // Field-name flex: try the audit-suggested names first, then the current
+  // window.SHIFT_SUMMARY shape (alertsHandled/carryOver/highlights) from
+  // data.jsx, then '—'. Prevents blanks if backend renames fields.
+  const carryOver = s.carryOver ?? s.handled ?? s.alertsHandled ?? '—';
+  const snoozed   = s.snoozed   ?? s.warn ?? '—';
+  const pending   = s.pending   ?? s.critical ?? '—';
+  const recent = s.recentIncident
+    ?? (Array.isArray(s.highlights) && s.highlights.length ? s.highlights.join(' · ') : '尚無交接事項');
+  return (
+    <div className="fixed top-14 right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden">
+      <div className="px-4 py-2.5 bg-sev-info/15 border-b border-sev-info/30 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sev-info">
+          <Icon.ClipboardList size={14}/>
+          <span className="text-sm font-semibold">班次接班摘要 · {operator}</span>
+        </div>
+        <button onClick={onDismiss} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
       </div>
-      <button onClick={onDismiss} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
-    </div>
-    <div className="p-4 space-y-3">
-      <div>
-        <div className="text-[10px] uppercase tracking-wider text-ink-muted">上一班次承接</div>
-        <div className="grid grid-cols-3 gap-2 mt-1.5">
-          <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
-            <div className="text-xl font-mono font-bold tnum text-sev-info">2</div>
-            <div className="text-[10px] text-ink-muted">已認領未解決</div>
-          </div>
-          <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
-            <div className="text-xl font-mono font-bold tnum text-sev-warn">1</div>
-            <div className="text-[10px] text-ink-muted">節點延期中</div>
-          </div>
-          <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
-            <div className="text-xl font-mono font-bold tnum text-sev-critical">5</div>
-            <div className="text-[10px] text-ink-muted">未處理 (新)</div>
+      <div className="p-4 space-y-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-ink-muted">上一班次承接</div>
+          <div className="grid grid-cols-3 gap-2 mt-1.5">
+            <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
+              <div className="text-xl font-mono font-bold tnum text-sev-info">{carryOver}</div>
+              <div className="text-[10px] text-ink-muted">已認領未解決</div>
+            </div>
+            <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
+              <div className="text-xl font-mono font-bold tnum text-sev-warn">{snoozed}</div>
+              <div className="text-[10px] text-ink-muted">節點延期中</div>
+            </div>
+            <div className="bg-surface-elevated rounded p-2 border border-border-subtle">
+              <div className="text-xl font-mono font-bold tnum text-sev-critical">{pending}</div>
+              <div className="text-[10px] text-ink-muted">未處理 (新)</div>
+            </div>
           </div>
         </div>
-      </div>
-      <div className="bg-sev-warn/10 border border-sev-warn/30 rounded p-2.5 text-xs">
-        <div className="text-sev-warn font-semibold mb-1 flex items-center gap-1">
-          <Icon.AlertCircle size={12}/> 上一班重點
+        <div className="bg-sev-warn/10 border border-sev-warn/30 rounded p-2.5 text-xs">
+          <div className="text-sev-warn font-semibold mb-1 flex items-center gap-1">
+            <Icon.AlertCircle size={12}/> 上一班重點
+          </div>
+          <p className="text-ink-secondary leading-relaxed">{recent}</p>
         </div>
-        <p className="text-ink-secondary leading-relaxed">G-03 攝影機鬆動已派工 · P-02 高頻啟動需注意 · 颱風持續中</p>
+        {/* TODO(dashboard-audit-2026-07-15): needs handover-history route.
+            When app.jsx wires onViewHandover (e.g. setPage('handover')),
+            this button becomes live. Until then it renders disabled. */}
+        <button
+          onClick={onViewHandover || undefined}
+          disabled={!onViewHandover}
+          title={onViewHandover ? undefined : '尚未實作'}
+          className="w-full h-8 bg-sev-info text-white rounded text-xs font-semibold hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          檢視完整交接紀錄 →
+        </button>
       </div>
-      <button className="w-full h-8 bg-sev-info text-white rounded text-xs font-semibold hover:bg-blue-600">
-        檢視完整交接紀錄 →
-      </button>
     </div>
-  </div>
-);
+  );
+};
 
 // ---------- Command Palette (Cmd+K) ----------
 
-const CommandPalette = ({ open, onClose, alerts, onSelectAlert, onNav, onCmd }) => {
+const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, onCmd }) => {
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
+  const paletteRef = useRef(null);
 
   React.useEffect(() => {
     if (open) { setQ(''); setHi(0); }
   }, [open]);
 
+  // Escape closes; focus handled by <input autoFocus/>.
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
+
+  // Prefer React-state nodes from the caller; window.NODES is a stale-read
+  // fallback for legacy call sites.
+  // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
+  // call site (app.jsx / pages.jsx) passes the `nodes` prop.
+  const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
 
   // Build searchable items
   const items = [
     ...window.NAV_ITEMS.map(n => ({ kind: 'nav', id: n.id, label: `頁面: ${n.label}`, hint: `Hotkey ${n.hotkey}`, icon: n.Icon })),
     ...alerts.map(a => ({ kind: 'alert', id: a.id, label: `${a.id} · ${window.alertTypeLabel(a.type)}`, hint: `${a.node} · ${a.state}`, sev: a.sev })),
-    ...window.NODES.map(n => ({ kind: 'node', id: n.id, label: `節點: ${n.id} · ${n.name}`, hint: n.location, status: n.status })),
+    ...nodeList.map(n => ({ kind: 'node', id: n.id, label: `節點: ${n.id} · ${n.name}`, hint: n.location, status: n.status })),
     { kind: 'cmd', id: 'mute-all', label: '指令: 開啟音效抑制面板', hint: 'M', icon: Icon.VolumeX },
     { kind: 'cmd', id: 'focus-mode', label: '指令: 切換夜深 / 專注模式', hint: 'Ctrl+.', icon: Icon.Moon },
     { kind: 'cmd', id: 'density', label: '指令: 切換密度', hint: 'Shift+D', icon: Icon.Grid },
@@ -714,7 +888,14 @@ const CommandPalette = ({ open, onClose, alerts, onSelectAlert, onNav, onCmd }) 
 
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex items-start justify-center pt-24" onClick={onClose}>
-      <div className="w-[640px] max-w-[90vw] bg-surface-panel border border-border-strong rounded-lg cmdk-shadow overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div
+        ref={paletteRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="命令面板"
+        className="w-[640px] max-w-[90vw] bg-surface-panel border border-border-strong rounded-lg cmdk-shadow overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center px-3 border-b border-border-subtle">
           <Icon.Search size={16} className="text-ink-muted"/>
           <input
@@ -774,28 +955,51 @@ const CommandPalette = ({ open, onClose, alerts, onSelectAlert, onNav, onCmd }) 
 const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode }) => {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
+  const panelRef = useRef(null);
   React.useEffect(() => {
     if (node) {
-      setDraft({ name: node.name, floor: node.floor || '', area: node.area || '', location: node.location });
+      setDraft({ location: node.location || '' });
       setEditing(false);
     }
   }, [node?.id]);
+
+  // A11y: Escape closes; focus lands in the panel on open. Guard on `node`
+  // rather than `open` — this panel treats a truthy node as "open".
+  React.useEffect(() => {
+    if (!node || !panelRef.current) return;
+    const first = panelRef.current.querySelector(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    first && first.focus();
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [node?.id, onClose]);
 
   if (!node) return null;
   const nodeAlerts = openAlerts.filter(a => a.node === node.id);
   const history = window.NODE_HISTORY[node.id] || [];
 
   const saveEdits = () => {
-    const newLocation = draft.floor && draft.area ? `${draft.floor} · ${draft.area}` : (draft.location || node.location);
-    onUpdateNode && onUpdateNode(node.id, { name: draft.name, floor: draft.floor, area: draft.area, location: newLocation });
+    // Backend PATCH /api/nodes/{id} only accepts `location`. name/floor/area
+    // are DERIVED from location by api.jsx mapNode (see api.jsx:184-193), so
+    // only `location` is editable here — the other fields are read-only.
+    const newLocation = (draft?.location || '').trim();
+    if (!newLocation) { setEditing(false); return; }
+    onUpdateNode && onUpdateNode(node.id, { location: newLocation });
     setEditing(false);
   };
 
-  const FLOORS = ['B3F', 'B2F', 'B1F', '1F', '2F', '3F', '4F', '5F', 'RF'];
-
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/40 flex justify-end" onClick={onClose}>
-      <div className="w-[420px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin" onClick={e => e.stopPropagation()}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`節點詳情 ${node.id}`}
+        className="w-[420px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="px-4 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="font-mono text-base font-bold">{node.id}</span>
@@ -829,45 +1033,36 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
               )}
             </div>
             <div className="bg-surface-elevated border border-border-subtle rounded p-2.5 space-y-2">
+              {/* Name / floor / area are DERIVED from location by api.jsx mapNode
+                  (splits on "·"). Backend PATCH only accepts `location`, so those
+                  three are shown as read-only <dd>s in both modes and only
+                  `location` gets an input. Edit `location` to rename downstream. */}
+              <div className="grid grid-cols-[60px_1fr] gap-y-1 gap-x-2 text-xs font-mono tnum">
+                <span className="text-ink-muted">名稱</span><span>{node.name}</span>
+                <span className="text-ink-muted">樓層</span><span>{node.floor || <span className="text-ink-dim">未設定</span>}</span>
+                <span className="text-ink-muted">區域</span><span>{node.area || <span className="text-ink-dim">未設定</span>}</span>
+              </div>
               {editing ? (
-                <>
-                  <div>
-                    <label className="text-[10px] text-ink-muted block mb-0.5">顯示名稱</label>
-                    <input value={draft.name} onChange={e => setDraft({...draft, name: e.target.value})}
-                      className="w-full h-7 px-2 text-xs bg-surface-base border border-border-strong rounded focus:border-sev-info focus:outline-none"/>
-                  </div>
-                  <div className="grid grid-cols-[80px_1fr] gap-2">
-                    <div>
-                      <label className="text-[10px] text-ink-muted block mb-0.5">樓層</label>
-                      <select value={draft.floor} onChange={e => setDraft({...draft, floor: e.target.value})}
-                        className="w-full h-7 px-1 text-xs font-mono bg-surface-base border border-border-strong rounded focus:border-sev-info focus:outline-none">
-                        {FLOORS.map(f => <option key={f} value={f}>{f}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-ink-muted block mb-0.5">區域 / 房間</label>
-                      <input value={draft.area} onChange={e => setDraft({...draft, area: e.target.value})}
-                        placeholder="例: 西側走廊"
-                        className="w-full h-7 px-2 text-xs bg-surface-base border border-border-strong rounded focus:border-sev-info focus:outline-none"/>
-                    </div>
-                  </div>
-                  <div className="text-[10px] text-ink-muted bg-surface-base rounded p-1.5 font-mono tnum">
-                    預覽: <span className="text-ink-secondary">{draft.floor && draft.area ? `${draft.floor} · ${draft.area}` : draft.location}</span>
-                  </div>
-                  <div className="flex items-center gap-1 text-[10px] text-ink-dim pt-1 border-t border-border-subtle/60">
+                <div className="pt-2 border-t border-border-subtle/60">
+                  <label className="text-[10px] text-ink-muted block mb-0.5">
+                    位置 <span className="text-ink-dim">(格式: 樓層 · 區域)</span>
+                  </label>
+                  <input
+                    value={draft?.location ?? ''}
+                    onChange={e => setDraft({ ...(draft || {}), location: e.target.value })}
+                    placeholder="例: 3F · 西側走廊"
+                    className="w-full h-7 px-2 text-xs bg-surface-base border border-border-strong rounded focus:border-sev-info focus:outline-none"
+                  />
+                  <div className="text-[10px] text-ink-dim mt-1 flex items-center gap-1">
                     <Icon.Info size={10}/>
-                    平面圖座標 (拖曳功能 — 開發中)
+                    其他欄位變更請聯絡管理員
                   </div>
-                </>
+                </div>
               ) : (
-                <>
-                  <div className="grid grid-cols-[60px_1fr] gap-y-1 gap-x-2 text-xs font-mono tnum">
-                    <span className="text-ink-muted">名稱</span><span>{node.name}</span>
-                    <span className="text-ink-muted">樓層</span><span>{node.floor || <span className="text-ink-dim">未設定</span>}</span>
-                    <span className="text-ink-muted">區域</span><span>{node.area || <span className="text-ink-dim">未設定</span>}</span>
-                    <span className="text-ink-muted">位置</span><span className="text-ink-secondary">{node.location}</span>
-                  </div>
-                </>
+                <div className="grid grid-cols-[60px_1fr] gap-y-1 gap-x-2 text-xs font-mono tnum">
+                  <span className="text-ink-muted">位置</span>
+                  <span className="text-ink-secondary">{node.location}</span>
+                </div>
               )}
             </div>
           </div>
@@ -922,7 +1117,7 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
               <div className="space-y-1">
                 {nodeAlerts.map(a => (
                   <button key={a.id} onClick={() => onJumpAlert(a.id)}
-                    className={`w-full flex items-center gap-2 p-2 rounded border border-border-subtle bg-surface-elevated hover:border-sev-info text-left transition-colors sev-bar ${window.sevMeta[a.sev].bar} relative pl-3`}>
+                    className={`w-full flex items-center gap-2 p-2 rounded border border-border-subtle bg-surface-elevated hover:border-sev-info text-left transition-colors sev-bar ${safeSevMeta(a.sev).bar} relative pl-3`}>
                     <SeverityBadge sev={a.sev} withLabel={false}/>
                     <span className="text-xs flex-1 truncate">{window.alertTypeLabel(a.type)}</span>
                     <AgeCell sec={a.ageSec}/>
@@ -971,15 +1166,35 @@ const NodeSidePanel = ({ node, onClose, onJumpAlert, openAlerts, onUpdateNode })
 
 // ---------- Volume Slider (for MuteDrawer) ----------
 
-const VolumeSlider = ({ value, onChange }) => (
-  <div className="flex items-center gap-2">
-    <Icon.VolumeX size={14} className="text-ink-muted"/>
-    <input type="range" min="0" max="100" value={value} onChange={e => onChange(parseInt(e.target.value, 10))}
-      className="flex-1 accent-sev-info h-1"/>
-    <Icon.Volume2 size={14} className="text-ink-muted"/>
-    <span className="font-mono tnum text-xs text-ink-secondary w-8 text-right">{value}</span>
-  </div>
-);
+const VolumeSlider = ({ value, onChange, onVolumeChange }) => {
+  // TODO(dashboard-audit-2026-07-15): wire onVolumeChange to audio player
+  // in app.jsx. Right now this only calls Howler.volume() if the global is
+  // present, and fires an optional onVolumeChange prop for the parent to
+  // route to its <audio> element. Without one, the slider is a placebo:
+  // muteState.volume is written but never read by any player.
+  const emit = (v) => {
+    onChange && onChange(v);
+    onVolumeChange && onVolumeChange(v);
+    // Optional: if the page bundles Howler for alert audio, drive it directly
+    // so the slider works even before app.jsx wires the prop.
+    if (window.Howler && typeof window.Howler.volume === 'function') {
+      try { window.Howler.volume(Math.max(0, Math.min(1, v / 100))); } catch (_) {}
+    }
+  };
+  return (
+    <div className="flex items-center gap-2">
+      <Icon.VolumeX size={14} className="text-ink-muted"/>
+      <input
+        type="range" min="0" max="100" value={value}
+        onChange={e => emit(parseInt(e.target.value, 10))}
+        aria-label="音量"
+        className="flex-1 accent-sev-info h-1"
+      />
+      <Icon.Volume2 size={14} className="text-ink-muted"/>
+      <span className="font-mono tnum text-xs text-ink-secondary w-8 text-right">{value}</span>
+    </div>
+  );
+};
 
 Object.assign(window, {
   OperatorsCluster, StaleAckPill, NewAlertBanner, ShiftBanner,

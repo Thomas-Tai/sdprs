@@ -18,7 +18,13 @@ from ..auth import get_current_user
 # also named get_node (name kept — it's part of FastAPI's operation ids) and
 # rebinds the module global, so an un-aliased import would make every
 # get_node(node_id) call recurse into the route (TypeError -> HTTP 500).
-from ..database import get_all_nodes, get_node as db_get_node, set_node_location, get_pump_readings
+from ..database import (
+    get_all_nodes,
+    get_node as db_get_node,
+    set_node_location,
+    get_pump_readings,
+    get_pump_readings_multi,
+)
 from ..services.mqtt_service import get_mqtt_service
 from ..timeutil import utcnow
 
@@ -60,6 +66,16 @@ class NodeStatus(BaseModel):
     battery_voltage: Optional[float] = None
     power_source: Optional[str] = None
     snoozed_until: Optional[str] = None
+    # dashboard-audit-2026-07-15 frozen contract: SPA reads snoozed_by / snoozed_at
+    # to render "who snoozed and when" chips. There are NO snoozed_by/snoozed_at
+    # columns on the nodes table (only snoozed_until + snooze_reason); the schema
+    # keeps the fields so the SPA has a stable contract, but the current backend
+    # emits None for both. Sourcing them would need either a column addition
+    # (deferred per no-migration rule) or a per-node lookup into operator_actions
+    # WHERE action_type='SNOOZE' (adds a query per node — deferred pending
+    # coordinator decision).
+    snoozed_by: Optional[str] = None
+    snoozed_at: Optional[str] = None
 
 
 class NodeListResponse(BaseModel):
@@ -334,23 +350,58 @@ async def update_node(
     node_id: str,
     patch: NodePatch,
     user: str = Depends(get_current_user),
+    create: bool = False,
 ) -> Dict[str, Any]:
     """
     Update editable fields of a node (currently: deployment location).
 
-    Auto-creates the node row if not seen yet (e.g. user labels it before first heartbeat).
+    By default an unknown `node_id` returns 404 — this prevents typos in the
+    URL from silently upserting phantom `glass` rows that then clutter the
+    dashboard. Pass `?create=true` to opt into the pre-deployment labelling
+    flow (e.g. "label a node before its first heartbeat").
+
+    `location` is stripped of leading/trailing whitespace before write; an
+    empty-after-strip value returns 400 rather than silently clearing the
+    label.
     """
-    # Auto-create row if absent so location can be set pre-deployment
+    # Strip whitespace on location up-front. A bare `" "` payload used to
+    # silently clear the label because Pydantic accepted the raw string.
+    # Bind to a local so we don't rely on model mutability across Pydantic
+    # versions (frozen-model configs would raise on `patch.location = ...`).
+    location: Optional[str] = None
+    if patch.location is not None:
+        location = patch.location.strip()
+        if not location:
+            raise HTTPException(
+                status_code=400,
+                detail="location cannot be empty (send null to omit; whitespace-only rejected)",
+            )
+
+    # Reject unknown node_id unless the caller explicitly opts into auto-create.
+    # Auto-upsert was the previous default; typos silently created phantom
+    # `glass` rows. The `?create=true` flag preserves the legitimate flow of
+    # labelling a node before its first heartbeat lands.
     if db_get_node(node_id) is None:
+        if not create:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Node {node_id!r} not found. Pass ?create=true to auto-create "
+                    "(intended for pre-deployment labelling)."
+                ),
+            )
         from ..database import upsert_node as _upsert
+        logger.warning(
+            f"Auto-creating node {node_id!r} on PATCH ?create=true by user {user}"
+        )
         _upsert(node_id, "glass", "OFFLINE", None)
 
-    if patch.location is not None:
-        set_node_location(node_id, patch.location)
-        logger.info(f"Node {node_id} location set to {patch.location!r} by {user}")
+    if location is not None:
+        set_node_location(node_id, location)
+        logger.info(f"Node {node_id} location set to {location!r} by {user}")
         # Audit log (item 15)
         from ..services.audit_service import log_action, ACTION_LOCATION_EDIT
-        log_action(user, ACTION_LOCATION_EDIT, target_id=node_id, details={"location": patch.location})
+        log_action(user, ACTION_LOCATION_EDIT, target_id=node_id, details={"location": location})
 
     db_node = db_get_node(node_id) or {}
     return {"node_id": node_id, "location": db_node.get("location")}
@@ -526,6 +577,11 @@ async def pump_cycles_batch(
     start_iso, end_iso = start_dt.isoformat(), end_dt.isoformat()
 
     result: Dict[str, Any] = {}
+    # dashboard-audit-2026-07-15 fix: one SELECT for every pump node instead
+    # of the per-pump loop. Collect pump node_ids first, then batch-fetch via
+    # get_pump_readings_multi (WHERE node_id IN (...) or = ANY(:ids) on PG),
+    # grouped in Python. _count_pump_cycles runs over each group unchanged.
+    pump_node_ids: list[str] = []
     for n in (get_all_nodes() or []):
         row = dict(n)
         # `node_type` is the canonical pump/glass discriminator (nodes table
@@ -536,7 +592,11 @@ async def pump_cycles_batch(
         nid = row.get("node_id")
         if not nid:
             continue
-        rows = get_pump_readings(nid, start_iso, end_iso, 50000)
+        pump_node_ids.append(nid)
+
+    grouped = get_pump_readings_multi(pump_node_ids, start_iso, end_iso, 50000)
+    for nid in pump_node_ids:
+        rows = grouped.get(nid, [])
         count = _count_pump_cycles(rows)
         result[nid] = {"count": count, "alert": count > PUMP_CYCLE_ALERT_THRESHOLD}
 

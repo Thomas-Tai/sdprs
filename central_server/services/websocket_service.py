@@ -180,26 +180,51 @@ router = APIRouter(tags=["websocket"])
 async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for real-time event notifications.
-    
-    Authenticates using session cookie. If not authenticated,
-    the connection is rejected with code 1008.
-    
-    The connection remains open, receiving messages to keep it alive.
-    All event notifications are sent via broadcast from the server side.
+
+    Authenticates using session cookie. If not authenticated (or the
+    session has since expired) we FIRST send an application-level
+    `{"type": "auth_expired", ...}` frame and THEN close with code 1008
+    and a `session_expired` reason. The SPA reads both signals to
+    distinguish an auth-expiry (stop reconnecting, prompt for re-login)
+    from a transport hiccup (backoff + reconnect).
+
+    All close paths carry a machine-readable `reason` string so log
+    aggregation can bucket disconnect causes.
+
+    The connection remains open once accepted, receiving messages to
+    keep it alive. All event notifications are sent via broadcast from
+    the server side.
     """
     # Check session authentication
     # SessionMiddleware populates session in scope for both HTTP and WebSocket
     session = websocket.scope.get("session") or getattr(websocket, "session", None) or {}
     user = session.get("user")
-    
+
     if not user:
         logger.warning("WebSocket connection rejected - not authenticated")
-        await websocket.close(code=1008, reason="Not authenticated")
+        # Accept the socket only long enough to send an application-level
+        # signal, then close. The SPA (api.jsx onclose handler) uses the
+        # pre-close JSON + the close reason to know this is an auth issue
+        # rather than a transport error, so it stops the reconnect loop.
+        try:
+            await websocket.accept()
+            await websocket.send_json({
+                "type": "auth_expired",
+                "message": "session expired",
+            })
+        except Exception as e:
+            # If accept/send fails (client already gave up), fall through to
+            # close — the close() itself is defensive too.
+            logger.debug(f"auth_expired pre-close send failed: {e}")
+        try:
+            await websocket.close(code=1008, reason="session_expired")
+        except Exception as e:
+            logger.debug(f"auth-expired close failed: {e}")
         return
-    
+
     # Add connection to manager
     await ws_manager.add(websocket)
-    
+
     try:
         # Keep connection alive, waiting for messages
         # Currently we don't expect client-initiated messages
@@ -223,6 +248,12 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.debug("WebSocket client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+        # Server-side error — try to close cleanly with a reason so the
+        # dashboard log surfaces "server_error" instead of a bare 1006.
+        try:
+            await websocket.close(code=1011, reason="server_error")
+        except Exception:
+            pass
     finally:
         await ws_manager.remove(websocket)
 

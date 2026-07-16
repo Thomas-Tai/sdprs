@@ -27,13 +27,18 @@ const SystemOKState = () => {
 };
 
 const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount }) => {
-  const m = window.sevMeta[alert.sev];
+  const m = window.safeSevMeta(alert.sev);
   const node = window.NODES.find(n => n.id === alert.node);
   const rowH = density === 'compact' ? 'h-9' : 'h-12';
   const isUrgent = alert.state === 'pending' && alert.sev === 'critical' && alert.ageSec < 60;
   return (
     <div
       onClick={() => onSelect(alert.id)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(alert.id); }
+      }}
       className={`relative ${rowH} flex items-center pl-3 pr-3 border-b border-border-subtle/60 cursor-pointer transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
     >
       <div className="w-6 flex-shrink-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
@@ -81,12 +86,14 @@ const FilterChip = ({ active, onClick, children, count }) => (
   </button>
 );
 
-const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, ackedIds, resolveNote, setResolveNote }) => {
+const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote }) => {
   const [tab, setTab] = useState_p('active');
   const [filterSev, setFilterSev] = useState_p('all');
   const [checked, setChecked] = useState_p(new Set());
   const [search, setSearch] = useState_p('');
   const [snoozeOpen, setSnoozeOpen] = useState_p(false);
+  const [bulkNote, setBulkNote] = useState_p('');
+  const [bulkBusy, setBulkBusy] = useState_p(false);
 
   const activeList = tab === 'active'
     ? alerts.filter(a => a.state !== 'resolved')
@@ -117,6 +124,51 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     });
   };
 
+  // Bulk actions — single API round-trip via SDPRS_API.bulkAckAlerts /
+  // bulkResolveAlerts. On success we call the parent's onRefresh (app.jsx's
+  // refresh) so React `alerts` state updates in the same tick — reaching into
+  // SDPRS_API.refreshLive() alone only updates window.ALERTS and leaves the
+  // visible list stale until the next 20s poll (audit finding MED #5).
+  const runRefreshAfterBulk = async () => {
+    if (typeof onRefresh === 'function') {
+      try { await onRefresh(); return; } catch (_) { /* fall through */ }
+    }
+    if (window.SDPRS_API && typeof window.SDPRS_API.refreshLive === 'function') {
+      try { await window.SDPRS_API.refreshLive(); } catch (_) {}
+    }
+  };
+  const handleBulkAck = async () => {
+    if (checked.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    const ids = [...checked];
+    try {
+      await window.SDPRS_API.bulkAckAlerts(ids, bulkNote);
+      setChecked(new Set());
+      setBulkNote('');
+      await runRefreshAfterBulk();
+    } catch (e) {
+      alert('批次操作失敗');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+  const handleBulkResolve = async () => {
+    if (checked.size === 0 || bulkBusy) return;
+    if (!bulkNote.trim()) { alert('批次解決需填寫備註'); return; }
+    setBulkBusy(true);
+    const ids = [...checked];
+    try {
+      await window.SDPRS_API.bulkResolveAlerts(ids, bulkNote);
+      setChecked(new Set());
+      setBulkNote('');
+      await runRefreshAfterBulk();
+    } catch (e) {
+      alert('批次操作失敗');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   return (
     <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr]">
       {/* LEFT: List */}
@@ -135,7 +187,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             <div className="flex-1"></div>
             <div className="relative">
               <Icon.Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-muted"/>
-              <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+              <input id="global-search" type="text" value={search} onChange={e => setSearch(e.target.value)}
                 placeholder="搜尋..."
                 className="h-7 pl-7 pr-2 w-48 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
               <span className="absolute right-2 top-1/2 -translate-y-1/2"><Kbd>/</Kbd></span>
@@ -154,9 +206,10 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               <span className="w-1.5 h-1.5 rounded-full bg-sev-info"></span>資訊 <span className="font-mono tnum text-[10px] text-ink-muted">{counts.info}</span>
             </FilterChip>
             <div className="w-px h-4 bg-border-subtle mx-1"></div>
-            <FilterChip>節點 <Icon.ChevronDown size={10}/></FilterChip>
-            <FilterChip>時間範圍 <Icon.ChevronDown size={10}/></FilterChip>
-            <FilterChip>類型 <Icon.ChevronDown size={10}/></FilterChip>
+            {/* TODO(dashboard-audit-2026-07-15): needs product decision on which node/time/type dropdown values to expose. */}
+            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">節點 <Icon.ChevronDown size={10}/></button>
+            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">時間範圍 <Icon.ChevronDown size={10}/></button>
+            <button disabled title="尚未實作" className="inline-flex items-center gap-1 px-2 h-6 rounded text-xs border bg-surface-elevated text-ink-muted border-border-subtle opacity-50 cursor-not-allowed">類型 <Icon.ChevronDown size={10}/></button>
           </div>
         </div>
 
@@ -165,10 +218,15 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
           <div className="bg-sev-info/10 border-b border-sev-info/30 px-3 py-2 flex items-center gap-2 text-xs">
             <span className="text-sev-info font-medium tnum">已選 {checked.size}</span>
             <span className="text-ink-muted">|</span>
-            <button className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">批次認領</button>
-            <button className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">批次解決</button>
-            <input type="text" placeholder="備註..." className="flex-1 h-7 px-2 bg-surface-base border border-border-subtle rounded text-xs"/>
-            <button onClick={() => setChecked(new Set())} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
+            <button onClick={handleBulkAck} disabled={bulkBusy}
+              className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed">批次認領</button>
+            <button onClick={handleBulkResolve} disabled={bulkBusy || !bulkNote.trim()}
+              title={!bulkNote.trim() ? '批次解決需備註' : ''}
+              className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed">批次解決</button>
+            <input type="text" value={bulkNote} onChange={e => setBulkNote(e.target.value)}
+              placeholder="批次備註 (解決時必填)..."
+              className="flex-1 h-7 px-2 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
+            <button onClick={() => { setChecked(new Set()); setBulkNote(''); }} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
           </div>
         )}
 
@@ -219,9 +277,9 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 
 const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert }) => {
   const node = window.NODES.find(n => n.id === alert.node);
-  const m = window.sevMeta[alert.sev];
-  const [videoSpeed, setVideoSpeed] = useState_p(1);
+  const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
+  const [detailTab, setDetailTab] = useState_p('timeline');
   const history = window.NODE_HISTORY[alert.node] || [];
   const siblings = (allAlerts || []).filter(a => a.node === alert.node && a.id !== alert.id && a.state !== 'resolved');
   return (
@@ -249,7 +307,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <Icon.Eye size={12} className="text-sev-warn"/>
             <span className="text-sev-warn font-medium">{alert.viewer} 正在查看此警報</span>
             <div className="flex-1"></div>
-            <button className="text-[10px] font-mono text-sev-warn hover:text-ink-primary underline">搶下處置權</button>
+            {/* TODO(dashboard-audit-2026-07-15): needs product decision — takeover requires multi-viewer presence protocol + backend endpoint. */}
+            <button disabled title="尚未實作" className="text-[10px] font-mono text-ink-muted underline opacity-50 cursor-not-allowed">搶下處置權</button>
           </div>
         )}
         <div className="flex items-start gap-3">
@@ -280,38 +339,29 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         </div>
       </div>
 
-      {/* Video / snapshot */}
+      {/* Video / snapshot — honest placeholder. If a snapshot_url is available
+          (edge pushed a frame), show it. Otherwise: static "no preview yet"
+          card. The real HLS clip needs stream endpoint wiring — see TODO. */}
+      {/* TODO(dashboard-audit-2026-07-15): real HLS preview needs stream endpoint wiring */}
       <div className="px-4 pt-3">
         <div className="relative aspect-video w-full rounded overflow-hidden border border-border-strong snapshot-placeholder">
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-ink-muted">
-            <Icon.Camera size={36} strokeWidth={1.25}/>
-            <div className="font-mono text-[11px] mt-2 tnum">HLS · {alert.node} · 1920×1080 · 4.2s clip</div>
-            <div className="font-mono text-[10px] mt-0.5 text-ink-dim">[ 影片預覽 placeholder ]</div>
-          </div>
-          {/* Top overlay */}
+          {alert.snapshot_url ? (
+            <img src={alert.snapshot_url}
+              alt={`${alert.node} snapshot`}
+              className="absolute inset-0 w-full h-full object-cover"/>
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-ink-muted">
+              <Icon.Camera size={36} strokeWidth={1.25}/>
+              <div className="font-mono text-[11px] mt-2 tnum">尚無即時影像</div>
+              <div className="font-mono text-[10px] mt-0.5 text-ink-dim">MP4 稍後上傳 · HLS 預覽尚未接線</div>
+            </div>
+          )}
+          {/* Top overlay — node + capture time (read-only, not a fake REC light) */}
           <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
-            <Pill tone={alert.sev === 'critical' ? 'critical' : 'warn'} dot pulse><span className="font-mono">REC</span></Pill>
-            <Pill tone="muted" className="!bg-black/60 !text-white !border-black/0 font-mono">{alert.timeline?.[0]?.t}</Pill>
-          </div>
-          {/* Bottom controls */}
-          <div className="absolute bottom-2 left-2 right-2 flex items-center gap-2">
-            <button className="w-7 h-7 rounded bg-black/60 text-white hover:bg-black/80 flex items-center justify-center"><Icon.Play size={14}/></button>
-            <div className="flex-1 h-1 bg-white/20 rounded">
-              <div className="h-full w-1/3 bg-sev-info rounded"></div>
-            </div>
-            <span className="font-mono text-[10px] text-white/80 tnum">1.4s / 4.2s</span>
-            {/* Speed control */}
-            <div className="flex bg-black/60 rounded text-[10px] font-mono">
-              {[1, 1.5, 2].map(s => (
-                <button key={s} onClick={() => setVideoSpeed(s)} className={`px-1.5 h-7 ${videoSpeed === s ? 'bg-sev-info text-white' : 'text-white/70 hover:text-white'}`}>
-                  {s}×
-                </button>
-              ))}
-            </div>
-            <button title="逐格後退" className="w-7 h-7 rounded bg-black/60 text-white hover:bg-black/80 flex items-center justify-center text-xs font-mono">⤺</button>
-            <button title="逐格前進" className="w-7 h-7 rounded bg-black/60 text-white hover:bg-black/80 flex items-center justify-center text-xs font-mono">⤻</button>
-            <button className="w-7 h-7 rounded bg-black/60 text-white hover:bg-black/80 flex items-center justify-center"><Icon.Maximize size={14}/></button>
-            <button className="w-7 h-7 rounded bg-black/60 text-white hover:bg-black/80 flex items-center justify-center"><Icon.Download size={14}/></button>
+            <Pill tone="muted" className="!bg-black/60 !text-white !border-black/0 font-mono">{alert.node}</Pill>
+            {alert.timeline?.[0]?.t && (
+              <Pill tone="muted" className="!bg-black/60 !text-white !border-black/0 font-mono">{alert.timeline[0].t}</Pill>
+            )}
           </div>
         </div>
         {/* Mini map / floorplan */}
@@ -322,15 +372,22 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           <div className="mt-2 bg-surface-panel border border-border-subtle rounded p-2">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">此節點近期事件 ({history.length})</span>
-              <button className="text-[10px] text-sev-info hover:underline">檢視全部 →</button>
+              {/* TODO(dashboard-audit-2026-07-15): needs product decision — per-node history drill-down page. */}
+              <button disabled title="尚未實作" className="text-[10px] text-ink-muted opacity-50 cursor-not-allowed">檢視全部 →</button>
             </div>
             <div className="flex gap-1.5 overflow-x-auto scroll-thin pb-1">
               {history.map((h, i) => (
                 <div key={i} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong cursor-pointer transition-colors`}>
                   <div className={`relative aspect-video snapshot-placeholder`}>
-                    <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
-                      <Icon.Camera size={20} strokeWidth={1}/>
-                    </div>
+                    {h.snapshot_url ? (
+                      <img src={h.snapshot_url}
+                        alt={`${h.t} snapshot`}
+                        className="absolute inset-0 w-full h-full object-cover"/>
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
+                        <Icon.Camera size={20} strokeWidth={1}/>
+                      </div>
+                    )}
                     <div className={`absolute top-1 left-1 w-1.5 h-1.5 rounded-full bg-sev-${h.sev === 'critical' ? 'critical' : h.sev === 'warn' ? 'warn' : 'info'}`}></div>
                   </div>
                   <div className="p-1.5">
@@ -351,12 +408,15 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
               <div className="text-[10px] uppercase tracking-wider text-sev-info font-semibold flex items-center gap-1.5">
                 <Icon.ClipboardList size={11}/> 建議下一步 · Runbook
               </div>
-              <button className="text-[10px] text-ink-muted hover:text-ink-primary">隱藏</button>
+              {/* TODO(dashboard-audit-2026-07-15): needs product decision — per-user runbook collapse persistence. */}
+              <button disabled title="尚未實作" className="text-[10px] text-ink-muted opacity-50 cursor-not-allowed">隱藏</button>
             </div>
             <p className="text-xs text-ink-secondary leading-relaxed mb-2.5">{runbook.summary}</p>
             <div className="space-y-1">
+              {/* TODO(dashboard-audit-2026-07-15): needs runbook completion tracking design — steps are read-only until then. */}
               {runbook.actions.map((a, i) => (
-                <button key={i} className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded border text-left transition-colors ${a.primary ? 'bg-sev-info/15 border-sev-info/40 hover:bg-sev-info/25' : a.escalate ? 'bg-sev-critical/10 border-sev-critical/30 hover:bg-sev-critical/20' : 'bg-surface-elevated border-border-subtle hover:border-border-strong'}`}>
+                <button key={i} disabled title="尚未實作 — 需 runbook 完成度追蹤設計"
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded border text-left transition-colors opacity-70 cursor-not-allowed ${a.primary ? 'bg-sev-info/15 border-sev-info/40' : a.escalate ? 'bg-sev-critical/10 border-sev-critical/30' : 'bg-surface-elevated border-border-subtle'}`}>
                   <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-mono font-bold flex-shrink-0 ${a.primary ? 'bg-sev-info text-white' : a.escalate ? 'bg-sev-critical text-white' : 'bg-surface-overlay text-ink-muted'}`}>{i+1}</span>
                   <div className="flex-1 min-w-0">
                     <div className={`text-xs font-medium ${a.primary ? 'text-sev-info' : a.escalate ? 'text-sev-critical' : 'text-ink-primary'}`}>
@@ -375,36 +435,96 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         )}
       </div>
 
-      {/* Timeline */}
+      {/* Timeline / node info / processing log — real tabs */}
       <div className="px-4 py-4 flex-1 overflow-y-auto scroll-thin">
         <div className="flex items-center gap-3 mb-3 text-xs border-b border-border-subtle pb-2">
-          <button className="font-semibold text-ink-primary border-b-2 border-sev-info pb-1.5 -mb-2">事件時間軸</button>
-          <button className="text-ink-muted hover:text-ink-secondary">節點資訊</button>
-          <button className="text-ink-muted hover:text-ink-secondary">處理紀錄</button>
-        </div>
-        <div className="relative pl-5">
-          <div className="absolute left-1.5 top-1 bottom-1 w-px bg-border-strong"></div>
-          {alert.timeline?.map((ev, i) => (
-            <div key={i} className="relative pb-3 last:pb-0">
-              <div className={`absolute -left-[18px] top-1 w-2 h-2 rounded-full ${i === 0 ? 'bg-sev-info ring-2 ring-sev-info/30' : 'bg-ink-muted'}`}></div>
-              <div className="flex items-baseline gap-2 text-xs">
-                <span className="font-mono tnum text-ink-muted">{ev.t}</span>
-                <span className="font-semibold text-ink-primary text-[11px] tracking-wider font-mono">{ev.label}</span>
-              </div>
-              <div className="text-xs text-ink-secondary mt-0.5 font-mono">{ev.detail}</div>
-            </div>
+          {[
+            { id: 'timeline', label: '事件時間軸' },
+            { id: 'node',     label: '節點資訊' },
+            { id: 'log',      label: '處理紀錄' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setDetailTab(t.id)}
+              className={detailTab === t.id
+                ? 'font-semibold text-ink-primary border-b-2 border-sev-info pb-1.5 -mb-2'
+                : 'text-ink-muted hover:text-ink-secondary'}>
+              {t.label}
+            </button>
           ))}
-          {alert.state === 'acknowledged' && (
-            <div className="relative pb-3">
-              <div className="absolute -left-[18px] top-1 w-2 h-2 rounded-full bg-sev-info ring-2 ring-sev-info/30"></div>
-              <div className="flex items-baseline gap-2 text-xs">
-                <span className="font-mono tnum text-ink-muted">{alert.ackAt}</span>
-                <span className="font-semibold text-sev-info text-[11px] tracking-wider font-mono">ACKNOWLEDGED</span>
-              </div>
-              <div className="text-xs text-ink-secondary mt-0.5">by <span className="font-mono">{alert.ackBy}</span></div>
-            </div>
-          )}
         </div>
+        {detailTab === 'timeline' && (
+          <div className="relative pl-5">
+            <div className="absolute left-1.5 top-1 bottom-1 w-px bg-border-strong"></div>
+            {alert.timeline?.map((ev, i) => (
+              <div key={i} className="relative pb-3 last:pb-0">
+                <div className={`absolute -left-[18px] top-1 w-2 h-2 rounded-full ${i === 0 ? 'bg-sev-info ring-2 ring-sev-info/30' : 'bg-ink-muted'}`}></div>
+                <div className="flex items-baseline gap-2 text-xs">
+                  <span className="font-mono tnum text-ink-muted">{ev.t}</span>
+                  <span className="font-semibold text-ink-primary text-[11px] tracking-wider font-mono">{ev.label}</span>
+                </div>
+                <div className="text-xs text-ink-secondary mt-0.5 font-mono">{ev.detail}</div>
+              </div>
+            ))}
+            {alert.state === 'acknowledged' && (
+              <div className="relative pb-3">
+                <div className="absolute -left-[18px] top-1 w-2 h-2 rounded-full bg-sev-info ring-2 ring-sev-info/30"></div>
+                <div className="flex items-baseline gap-2 text-xs">
+                  <span className="font-mono tnum text-ink-muted">{alert.ackAt}</span>
+                  <span className="font-semibold text-sev-info text-[11px] tracking-wider font-mono">ACKNOWLEDGED</span>
+                </div>
+                <div className="text-xs text-ink-secondary mt-0.5">by <span className="font-mono">{alert.ackBy}</span></div>
+              </div>
+            )}
+          </div>
+        )}
+        {detailTab === 'node' && (
+          <dl className="text-xs grid grid-cols-[6rem_1fr] gap-y-1.5 gap-x-3">
+            <dt className="text-ink-muted">節點 ID</dt><dd className="font-mono tnum text-ink-primary">{alert.node}</dd>
+            <dt className="text-ink-muted">類型</dt><dd className="text-ink-secondary">{node ? (node.type === 'camera' ? '攝影機' : '抽水站') : '—'}</dd>
+            <dt className="text-ink-muted">名稱</dt><dd className="text-ink-secondary">{node?.name || '—'}</dd>
+            <dt className="text-ink-muted">位置</dt><dd className="text-ink-secondary">{node?.location || '—'}</dd>
+            <dt className="text-ink-muted">狀態</dt><dd className="text-ink-secondary">{node?.status || '—'}</dd>
+            <dt className="text-ink-muted">心跳</dt><dd className="font-mono tnum text-ink-secondary">{node ? node.heartbeat + 's' : '—'}</dd>
+            <dt className="text-ink-muted">上傳</dt><dd className="font-mono tnum text-ink-secondary">{node ? node.upload + 's' : '—'}</dd>
+            {node?.type === 'camera' && (
+              <>
+                <dt className="text-ink-muted">溫度</dt><dd className="font-mono tnum text-ink-secondary">{node.temp != null ? node.temp + '°C' : '—'}</dd>
+                <dt className="text-ink-muted">串流</dt><dd className="font-mono tnum text-ink-secondary">{node.bitrate?.toFixed?.(1) ?? '—'} Mbps · {node.drops ?? 0} drops</dd>
+              </>
+            )}
+            {node?.type === 'pump' && (
+              <>
+                <dt className="text-ink-muted">水位</dt><dd className="font-mono tnum text-ink-secondary">{node.level != null ? node.level + '%' : '—'}</dd>
+                <dt className="text-ink-muted">啟動頻率</dt><dd className="font-mono tnum text-ink-secondary">{node.cycles}×/hr</dd>
+              </>
+            )}
+          </dl>
+        )}
+        {detailTab === 'log' && (
+          <div className="text-xs space-y-2">
+            {alert.state === 'pending' && <div className="text-ink-muted">尚未處理。</div>}
+            {alert.ackAt && (
+              <div className="bg-surface-panel border border-border-subtle rounded p-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-mono tnum text-ink-muted">{alert.ackAt}</span>
+                  <span className="text-sev-info font-semibold">認領</span>
+                  <span className="text-ink-secondary">by <span className="font-mono">{alert.ackBy || '—'}</span></span>
+                </div>
+              </div>
+            )}
+            {alert.resAt && (
+              <div className="bg-surface-panel border border-border-subtle rounded p-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-mono tnum text-ink-muted">{alert.resAt}</span>
+                  <span className="text-sev-ok font-semibold">解決</span>
+                  <span className="text-ink-secondary">by <span className="font-mono">{alert.resBy || '—'}</span></span>
+                </div>
+                {alert.note && (
+                  <div className="mt-1 text-ink-secondary leading-relaxed">{alert.note}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Action bar */}
@@ -463,7 +583,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 {!resolveNote && <span className="text-[10px] opacity-80 font-normal">(需備註)</span>}
                 <Kbd>R</Kbd>
               </button>
-              <button title="撤銷認領 — 重新設為待處理" className="h-9 px-2.5 bg-surface-elevated border border-border-strong rounded text-xs text-ink-muted hover:text-ink-primary hover:bg-surface-overlay">
+              {/* TODO(dashboard-audit-2026-07-15): needs backend endpoint — PATCH /api/alerts/{id}/unacknowledge (currently no reverse transition). */}
+              <button disabled title="尚未實作 — 需後端反向轉換端點" className="h-9 px-2.5 bg-surface-elevated border border-border-strong rounded text-xs text-ink-muted opacity-50 cursor-not-allowed">
                 撤銷
               </button>
             </>
@@ -562,25 +683,32 @@ const NodeCard = ({ node, onSelect, activeAlerts = [] }) => {
   const nodeAlerts = activeAlerts.filter(a => a.node === node.id);
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   return (
-    <div className={`bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors group cursor-pointer`} onClick={() => onSelect(node)}>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect(node)}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(node); }
+      }}
+      className={`bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors group cursor-pointer`}>
       <div className={`relative aspect-video snapshot-placeholder ${frozen ? 'snapshot-frozen' : ''}`}>
-        {/* Status dot */}
-        <div className={`absolute top-2 left-2 w-3 h-3 rounded-full bg-${
+        {/* Status dot — z-10 so it stays above SnapshotImage which paints later */}
+        <div className={`absolute z-10 top-2 left-2 w-3 h-3 rounded-full bg-${
           stateTone === 'critical' ? 'sev-critical' : stateTone === 'warn' ? 'sev-warn' : 'sev-ok'
         } ring-2 ring-black/50 ${stateTone === 'critical' ? 'animate-live-blink' : ''}`}></div>
         {/* Active alert badge */}
         {nodeAlerts.length > 0 && (
-          <div className={`absolute top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
+          <div className={`absolute z-10 top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
             <Icon.Bell size={9} strokeWidth={2.5}/>{nodeAlerts.length}
           </div>
         )}
         {/* Type indicator */}
-        <div className="absolute top-2 right-2 bg-black/60 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
+        <div className="absolute z-10 top-2 right-2 bg-black/60 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
           {node.type === 'camera' ? 'CAM' : 'PUMP'}
         </div>
         {/* Snooze indicator */}
         {node.snoozeMin > 0 && (
-          <div className="absolute top-7 right-2 bg-sev-warn/90 text-black text-[10px] font-mono font-bold px-1.5 py-0.5 rounded flex items-center gap-1 tnum">
+          <div className="absolute z-10 top-7 right-2 bg-sev-warn/90 text-black text-[10px] font-mono font-bold px-1.5 py-0.5 rounded flex items-center gap-1 tnum">
             <Icon.BellOff size={9} strokeWidth={2.5}/>{node.snoozeMin}m
           </div>
         )}
@@ -702,19 +830,35 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
         </div>
         <div className="flex-1"></div>
         <div className="flex items-center gap-2 text-xs">
-          <button className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
-            <Icon.Filter size={12}/> 分組: <span className="text-ink-muted">{tab === 'pumps' ? '無' : '無'}</span> <Icon.ChevronDown size={12}/>
+          {/* TODO(dashboard-audit-2026-07-15): needs product decision — grouping dimensions (location/floor/health/etc). */}
+          <button disabled title="尚未實作" className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded opacity-50 cursor-not-allowed">
+            <Icon.Filter size={12}/> 分組: <span className="text-ink-muted">無</span> <Icon.ChevronDown size={12}/>
           </button>
-          <button className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
+          {/* TODO(dashboard-audit-2026-07-15): needs product decision — configurable refresh cadence (1s / 5s / 15s / manual). */}
+          <button disabled title="尚未實作" className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded opacity-50 cursor-not-allowed">
             <Icon.RefreshCw size={12}/> <span>1s</span>
           </button>
-          <button className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
+          <button
+            onClick={() => {
+              const el = document.documentElement;
+              if (document.fullscreenElement) {
+                document.exitFullscreen && document.exitFullscreen();
+              } else if (el.requestFullscreen) {
+                el.requestFullscreen().catch(() => {});
+              }
+            }}
+            className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
             <Icon.Maximize size={12}/> 全螢幕 <Kbd>F</Kbd>
           </button>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto scroll-thin p-3">
-        {tab === 'pumps' ? (
+        {sorted.length === 0 ? (
+          <div className="h-full flex items-center justify-center">
+            <EmptyState icon={Icon.Camera} title="尚無節點資料"
+              hint="伺服器尚未回報任何節點,或當前分頁篩選結果為空"/>
+          </div>
+        ) : tab === 'pumps' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             {sorted.map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts}/>)}
           </div>
@@ -770,7 +914,13 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
   const cycleTone = node.cycles > 20 ? 'critical' : node.cycles > 15 ? 'warn' : 'ok';
   const maxCycle = Math.max(...(node.cycleHistory || [node.cycles]));
   return (
-    <div onClick={() => onSelect && onSelect(node)}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect && onSelect(node)}
+      onKeyDown={e => {
+        if (onSelect && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(node); }
+      }}
       className={`relative bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors cursor-pointer`}>
 
       {/* Header */}
@@ -790,7 +940,7 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
       {node.sensorConflict && (
         <div role="alert" className="flex items-center gap-1.5 px-3 py-1.5 bg-sev-critical/15 border-b border-sev-critical/40 text-sev-critical text-xs font-semibold">
           <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
-          <span>⚠ Sensor conflict — inspect float switch</span>
+          <span>⚠ 感測器衝突 — 檢查浮球開關</span>
         </div>
       )}
 
@@ -906,16 +1056,49 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
 // =================================================================
 
 const StatusPage = ({ onSelectNode }) => {
+  const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
+  const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
+  const [locationFilter, setLocationFilter] = useState_p('all');
+  // Unique locations from the current node list — filter values are derived
+  // so a new deployment doesn't need a config change.
+  const locations = useMemo_p(() => {
+    const set = new Set();
+    window.NODES.forEach(n => { if (n.location) set.add(n.location); });
+    return ['all', ...Array.from(set)];
+  }, [window.NODES]);
+  const filtered = useMemo_p(() => window.NODES.filter(n => {
+    if (typeFilter !== 'all' && n.type !== typeFilter) return false;
+    if (statusFilter !== 'all' && n.status !== statusFilter) return false;
+    if (locationFilter !== 'all' && n.location !== locationFilter) return false;
+    return true;
+  }), [typeFilter, statusFilter, locationFilter, window.NODES]);
+  // Cycle through preset values for the chip dropdowns (real dropdown UI is
+  // a bigger design decision — keep the click surface working with cycling).
+  const cycleType = () => setTypeFilter(t => t === 'all' ? 'camera' : t === 'camera' ? 'pump' : 'all');
+  const cycleStatus = () => setStatusFilter(s => {
+    const order = ['all', 'online', 'warn', 'critical', 'offline'];
+    return order[(order.indexOf(s) + 1) % order.length];
+  });
+  const cycleLocation = () => setLocationFilter(l => {
+    const i = locations.indexOf(l);
+    return locations[(i + 1) % locations.length];
+  });
+  const typeLabel = typeFilter === 'all' ? '全部' : typeFilter === 'camera' ? '攝影機' : '抽水站';
+  const statusLabel = statusFilter === 'all' ? '全部' : statusFilter === 'online' ? '正常' : statusFilter === 'warn' ? '警告' : statusFilter === 'critical' ? '嚴重' : '離線';
+  const locationLabel = locationFilter === 'all' ? '全部' : locationFilter;
+  const filtersActive = typeFilter !== 'all' || statusFilter !== 'all' || locationFilter !== 'all';
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">節點狀態</h1>
-        <span className="text-xs text-ink-muted tnum">{window.NODES.length} 個節點</span>
+        <span className="text-xs text-ink-muted tnum">
+          {filtered.length}{filtered.length !== window.NODES.length && ` / ${window.NODES.length}`} 個節點
+        </span>
         <div className="flex-1"></div>
         <div className="flex gap-1.5">
-          <FilterChip>類型 <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip>狀態 <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip>位置 <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={typeFilter !== 'all'} onClick={cycleType}>類型: {typeLabel} <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}>狀態: {statusLabel} <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}>位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span> <Icon.ChevronDown size={10}/></FilterChip>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto scroll-thin">
@@ -935,11 +1118,29 @@ const StatusPage = ({ onSelectNode }) => {
             </tr>
           </thead>
           <tbody>
-            {window.NODES.map(n => {
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={10} className="p-0">
+                  <div className="py-8">
+                    <EmptyState icon={Icon.Server}
+                      title={filtersActive ? '無符合條件的節點' : '尚無節點資料'}
+                      hint={filtersActive ? '清除或調整上方篩選條件' : '伺服器尚未回報任何節點'}/>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {filtered.map(n => {
               const tone = n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok';
               const uploadIssue = n.heartbeat < 60 && n.upload > 600;
               return (
-                <tr key={n.id} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer" onClick={() => onSelectNode && onSelectNode(n)}>
+                <tr key={n.id}
+                  role="button"
+                  tabIndex={0}
+                  className="border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer focus:outline focus:outline-1 focus:outline-sev-info"
+                  onClick={() => onSelectNode && onSelectNode(n)}
+                  onKeyDown={e => {
+                    if (onSelectNode && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelectNode(n); }
+                  }}>
                   <td className="px-3 py-2 font-mono font-semibold">{n.id}</td>
                   <td className="px-3 py-2 text-ink-secondary">
                     <span className="inline-flex items-center gap-1.5">
@@ -990,9 +1191,20 @@ const StatusPage = ({ onSelectNode }) => {
                   </td>
                   <td className="px-3 py-2 text-right pr-4">
                     <div className="inline-flex gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
-                      <button title="靜音" className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary"><Icon.BellOff size={12}/></button>
-                      <button title="配置" className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary"><Icon.Settings size={12}/></button>
-                      <button title="重啟" className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-sev-warn"><Icon.RefreshCw size={12}/></button>
+                      <button
+                        title="靜音 30 分鐘"
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (window.SDPRS_API && window.SDPRS_API.snoozeNode) {
+                            Promise.resolve(window.SDPRS_API.snoozeNode(n.id, 30, '從節點狀態列表靜音'))
+                              .catch(err => alert('靜音失敗: ' + (err.message || err)));
+                          }
+                        }}
+                        className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary"><Icon.BellOff size={12}/></button>
+                      {/* TODO(dashboard-audit-2026-07-15): needs product decision — node configuration UI (per-node thresholds, sensor flags). */}
+                      <button disabled title="尚未實作" onClick={e => e.stopPropagation()} className="w-6 h-6 rounded flex items-center justify-center text-ink-muted opacity-50 cursor-not-allowed"><Icon.Settings size={12}/></button>
+                      {/* TODO(dashboard-audit-2026-07-15): needs backend endpoint + safety confirm — POST /api/nodes/{id}/reboot. */}
+                      <button disabled title="尚未實作" onClick={e => e.stopPropagation()} className="w-6 h-6 rounded flex items-center justify-center text-ink-muted opacity-50 cursor-not-allowed"><Icon.RefreshCw size={12}/></button>
                     </div>
                   </td>
                 </tr>
@@ -1014,6 +1226,9 @@ const WeatherPage = () => {
   const fc = w.forecast || [];
   const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind)) : 1;
   const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain)) : 1;
+  // TODO(dashboard-audit-2026-07-15): backend action for auto-mute on lightning.
+  // Local state only until the pipeline (weather WS event -> snooze fan-out) ships.
+  const [autoMuteLightning, setAutoMuteLightning] = useState_p(true);
   if (!w.available) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -1050,7 +1265,8 @@ const WeatherPage = () => {
           </div>
           <div className="flex-1"></div>
           <div className="flex gap-1">
-            <button className="px-2 h-6 text-xs bg-surface-elevated border border-border-strong rounded font-mono">{w.source}</button>
+            {/* TODO(dashboard-audit-2026-07-15): needs product decision — source switcher (CWA / SMG / manual override). */}
+            <button disabled title="尚未實作" className="px-2 h-6 text-xs bg-surface-elevated border border-border-strong rounded font-mono opacity-60 cursor-not-allowed">{w.source}</button>
           </div>
         </div>
 
@@ -1066,18 +1282,33 @@ const WeatherPage = () => {
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              <span className="text-4xl font-mono font-bold tnum text-sev-info">{w.rain.now}</span>
-              <span className="text-ink-muted text-sm">mm/h</span>
+              <span className="text-4xl font-mono font-bold tnum text-sev-info">
+                {w.rain.now != null ? w.rain.now : '—'}
+              </span>
+              {/* api.jsx is splitting rain into 10min / 1h / 24h. `now` is 10-min accumulation once that lands. */}
+              <span className="text-ink-muted text-sm">mm (10min)</span>
             </div>
-            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">日累計 {w.rain.day}mm</div>
+            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
+              24h 累計 {w.rain.day != null ? w.rain.day : '—'} mm
+            </div>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Zap size={10}/> 雷擊</div>
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              <span className="text-4xl font-mono font-bold tnum text-sev-warn">{w.lightning.count}</span>
+              <span className="text-4xl font-mono font-bold tnum text-sev-warn">{w.lightning.count != null ? w.lightning.count : '—'}</span>
               <span className="text-ink-muted text-sm">次/hr</span>
             </div>
-            <div className="text-xs text-sev-warn mt-1 font-mono tnum whitespace-nowrap">{w.lightning.nearest != null ? `最近 ${w.lightning.nearest}km · 警戒` : '無偵測'}</div>
+            {(() => {
+              const near = w.lightning.nearest;
+              if (near == null) return <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">無偵測</div>;
+              // Only cry-wolf 警戒 when strike is close enough to actually matter.
+              const alarming = near < 20;
+              return (
+                <div className={`text-xs mt-1 font-mono tnum whitespace-nowrap ${alarming ? 'text-sev-warn' : 'text-ink-muted'}`}>
+                  最近 {near}km{alarming ? ' · 警戒' : ''}
+                </div>
+              );
+            })()}
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Thermometer size={10}/> 環境</div>
@@ -1094,8 +1325,11 @@ const WeatherPage = () => {
       <div className="p-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold">36 小時預報</h2>
-          <label className="flex items-center gap-2 text-xs text-ink-secondary">
-            <input type="checkbox" defaultChecked className="rounded border-border-strong bg-surface-base text-sev-info"/>
+          <label className="flex items-center gap-2 text-xs text-ink-secondary" title="偏好僅存於本次 session — 後端行動尚未接線">
+            <input type="checkbox"
+              checked={autoMuteLightning}
+              onChange={e => setAutoMuteLightning(e.target.checked)}
+              className="rounded border-border-strong bg-surface-base text-sev-info"/>
             雷擊期間自動靜音
           </label>
         </div>
@@ -1126,9 +1360,35 @@ const WeatherPage = () => {
 // =================================================================
 
 const HandoverPage = () => {
-  const [text, setText] = useState_p(window.HANDOVER.current);
-  const [savedAt, setSavedAt] = useState_p(window.HANDOVER.pinned && window.HANDOVER.pinned.at);
+  // Lazy init — mustn't crash if the loader hasn't populated HANDOVER yet.
+  const [text, setText] = useState_p(() => (window.HANDOVER && window.HANDOVER.current) || '');
+  // Snapshot of what the server had when we started editing — for the divergence check.
+  const [baseline, setBaseline] = useState_p(() => (window.HANDOVER && window.HANDOVER.current) || '');
+  const [savedAt, setSavedAt] = useState_p(() => window.HANDOVER && window.HANDOVER.pinned && window.HANDOVER.pinned.at);
   const [saving, setSaving] = useState_p(false);
+  const [dirty, setDirty] = useState_p(false);
+  // Ticks so we re-poll window.HANDOVER whenever the app-level refresh fires
+  // (app.jsx bumps its own tick and re-renders — this re-runs on every render).
+  const remoteCurrent = (window.HANDOVER && window.HANDOVER.current) || '';
+  const peerChanged = dirty && remoteCurrent !== baseline;
+
+  // On every render, if the remote has changed AND the user hasn't started
+  // editing yet, silently adopt the new value. Once they've edited we leave
+  // their draft alone and show the peer-updated banner instead.
+  useEffect_p(() => {
+    if (!dirty && remoteCurrent !== text) {
+      setText(remoteCurrent);
+      setBaseline(remoteCurrent);
+    }
+  }, [remoteCurrent, dirty]);
+
+  const setTextTracked = (v) => { setText(v); setDirty(true); };
+  const adoptPeerCopy = () => {
+    setText(remoteCurrent);
+    setBaseline(remoteCurrent);
+    setDirty(false);
+  };
+
   const s = window.SHIFT_SUMMARY;
   const today = new Date().toISOString().slice(0, 10);
   const generateSummary = () => {
@@ -1142,15 +1402,24 @@ const HandoverPage = () => {
       lines.push('', '主要事件:');
       s.highlights.forEach(h => lines.push(`· ${h.node} ${h.label} (${h.count}×)`));
     }
-    setText(lines.join('\n'));
+    setTextTracked(lines.join('\n'));
   };
   const save = async () => {
+    // Save-time diff check — if the global changed since we captured baseline,
+    // warn before clobbering the peer's edit.
+    const latest = (window.HANDOVER && window.HANDOVER.current) || '';
+    if (latest !== baseline && latest !== text) {
+      const ok = window.confirm('伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎? (取消可先預覽對方版本)');
+      if (!ok) return;
+    }
     setSaving(true);
     try {
       await window.SDPRS_API.saveHandover(text);
       const now = new Date();
       const p = (n) => String(n).padStart(2, '0');
       setSavedAt(p(now.getHours()) + ':' + p(now.getMinutes()) + ':' + p(now.getSeconds()));
+      setBaseline(text);
+      setDirty(false);
     } catch (e) {
       alert('儲存失敗: ' + (e.message || e));
     }
@@ -1196,9 +1465,20 @@ const HandoverPage = () => {
           </div>
         </div>
 
+        {peerChanged && (
+          <div className="mb-2 flex items-center gap-2 text-xs bg-sev-warn/10 border border-sev-warn/40 rounded px-3 py-2">
+            <Icon.AlertCircle size={12} className="text-sev-warn flex-shrink-0"/>
+            <span className="text-sev-warn font-medium">其他操作員已更新交接備註 — 儲存會覆蓋對方的版本</span>
+            <div className="flex-1"></div>
+            <button onClick={adoptPeerCopy}
+              className="text-[11px] font-mono text-sev-warn hover:text-ink-primary underline">
+              以對方版本重載
+            </button>
+          </div>
+        )}
         <textarea
           value={text}
-          onChange={e => setText(e.target.value)}
+          onChange={e => setTextTracked(e.target.value)}
           rows="14"
           className="w-full bg-surface-panel border border-border-strong rounded p-3 text-sm font-mono leading-relaxed focus:border-sev-info focus:outline-none resize-none"
         />
@@ -1208,6 +1488,7 @@ const HandoverPage = () => {
           </button>
           <span className="text-xs text-ink-muted ml-2">
             {savedAt ? <>最後儲存: <span className="font-mono tnum">{savedAt}</span></> : '尚未儲存'}
+            {dirty && <span className="ml-2 text-sev-warn">· 未儲存變更</span>}
           </span>
         </div>
       </div>
@@ -1236,6 +1517,9 @@ const HandoverPage = () => {
 
 const AuditPage = () => {
   const [meOnly, setMeOnly] = useState_p(false);
+  const [operatorFilter, setOperatorFilter] = useState_p('all');
+  const [actionFilter, setActionFilter] = useState_p('all');
+  const [dateFilter, setDateFilter] = useState_p('all'); // all | today | 7d
   const actionMeta = {
     ALERT_CREATED: { tone: 'critical', label: '警報建立' },
     ALERT_ACK: { tone: 'info', label: '認領' },
@@ -1243,22 +1527,84 @@ const AuditPage = () => {
     NODE_SNOOZE: { tone: 'warn', label: '節點延期' },
     LOGIN: { tone: 'muted', label: '登入' },
   };
-  const records = window.AUDIT.filter(a => !meOnly || a.by === 'alice');
+  const operators = useMemo_p(() => {
+    const set = new Set();
+    (window.AUDIT || []).forEach(a => { if (a.by) set.add(a.by); });
+    return ['all', ...Array.from(set)];
+  }, [window.AUDIT]);
+  const actions = useMemo_p(() => {
+    const set = new Set();
+    (window.AUDIT || []).forEach(a => { if (a.action) set.add(a.action); });
+    return ['all', ...Array.from(set)];
+  }, [window.AUDIT]);
+  const cycleOperator = () => {
+    const i = operators.indexOf(operatorFilter);
+    setOperatorFilter(operators[(i + 1) % operators.length]);
+  };
+  const cycleAction = () => {
+    const i = actions.indexOf(actionFilter);
+    setActionFilter(actions[(i + 1) % actions.length]);
+  };
+  const cycleDate = () => {
+    const order = ['all', 'today', '7d'];
+    setDateFilter(order[(order.indexOf(dateFilter) + 1) % order.length]);
+  };
+  // Audit rows carry a full ms timestamp on `a.ts` (see api.jsx mapAuditRow).
+  // If missing, treat as "include" so the filter isn't silently dropping rows
+  // with legacy schemas.
+  const inDateRange = (a) => {
+    if (dateFilter === 'all') return true;
+    if (a.ts == null) return true;
+    const now = Date.now();
+    if (dateFilter === 'today') {
+      const d = new Date(a.ts);
+      const today = new Date(now);
+      return d.getFullYear() === today.getFullYear()
+        && d.getMonth() === today.getMonth()
+        && d.getDate() === today.getDate();
+    }
+    if (dateFilter === '7d') {
+      return (now - a.ts) <= 7 * 24 * 60 * 60 * 1000;
+    }
+    return true;
+  };
+  const _sessionUser = (window.SDPRS_USER && String(window.SDPRS_USER).trim()) || '';
+  const records = (window.AUDIT || []).filter(a => {
+    // meOnly requires a known session user — if SDPRS_USER is unset, meOnly
+    // returns nothing (safer than matching a hardcoded default).
+    if (meOnly) {
+      if (!_sessionUser || a.by !== _sessionUser) return false;
+    }
+    if (operatorFilter !== 'all' && a.by !== operatorFilter) return false;
+    if (actionFilter !== 'all' && a.action !== actionFilter) return false;
+    if (!inDateRange(a)) return false;
+    return true;
+  });
+  const filtersActive = meOnly || operatorFilter !== 'all' || actionFilter !== 'all' || dateFilter !== 'all';
+  const dateLabel = dateFilter === 'all' ? '全部' : dateFilter === 'today' ? '今日' : '近 7 天';
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">稽核紀錄</h1>
-        <span className="text-xs text-ink-muted tnum">{records.length} 筆 {meOnly && '· 僅 alice'}</span>
+        <span className="text-xs text-ink-muted tnum">
+          {records.length} 筆{filtersActive && ` · 已篩選`}
+        </span>
         <div className="flex-1"></div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setMeOnly(!meOnly)}
             className={`inline-flex items-center gap-1 h-7 px-2 rounded text-xs border transition-colors ${meOnly ? 'bg-sev-info/15 border-sev-info/40 text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
             <Icon.User size={12}/> 本班 · 我的動作
           </button>
-          <FilterChip>操作者 <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip>動作 <Icon.ChevronDown size={10}/></FilterChip>
-          <FilterChip>日期 <Icon.ChevronDown size={10}/></FilterChip>
-          <button className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay">
+          <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={actionFilter !== 'all'} onClick={cycleAction}>動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.ChevronDown size={10}/></FilterChip>
+          <FilterChip active={dateFilter !== 'all'} onClick={cycleDate}>日期: {dateLabel} <Icon.ChevronDown size={10}/></FilterChip>
+          <button
+            onClick={() => window.SDPRS_API.exportAuditCsv({
+              limit: 1000,
+              type: actionFilter !== 'all' ? actionFilter : undefined,
+            })}
+            title="下載目前條件的稽核紀錄 (CSV)"
+            className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay">
             <Icon.Download size={12}/> 匯出 CSV
           </button>
         </div>
@@ -1275,6 +1621,29 @@ const AuditPage = () => {
             </tr>
           </thead>
           <tbody>
+            {records.length === 0 && (
+              <tr>
+                <td colSpan={5} className="p-0">
+                  <div className="py-8">
+                    {/* api.jsx flags window.AUDIT.forbidden when GET /api/audit
+                        returned 403 — show an explicit no-permission state so
+                        non-admins understand why the table is empty. Otherwise
+                        fall back to the generic empty message (respects the
+                        active filters). Entries are checked first (records.length
+                        === 0 here) so a stale forbidden flag can never hide data. */}
+                    {window.AUDIT?.forbidden === true ? (
+                      <EmptyState icon={Icon.ShieldAlert}
+                        title="無權限查看稽核紀錄,請聯絡管理員"
+                        hint="需具備管理員權限才能檢視稽核紀錄"/>
+                    ) : (
+                      <EmptyState icon={Icon.ClipboardList}
+                        title={filtersActive ? '無符合條件的稽核紀錄' : '尚無稽核紀錄'}
+                        hint={filtersActive ? '調整上方篩選條件' : '本班尚無操作紀錄'}/>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            )}
             {records.map((a, i) => {
               const m = actionMeta[a.action] || { tone: 'muted', label: a.action };
               return (
@@ -1315,6 +1684,12 @@ const PumpsPage = () => {
         <h1 className="text-sm font-semibold">抽水站</h1>
         <span className="text-xs text-ink-muted tnum">{pumps.length} 站</span>
       </div>
+      {pumps.length === 0 ? (
+        <div className="h-64 flex items-center justify-center">
+          <EmptyState icon={Icon.Droplet} title="尚無泵浦資料"
+            hint="伺服器尚未回報任何抽水站節點"/>
+        </div>
+      ) : null}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {pumps.map(p => {
           const danger = p.level > 85;
@@ -1339,7 +1714,7 @@ const PumpsPage = () => {
               {p.sensorConflict && (
                 <div role="alert" className="flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded border border-sev-critical/40 bg-sev-critical/15 text-sev-critical text-xs font-semibold">
                   <Icon.AlertTriangle size={12} className="animate-live-blink flex-shrink-0"/>
-                  <span>⚠ Sensor conflict — inspect float switch</span>
+                  <span>⚠ 感測器衝突 — 檢查浮球開關</span>
                 </div>
               )}
 
