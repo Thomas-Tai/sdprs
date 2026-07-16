@@ -260,20 +260,24 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
     return () => { off && off(); };
   }, []);
 
-  // Play a critical tone the moment a NEW unack alert appears. Uses a ref
-  // to hold the previous count so unrelated re-renders don't retrigger.
+  // Play a tone the moment a NEW unack alert appears. Uses a ref to hold
+  // the previous count so unrelated re-renders don't retrigger. Reads
+  // window.ALERTS at effect-time to honor per-alert severity and per-node snooze.
   const prevUnackRef = useRef(unackCount);
   useEffect(() => {
     const prev = prevUnackRef.current;
     prevUnackRef.current = unackCount;
     if (muted || !window.SDPRS_AUDIO) return;
+    // TODO(audit-2026-07-16-P0#2): WS lightning strike → muteState.lightning auto-flip still unwired (app.jsx/api.jsx).
+    if (muteState?.lightning) return;
     if (unackCount > prev) {
-      // A newly-arrived unack alert. Play at the "critical" cadence — the
-      // status strip doesn't have per-alert severity here, and the loudest
-      // tone is safer than silence in a 24/7 NOC context.
-      try { window.SDPRS_AUDIO.playCritical(); } catch (_) {}
+      const newest = (window.ALERTS || []).find(a => a.state === 'pending' && !(a.acknowledged_by || a.ackBy));
+      if (newest && muteState?.nodes?.includes(newest.node)) return;
+      const sev = newest?.sev || 'critical';
+      const method = sev === 'critical' ? 'playCritical' : sev === 'warn' ? 'playWarning' : null;
+      if (method) { try { window.SDPRS_AUDIO[method](); } catch (_) {} }
     }
-  }, [unackCount, muted]);
+  }, [unackCount, muted, muteState]);
 
   // Replay tone when the audio countdown resets (transitions from a small
   // value UP to a larger one, e.g. 1 → 30). app.jsx owns the countdown ticker;
@@ -284,10 +288,15 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
     const prev = prevReplayRef.current;
     prevReplayRef.current = audioReplayIn;
     if (muted || !window.SDPRS_AUDIO) return;
+    if (muteState?.lightning) return;
     if (unackCount > 0 && prev != null && audioReplayIn != null && audioReplayIn > prev) {
-      try { window.SDPRS_AUDIO.playCritical(); } catch (_) {}
+      const newest = (window.ALERTS || []).find(a => a.state === 'pending' && !(a.acknowledged_by || a.ackBy));
+      if (newest && muteState?.nodes?.includes(newest.node)) return;
+      const sev = newest?.sev || 'critical';
+      const method = sev === 'critical' ? 'playCritical' : sev === 'warn' ? 'playWarning' : null;
+      if (method) { try { window.SDPRS_AUDIO[method](); } catch (_) {} }
     }
-  }, [audioReplayIn, unackCount, muted]);
+  }, [audioReplayIn, unackCount, muted, muteState]);
 
   return (
     <div className="h-12 fixed inset-x-0 top-0 z-40 bg-surface-panel border-b border-border-subtle flex items-center px-4 gap-3 noselect">
