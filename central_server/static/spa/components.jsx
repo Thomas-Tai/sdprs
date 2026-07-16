@@ -710,10 +710,18 @@ const EmptyState = ({ icon: IconComp = Icon.ShieldCheck, title, hint }) => (
   </div>
 );
 
+const FilterChip = ({ active, onClick, children, count }) => (
+  <button onClick={onClick}
+    className={`inline-flex items-center gap-1 px-2 h-6 rounded text-xs border transition-colors ${active ? 'bg-sev-info/15 text-sev-info border-sev-info/40' : 'bg-surface-elevated text-ink-secondary border-border-subtle hover:border-border-strong'}`}>
+    {children}
+    {count != null && <span className="font-mono tnum text-[10px] text-ink-muted">{count}</span>}
+  </button>
+);
+
 Object.assign(window, {
   Kbd, SeverityBadge, StateBadge, AgeCell, Pill, DetectorHealth, DriftMeter,
   StatusStrip, NavRail, Footer, Sparkline, ShortcutsModal, EmptyState, MuteDrawer,
-  NAV_ITEMS,
+  FilterChip, NAV_ITEMS,
 });
 
 // ===================================================================
