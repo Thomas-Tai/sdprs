@@ -157,17 +157,34 @@ const __TWEAKS_STYLE = `
 `;
 
 // ── useTweaks ───────────────────────────────────────────────────────────────
-// Single source of truth for tweak values. setTweak persists via the host
+// Single source of truth for tweak values. setTweak persists locally via
+// localStorage (`sdprs.tweaks`, atomic JSON object) AND echoes to the host
 // (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
+const __TWEAKS_LS_KEY = 'sdprs.tweaks';
+const __readTweaks = (defaults) => {
+  try {
+    const raw = localStorage.getItem(__TWEAKS_LS_KEY);
+    if (!raw) return { ...defaults };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return { ...defaults, ...parsed };
+  } catch (_) { /* corrupt / unavailable — fall back to defaults */ }
+  return { ...defaults };
+};
+const __writeTweaks = (obj) => {
+  try { localStorage.setItem(__TWEAKS_LS_KEY, JSON.stringify(obj)); }
+  catch (_) { /* quota / private mode — in-memory only is fine */ }
+};
 function useTweaks(defaults) {
-  const [values, setValues] = React.useState(defaults);
+  const [values, setValues] = React.useState(() => __readTweaks(defaults));
   // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
   // useState-style call doesn't write a "[object Object]" key into the persisted
   // JSON block.
   const setTweak = React.useCallback((keyOrEdits, val) => {
     const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
       ? keyOrEdits : { [keyOrEdits]: val };
-    setValues((prev) => ({ ...prev, ...edits }));
+    let next;
+    setValues((prev) => { next = { ...prev, ...edits }; return next; });
+    __writeTweaks(next);
     window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
     // Same-window signal so in-page listeners (deck-stage rail thumbnails)
     // can react — the parent message only reaches the host, not peers.
@@ -250,6 +267,7 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
 
   React.useEffect(() => {
     const onMsg = (e) => {
+      if (e.origin !== window.location.origin) return;
       const t = e?.data?.type;
       if (t === '__activate_edit_mode') setOpen(true);
       else if (t === '__deactivate_edit_mode') setOpen(false);
