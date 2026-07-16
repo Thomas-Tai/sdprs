@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -59,6 +60,8 @@ async def export_audit_csv(
     request: Request,
     limit: int = 1000,
     type: Optional[str] = None,
+    operator: Optional[str] = None,
+    since_ms: Optional[int] = None,
 ) -> Response:
     """CSV export of the audit log (dashboard-audit-2026-07-15 frozen contract).
 
@@ -66,6 +69,13 @@ async def export_audit_csv(
     real RBAC layer is future work). `limit` is clamped to
     _AUDIT_CSV_HARD_CAP silently (a mis-typed 1e9 would OOM the process).
     `type` filters to a single action_type when given.
+
+    `operator` and `since_ms` were added 2026-07-16 (dashboard audit C2 fix):
+    the SPA export button previously forwarded only `type`, so compliance
+    received every SNOOZE row across all operators/history instead of what
+    the operator saw on screen. `since_ms` is a Unix millisecond epoch;
+    converted to naive-UTC to match the audit table's stored timestamp
+    (see timeutil.utcnow contract).
 
     Encoding: UTF-8 with BOM so Excel opens Traditional-Chinese details
     correctly out of the box; media type declares charset=utf-8 explicitly.
@@ -84,7 +94,21 @@ async def export_audit_csv(
         n = 1000
     n = min(max(n, 1), _AUDIT_CSV_HARD_CAP)
 
-    rows = list_actions(limit=n, action_type=type)
+    since_dt: Optional[datetime] = None
+    if since_ms is not None:
+        try:
+            s = int(since_ms)
+        except (TypeError, ValueError):
+            s = 0
+        if s > 0:
+            since_dt = datetime.fromtimestamp(s / 1000.0, tz=timezone.utc).replace(tzinfo=None)
+
+    rows = list_actions(
+        limit=n,
+        action_type=type,
+        operator=operator or None,
+        since=since_dt,
+    )
 
     buf = io.StringIO()
     buf.write("﻿")  # UTF-8 BOM so Excel autodetects UTF-8 for CJK details

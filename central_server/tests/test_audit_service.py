@@ -33,6 +33,7 @@ from central_server.services.audit_service import (
     ACTION_SNOOZE,
     ACTION_UNSNOOZE,
     get_snooze_provenance,
+    list_actions,
     log_action,
 )
 
@@ -128,6 +129,45 @@ def test_snooze_provenance_missing_node_returns_empty_key(audit_env):
 def test_snooze_provenance_empty_input(audit_env):
     """Empty input list -> empty dict, no DB round-trip error."""
     assert get_snooze_provenance([]) == {}
+
+
+def test_list_actions_since_filter_matches_current_timestamp_format(sqlite_conn, audit_env):
+    """C2 fix regression guard (2026-07-16): SQLite CURRENT_TIMESTAMP renders
+    'YYYY-MM-DD HH:MM:SS' (space delimiter). datetime.isoformat() uses 'T',
+    and 'T' > ' ' lexically — so if list_actions() passes since.isoformat()
+    against space-delimited rows, every row is silently filtered out.
+
+    Setup: insert one row backdated 2 hours, one dated 'now'. Query with
+    since=1h-ago. Expected: only the 'now' row. Before the fix, the correct
+    row was also dropped (isoformat produced 'T', column stored ' ').
+    """
+    from datetime import datetime, timedelta, timezone
+    # Naive-UTC 'now' matching timeutil.utcnow() semantics; strftime output
+    # matches SQLite CURRENT_TIMESTAMP verbatim.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    old_ts = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    new_ts = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Explicit timestamps override the DEFAULT CURRENT_TIMESTAMP.
+    sqlite_conn.execute(
+        "INSERT INTO operator_actions (timestamp, operator, action_type, target_id) "
+        "VALUES (?, 'alice', 'ACKNOWLEDGE', 'old')",
+        (old_ts,),
+    )
+    sqlite_conn.execute(
+        "INSERT INTO operator_actions (timestamp, operator, action_type, target_id) "
+        "VALUES (?, 'alice', 'ACKNOWLEDGE', 'new')",
+        (new_ts,),
+    )
+    sqlite_conn.commit()
+
+    since = now - timedelta(hours=1)
+    rows = list_actions(limit=100, since=since)
+    target_ids = {r["target_id"] for r in rows}
+    assert target_ids == {"new"}, (
+        f"since filter dropped or over-included rows — expected only 'new', got {target_ids}. "
+        "This most likely means since.isoformat() drifted back to 'T' delimiter."
+    )
 
 
 if __name__ == "__main__":

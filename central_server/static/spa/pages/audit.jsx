@@ -2,6 +2,12 @@
 
 const { useState: useState_p, useMemo: useMemo_p } = React;
 
+// "本班" (this shift) is a rolling 12-hour window — SDPRS operator rotations
+// run 12h. Applied to both the on-screen meOnly filter (C3) and the CSV
+// export sinceMs when meOnly is active (C2). Rows without a parseable a.ts
+// fall through and are included — same tolerance as inDateRange below.
+const SHIFT_WINDOW_MS = 12 * 60 * 60 * 1000;
+
 const AuditPage = () => {
   const [meOnly, setMeOnly] = useState_p(false);
   const [operatorFilter, setOperatorFilter] = useState_p('all');
@@ -67,11 +73,16 @@ const AuditPage = () => {
     return true;
   };
   const _sessionUser = (window.SDPRS_USER && String(window.SDPRS_USER).trim()) || '';
+  const _shiftFloor = Date.now() - SHIFT_WINDOW_MS;
   const records = (window.AUDIT || []).filter(a => {
     // meOnly requires a known session user — if SDPRS_USER is unset, meOnly
-    // returns nothing (safer than matching a hardcoded default).
+    // returns nothing (safer than matching a hardcoded default). meOnly also
+    // enforces the rolling 12h shift window (C3 fix) so 本班·我的動作 no
+    // longer returns every action the operator ever took. Rows without a
+    // parseable ts pass the window filter (same tolerance as inDateRange).
     if (meOnly) {
       if (!_sessionUser || a.by !== _sessionUser) return false;
+      if (a.ts != null && a.ts < _shiftFloor) return false;
     }
     if (operatorFilter !== 'all' && a.by !== operatorFilter) return false;
     if (actionFilter !== 'all' && a.action !== actionFilter) return false;
@@ -80,12 +91,38 @@ const AuditPage = () => {
   });
   const filtersActive = meOnly || operatorFilter !== 'all' || actionFilter !== 'all' || dateFilter !== 'all';
   const dateLabel = dateFilter === 'all' ? '全部' : dateFilter === 'today' ? '今日' : '近 7 天';
+  // C2 fix (2026-07-16): mirror ALL active on-screen filters into the CSV
+  // query. Previously only `type` was forwarded, so compliance would receive
+  // every SNOOZE row across all operators/history instead of the narrow
+  // "today · my actions · SNOOZE" the operator saw. meOnly wins over
+  // operatorFilter (they compose semantically as an AND, but the button
+  // implies self), and the shift window replaces any date-chip window when
+  // meOnly is active (12h ≤ today ≤ 7d for typical use).
   const exportAuditCsv = async () => {
     setExportState({ tone: 'info', msg: '匯出中...' });
+    const now = Date.now();
+    let operatorParam;
+    let sinceMs;
+    if (meOnly) {
+      if (_sessionUser) operatorParam = _sessionUser;
+      sinceMs = now - SHIFT_WINDOW_MS;
+    } else {
+      if (operatorFilter !== 'all') operatorParam = operatorFilter;
+      if (dateFilter === 'today') {
+        const d = new Date(now);
+        // Local midnight — matches inDateRange's local-day comparison so the
+        // exported set equals the on-screen set for the operator's session.
+        sinceMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      } else if (dateFilter === '7d') {
+        sinceMs = now - 7 * 24 * 60 * 60 * 1000;
+      }
+    }
     try {
       await window.SDPRS_API.exportAuditCsv({
         limit: 1000,
         type: actionFilter !== 'all' ? actionFilter : undefined,
+        operator: operatorParam,
+        sinceMs,
       });
       setExportState({ tone: 'success', msg: '已匯出 CSV' });
     } catch (e) {
@@ -123,8 +160,10 @@ const AuditPage = () => {
         <div className="flex-1"></div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setMeOnly(!meOnly)}
+            title="僅顯示我在近 12 小時內的操作"
             className={`inline-flex items-center gap-1 h-7 px-2 rounded text-xs border transition-colors ${meOnly ? 'bg-sev-info/15 border-sev-info/40 text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
             <Icon.User size={12}/> 本班 · 我的動作
+            {meOnly && <span className="text-[10px] opacity-70 ml-0.5">(近12h)</span>}
           </button>
           <div className="inline-flex items-center">
             <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>

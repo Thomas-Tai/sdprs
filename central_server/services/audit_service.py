@@ -90,8 +90,12 @@ def list_actions(
         where.append("action_type = ?")
         params.append(action_type)
     if since is not None:
+        # SQLite CURRENT_TIMESTAMP renders as "YYYY-MM-DD HH:MM:SS" (space
+        # delimiter, no microseconds). datetime.isoformat() uses "T" — lexical
+        # string comparison against space-delimited rows silently drops
+        # everything ('T' > ' '), so we match the storage format exactly.
         where.append("timestamp >= ?")
-        params.append(since.isoformat())
+        params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
     sql = "SELECT id, timestamp, operator, action_type, target_id, details_json FROM operator_actions"
     if where:
         sql += " WHERE " + " AND ".join(where)

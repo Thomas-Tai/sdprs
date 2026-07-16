@@ -591,6 +591,12 @@
     const params = new URLSearchParams();
     if (o.limit != null) params.set('limit', String(o.limit));
     if (o.type) params.set('type', o.type);
+    // operator + sinceMs added 2026-07-16 (C2 fix) so the CSV mirrors the
+    // on-screen operator/date/meOnly filters instead of only forwarding
+    // action-type. sinceMs is Unix milliseconds; backend converts to
+    // naive-UTC via datetime.fromtimestamp(...).replace(tzinfo=None).
+    if (o.operator) params.set('operator', o.operator);
+    if (o.sinceMs != null) params.set('since_ms', String(Math.floor(o.sinceMs)));
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
 
