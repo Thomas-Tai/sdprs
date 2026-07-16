@@ -135,4 +135,17 @@ Grouped by area; each entry brief.
 
 ## Follow-up commit slice — pointer
 
-*This section will be filled in as fixes ship. Initial slice targets B1+B2 + C1–C6 + the 5 HIGH alerts-workflow state leaks (13 items).*
+Shipped 2026-07-16 (5 file-scoped fix agents: 2 Claude · 2 GLM · 1 Claude inline after GLM 3 stalled). 14 items: B1+B2, C1–C6, A1–A5, plus one MEDIUM (tweaks-panel postMessage origin gate) folded into the C4 commit.
+
+| Slice | Commit | Findings |
+|---|---|---|
+| Audit doc (this file) | `bafc796` | — |
+| `handover.jsx` null guards | `7c1a74c` | B1, B2 |
+| `alerts.jsx` state-leak cluster | `97e0072` | C1, A1, A2, A3, A4, A5 |
+| `audit` CSV filters + shift window | `2b9c848` | C2, C3 (+ latent SQLite `since=` format fix) |
+| `tweaks-panel` persistence + origin gate | `4f058dc` | C4 (+ MED origin-gate) |
+| Weather nulls + node-panel save race | `0d8f865` | C5, C6 |
+
+Deferred (tracked separately, not in this slice):
+- Keyboard shortcuts `A/R/S` in `app.jsx` bypass the new busy guard added inside `AlertDetail` — flagged out-of-scope during the alerts fix; needs a companion patch to route through `guardedSnooze`/equivalent.
+- All remaining HIGH items outside the alerts cluster + all MEDIUM/LOW findings.
