@@ -356,6 +356,13 @@ function App({ initialError = null }) {
         showToast('認領失敗: ' + (e.message || e), 'warn');
         return;
       }
+      // BUG 2: play the promised "確認" sound (docs/operations/dashboard-guide.md:52).
+      // Only on success; muteState.global gates it because the StatusStrip mute
+      // toggle doesn't mirror to SDPRS_AUDIO.setMuted, so the internal flag alone
+      // can be stale. Wrapped in try/catch — a WebAudio failure must never eat the ack.
+      try {
+        if (window.SDPRS_AUDIO && !muteState.global) window.SDPRS_AUDIO.playAck();
+      } catch (_) { /* audio pipeline failure — never block the ack */ }
       setAckedIds(prev => new Set(prev).add(id));
       // Operator engaged with the queue — clear the "N new" banner so a stale
       // count doesn't linger after everything's been touched.
@@ -368,7 +375,7 @@ function App({ initialError = null }) {
       alertBusyRef.current = false;
       setAlertBusy(false);
     }
-  }, [showToast, findNextUnack, refresh]);
+  }, [showToast, findNextUnack, refresh, muteState.global]);
 
   const onResolve = useCallbackA(async (id, note) => {
     if (!note) {
@@ -580,7 +587,13 @@ function App({ initialError = null }) {
       }
 
       if (e.key === 'a' || e.key === 'A') {
-        if (sel.state === 'pending') onAck(sel.id, !e.shiftKey);
+        if (sel.state === 'pending') {
+          // BUG 1: mirror AlertRow/AlertDetail's PENDING_VIDEO heuristic so
+          // keyboard A doesn't fire an ack the backend will 409.
+          const waiting = !(sel.timeline || []).some(t => t.label === 'UPLOADED');
+          if (waiting) { showToast('等待影像上傳中 — 尚未可認領', 'warn'); return; }
+          onAck(sel.id, !e.shiftKey);
+        }
         return;
       }
       if (e.key === 'r' || e.key === 'R') {

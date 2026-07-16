@@ -2,6 +2,23 @@
 
 const { useState: useState_p, useMemo: useMemo_p, useRef: useRef_p, useEffect: useEffect_p } = React;
 
+// Rendered when the underlying list has alerts but the current
+// severity/tab/search filter hides all of them. Distinguishes "nothing to
+// worry about" from "you filtered them out" (BUG 3).
+const FilteredEmptyState = ({ hiddenCount, onClearFilters }) => (
+  <div className="flex flex-col items-center justify-center text-center py-12 px-6">
+    <div className="w-16 h-16 rounded-full bg-sev-warn/15 flex items-center justify-center mb-4">
+      <Icon.Filter size={28} className="text-sev-warn" strokeWidth={2}/>
+    </div>
+    <div className="text-base text-ink-primary font-medium">沒有符合目前篩選的警報</div>
+    <div className="text-sm text-ink-muted mt-1.5 tnum">共 {hiddenCount} 筆隱藏</div>
+    <button onClick={onClearFilters}
+      className="mt-4 px-3 py-1.5 rounded bg-surface-elevated border border-border-strong text-xs text-ink-primary hover:bg-surface-overlay">
+      清除篩選
+    </button>
+  </div>
+);
+
 const SystemOKState = () => {
   const onlineCount = window.NODES.filter(n => n.status === 'online').length;
   const total = window.NODES.length;
@@ -27,6 +44,11 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
   const node = window.NODES.find(n => n.id === alert.node);
   const rowH = density === 'compact' ? 'h-9' : 'h-12';
   const isUrgent = alert.state === 'pending' && alert.sev === 'critical' && alert.ageSec < 60;
+  // PENDING_VIDEO heuristic — api.jsx collapses PENDING_VIDEO → 'pending', so
+  // we detect the pre-upload state via absence of the UPLOADED timeline entry
+  // (mapAlert pushes it iff mp4_path is set). Backend 409s an ack in this
+  // window, so gate the UI (BUG 1).
+  const isWaitingForVideo = alert.state === 'pending' && !(alert.timeline || []).some(t => t.label === 'UPLOADED');
   return (
     <div
       className={`relative ${rowH} flex items-center pl-3 border-b border-border-subtle/60 transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
@@ -64,6 +86,9 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
         </div>
         <div className="flex-1 min-w-0 flex items-center gap-2">
           <span className="text-xs text-ink-secondary truncate">{window.alertTypeLabel(alert.type)} <span className="text-ink-muted">· {node?.location}</span></span>
+          {isWaitingForVideo && (
+            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30 flex-shrink-0" title="等待影像上傳中 — 尚未可認領">等待影像</span>
+          )}
           {alert.prevShift && (
             <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 flex-shrink-0" title="從上一班次承接">↶ 上班</span>
           )}
@@ -139,9 +164,21 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     setBulkBusy(true);
     const ids = [...checked];
     try {
-      await window.SDPRS_API.bulkAckAlerts(ids, bulkNote);
-      setChecked(new Set());
-      setBulkNote('');
+      // Backend returns {"acked": <int>} — actual rowcount of the UPDATE, so
+      // PENDING_VIDEO / already-acked rows are silently skipped (BUG 1).
+      const resp = await window.SDPRS_API.bulkAckAlerts(ids, bulkNote);
+      const acked = (resp && typeof resp.acked === 'number') ? resp.acked : ids.length;
+      if (acked === 0) {
+        // Preserve selection + note on total failure so operator can see which
+        // weren't accepted and retry after the video uploads.
+        alert('批次認領失敗：所選警報都不可認領（等待影像上傳中或已認領）');
+      } else {
+        if (acked < ids.length) {
+          alert('批次認領：' + acked + ' / ' + ids.length + ' 成功；其餘無法認領');
+        }
+        setChecked(new Set());
+        setBulkNote('');
+      }
       await runRefreshAfterBulk();
     } catch (e) {
       alert('批次操作失敗');
@@ -155,9 +192,18 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     setBulkBusy(true);
     const ids = [...checked];
     try {
-      await window.SDPRS_API.bulkResolveAlerts(ids, bulkNote);
-      setChecked(new Set());
-      setBulkNote('');
+      // Backend returns {"resolved": <int>} — mirror handleBulkAck's shape guard.
+      const resp = await window.SDPRS_API.bulkResolveAlerts(ids, bulkNote);
+      const resolved = (resp && typeof resp.resolved === 'number') ? resp.resolved : ids.length;
+      if (resolved === 0) {
+        alert('批次解決失敗：所選警報都不可解決');
+      } else {
+        if (resolved < ids.length) {
+          alert('批次解決：' + resolved + ' / ' + ids.length + ' 成功；其餘無法解決');
+        }
+        setChecked(new Set());
+        setBulkNote('');
+      }
       await runRefreshAfterBulk();
     } catch (e) {
       alert('批次操作失敗');
@@ -279,7 +325,12 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         {/* Rows */}
         <div className="flex-1 overflow-y-auto scroll-thin">
           {filtered.length === 0 ? (
-            <SystemOKState/>
+            activeList.length === 0 ? (
+              <SystemOKState/>
+            ) : (
+              <FilteredEmptyState hiddenCount={activeList.length}
+                onClearFilters={() => { setFilterSev('all'); setSearch(''); setTab('active'); }}/>
+            )
           ) : (
             filtered.map(a => {
               const sib = activeList.filter(x => x.node === a.node && x.id !== a.id).length;
@@ -426,6 +477,9 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
   const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
   const [detailTab, setDetailTab] = useState_p('timeline');
+  // Mirror AlertRow's PENDING_VIDEO heuristic — backend 409s an ack until the
+  // MP4 uploads, so we gate the button + label the state (BUG 1).
+  const isWaitingForVideo = alert.state === 'pending' && !(alert.timeline || []).some(t => t.label === 'UPLOADED');
   // Tracks whether the operator has typed into the note textarea since the
   // last template apply. Used so template chips do NOT clobber freeform
   // typing — see C-6 (template overwrite warning).
@@ -481,6 +535,11 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <div className="flex items-center gap-2 flex-wrap">
               <SeverityBadge sev={alert.sev}/>
               <StateBadge state={alert.state}/>
+              {isWaitingForVideo && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30" title="影像尚未上傳；影像抵達後才能認領">
+                  <Icon.Clock size={9}/> 等待影像
+                </span>
+              )}
               {alert.prevShift && (
                 <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">↶ 上班次承接</span>
               )}
@@ -723,16 +782,16 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           {alert.state === 'pending' && (
             <>
               <button onClick={async () => {
-                  if (busy) return;
+                  if (busy || isWaitingForVideo) return;
                   try { await onAck(alert.id); }
                   catch (e) { /* parent toasts; keep UI state so operator can retry */ }
                 }}
-                disabled={busy}
-                title="我正在處理此事件 — 不會關閉警報。按下後自動跳至下一筆。"
+                disabled={busy || isWaitingForVideo}
+                title={isWaitingForVideo ? '等待影像上傳中 — 影像抵達後才能認領' : '我正在處理此事件 — 不會關閉警報。按下後自動跳至下一筆。'}
                 className="flex-1 h-9 bg-sev-info hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
                 <Icon.Check size={16} strokeWidth={2.5}/>
-                <span>認領</span>
-                <span className="text-[10px] opacity-80 font-normal">→ 下一筆</span>
+                <span>{isWaitingForVideo ? '等待影像上傳中' : '認領'}</span>
+                {!isWaitingForVideo && <span className="text-[10px] opacity-80 font-normal">→ 下一筆</span>}
                 <Kbd>A</Kbd>
               </button>
             </>
