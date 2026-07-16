@@ -27,6 +27,44 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
   );
 };
 
+// Per-row stream start/stop toggle for cameras. Mirrors SnoozeRowButton:
+// local busy guard, click/key stopPropagation so the row's side-panel
+// handler doesn't fire.
+//
+// State proxy: mapNode does not expose stream_status directly, so we infer
+// "streaming now" from n.bitrate > 0. Not perfect (a just-started stream
+// hasn't reported kbps yet, and a stopped stream that leaked a last
+// bitrate sample also shows > 0 briefly), but good enough for a toggle
+// — backend will reject inconsistent state with a 4xx/5xx that we toast.
+//
+// API-gated: if SDPRS_API.startStream / stopStream are missing (waiting
+// on api.jsx follow-up), render disabled with "串流控制 (等待 API)".
+const StreamRowButton = ({ node, onDone, onError }) => {
+  const [busy, setBusy] = React.useState(false);
+  const api = window.SDPRS_API || {};
+  const hasApi = typeof api.startStream === 'function' && typeof api.stopStream === 'function';
+  const isActive = (node.bitrate || 0) > 0;
+  const label = isActive ? '停止串流' : '開始串流';
+  const Glyph = isActive ? Icon.Pause : Icon.Play;
+  const trigger = () => {
+    if (busy || !hasApi) return;
+    setBusy(true);
+    const call = isActive ? api.stopStream(node.id) : api.startStream(node.id);
+    Promise.resolve(call)
+      .then(() => onDone && onDone(node, isActive ? 'stop' : 'start'))
+      .catch(err => onError && onError(err))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <button
+      title={hasApi ? label : '串流控制 (等待 API)'}
+      disabled={busy || !hasApi}
+      onClick={e => { e.stopPropagation(); trigger(); }}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+      className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"><Glyph size={12}/></button>
+  );
+};
+
 const StatusPage = ({ onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
@@ -144,7 +182,12 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
               </tr>
             )}
             {filtered.map(n => {
-              const tone = n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok';
+              // A pump with a live heartbeat but no water_level reading (sensor
+              // down / not yet reported) should not read as green — downgrade
+              // the badge tone locally so the row doesn't lie about health.
+              const pumpLevelMissing = n.type === 'pump' && n.level == null;
+              let tone = n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok';
+              if (tone === 'ok' && pumpLevelMissing) tone = 'warn';
               const uploadIssue = n.heartbeat < 60 && n.upload > 600;
               return (
                 <tr key={n.id}
@@ -186,6 +229,12 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
                   <td className="px-3 py-2 text-right font-mono">
                     {n.type === 'camera' ? (
                       <span className={n.temp > 50 ? 'text-sev-warn' : n.temp ? 'text-ink-secondary' : 'text-ink-muted'}>{n.temp ? n.temp+'°C' : '—'}</span>
+                    ) : n.level == null ? (
+                      // No water_level reading — do not render 0%/blank% which
+                      // would look like a real reading. Amber "—" makes the gap
+                      // visible; upstream api.jsx keeps status='online' because
+                      // heartbeat is fine, so the row is still ONLINE.
+                      <span className="text-sev-warn" title="水位資料未上傳">—</span>
                     ) : (
                       <span className="inline-flex items-center gap-1">
                         {n.trend === 'up' ? <Icon.ArrowUp size={10} className="text-sev-warn"/> : n.trend === 'down' ? <Icon.ArrowDown size={10} className="text-sev-ok"/> : <Icon.ArrowRight size={10} className="text-ink-muted"/>}
@@ -205,6 +254,15 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
                   </td>
                   <td className="px-3 py-2 text-right pr-4">
                     <div className="inline-flex gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
+                      {n.type === 'camera' && (
+                        <StreamRowButton
+                          node={n}
+                          onDone={(node, action) => {
+                            setToast({ tone: 'success', msg: `${node.name || node.id} ${action === 'stop' ? '串流已停止' : '串流已啟動'}` });
+                            if (typeof onRefresh === 'function') onRefresh();
+                          }}
+                          onError={err => setToast({ tone: 'error', msg: `串流指令失敗: ${err?.message || err}` })}/>
+                      )}
                       <SnoozeRowButton
                         node={n}
                         onDone={(node, minutes) => {
