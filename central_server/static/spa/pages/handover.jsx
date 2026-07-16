@@ -118,7 +118,7 @@ const HandoverPage = () => {
     });
   };
 
-  const s = window.SHIFT_SUMMARY;
+  const s = window.SHIFT_SUMMARY || {};
   const today = new Date().toISOString().slice(0, 10);
   const writeGeneratedSummary = () => {
     const lines = [
@@ -198,23 +198,23 @@ const HandoverPage = () => {
           <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-2">本班次數據</div>
           <div className="grid grid-cols-5 gap-2">
             <div>
-              <div className="text-lg font-mono font-bold tnum">{s.alertsHandled}</div>
+              <div className="text-lg font-mono font-bold tnum">{s.alertsHandled ?? '—'}</div>
               <div className="text-[10px] text-ink-muted">警報處理</div>
             </div>
             <div>
-              <div className="text-lg font-mono font-bold tnum text-sev-critical">{s.critical}</div>
+              <div className="text-lg font-mono font-bold tnum text-sev-critical">{s.critical ?? '—'}</div>
               <div className="text-[10px] text-ink-muted">嚴重</div>
             </div>
             <div>
-              <div className="text-lg font-mono font-bold tnum">{s.ackMedian}</div>
+              <div className="text-lg font-mono font-bold tnum">{s.ackMedian ?? '—'}</div>
               <div className="text-[10px] text-ink-muted">中位認領</div>
             </div>
             <div>
-              <div className="text-lg font-mono font-bold tnum">{s.resolveMedian}</div>
+              <div className="text-lg font-mono font-bold tnum">{s.resolveMedian ?? '—'}</div>
               <div className="text-[10px] text-ink-muted">中位解決</div>
             </div>
             <div>
-              <div className="text-lg font-mono font-bold tnum text-sev-warn">{s.carryOver}</div>
+              <div className="text-lg font-mono font-bold tnum text-sev-warn">{s.carryOver ?? '—'}</div>
               <div className="text-[10px] text-ink-muted">承接</div>
             </div>
           </div>
@@ -251,16 +251,19 @@ const HandoverPage = () => {
       <div>
         <h2 className="text-sm font-semibold mb-3 text-ink-secondary">歷史備註</h2>
         <div className="space-y-2">
-          {window.HANDOVER.history.map((h, i) => (
-            <div key={i} className="bg-surface-panel border border-border-subtle rounded p-3">
-              <div className="flex items-center gap-2 text-xs text-ink-muted mb-1.5 font-mono tnum">
-                <Icon.User size={12}/> <span className="text-ink-secondary">{h.by}</span>
-                <span className="text-ink-dim">·</span>
-                <span>{h.at}</span>
+          {(window.HANDOVER && window.HANDOVER.history && window.HANDOVER.history.length)
+            ? window.HANDOVER.history.map((h, i) => (
+              <div key={i} className="bg-surface-panel border border-border-subtle rounded p-3">
+                <div className="flex items-center gap-2 text-xs text-ink-muted mb-1.5 font-mono tnum">
+                  <Icon.User size={12}/> <span className="text-ink-secondary">{h.by}</span>
+                  <span className="text-ink-dim">·</span>
+                  <span>{h.at}</span>
+                </div>
+                <p className="text-xs text-ink-secondary leading-relaxed">{h.text}</p>
               </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">{h.text}</p>
-            </div>
-          ))}
+            ))
+            : <div className="text-xs text-ink-muted">尚無歷史備註</div>
+          }
         </div>
       </div>
       <ConfirmDialog
