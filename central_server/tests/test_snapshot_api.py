@@ -195,9 +195,15 @@ class TestGetSnapshot:
     """Tests for GET /api/edge/{node_id}/snapshot/latest endpoint."""
     
     def test_get_snapshot_after_post(self, client, api_headers):
-        """Test getting snapshot after posting it."""
+        """Test getting snapshot after posting it.
+
+        Post-Storage-D/E (2026-07-16): the server EXIF-strips the JPEG via a
+        Pillow round-trip before storing, so byte equality with the POSTed
+        payload no longer holds. Assert the returned bytes are a live (non-
+        placeholder) JPEG instead — the stripping contract is verified in
+        test_snapshot_hardening.py."""
         node_id = "glass_node_01"
-        
+
         # Post a snapshot first
         post_response = client.post(
             f"/api/edge/{node_id}/snapshot",
@@ -213,7 +219,11 @@ class TestGetSnapshot:
 
         assert get_response.status_code == 200
         assert get_response.headers["content-type"] == "image/jpeg"
-        assert get_response.content == FAKE_JPEG
+        # Live snapshot, not the placeholder fallback.
+        assert get_response.headers.get("x-snapshot-status") != "placeholder"
+        assert get_response.content.startswith(b"\xff\xd8")  # JPEG SOI
+        assert get_response.content.endswith(b"\xff\xd9")    # JPEG EOI
+        assert len(get_response.content) > 0
     
     def test_get_snapshot_no_data(self, client, api_headers):
         """Test getting snapshot when none has been posted."""
@@ -229,9 +239,15 @@ class TestGetSnapshot:
         assert len(response.content) > 0
     
     def test_snapshot_overwrite(self, client, api_headers):
-        """Test that posting a new snapshot overwrites the old one."""
+        """Test that posting a new snapshot overwrites the old one.
+
+        Post-Storage-D/E (2026-07-16): both posted payloads are
+        Pillow-round-tripped, so we can no longer byte-compare against the
+        POSTed bodies. Overwrite is verified via the X-Snapshot-Timestamp
+        header advancing across the two posts."""
+        import time
         node_id = "glass_node_01"
-        
+
         # Post first snapshot
         first_jpeg = FAKE_JPEG + b"first"
         client.post(
@@ -239,7 +255,14 @@ class TestGetSnapshot:
             content=first_jpeg,
             headers={**api_headers, "Content-Type": "image/jpeg"}
         )
-        
+        first_read = client.get(
+            f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
+        )
+        first_ts = first_read.headers.get("x-snapshot-timestamp")
+
+        # A second-resolution timestamp needs a tick to differ.
+        time.sleep(1.05)
+
         # Post second snapshot
         second_jpeg = FAKE_JPEG + b"second"
         client.post(
@@ -247,19 +270,29 @@ class TestGetSnapshot:
             content=second_jpeg,
             headers={**api_headers, "Content-Type": "image/jpeg"}
         )
-        
+
         # Get the snapshot - should be the second one
         response = client.get(
             f"/api/edge/{node_id}/snapshot/latest", headers=api_headers
         )
 
-        assert response.content == second_jpeg
+        assert response.status_code == 200
+        assert response.headers.get("x-snapshot-status") != "placeholder"
+        assert response.content.startswith(b"\xff\xd8")
+        assert response.content.endswith(b"\xff\xd9")
+        # Overwrite proof: the served timestamp advanced across the two posts.
+        assert response.headers.get("x-snapshot-timestamp") != first_ts
     
     def test_get_snapshot_different_nodes(self, client, api_headers):
-        """Test that snapshots are kept separate for different nodes."""
+        """Test that snapshots are kept separate for different nodes.
+
+        Post-Storage-D/E (2026-07-16): can no longer byte-compare to jpeg_01
+        (Pillow re-encodes). node_01 must instead return a live JPEG (not
+        placeholder), while node_02 stays on the placeholder path — proving
+        per-node isolation still holds."""
         node_01 = "glass_node_01"
         node_02 = "glass_node_02"
-        
+
         # Post snapshot for node_01
         jpeg_01 = FAKE_JPEG + b"node01"
         client.post(
@@ -267,18 +300,21 @@ class TestGetSnapshot:
             content=jpeg_01,
             headers={**api_headers, "Content-Type": "image/jpeg"}
         )
-        
+
         # node_02 should return placeholder
         response_02 = client.get(
             f"/api/edge/{node_02}/snapshot/latest", headers=api_headers
         )
         assert response_02.headers.get("x-snapshot-status") == "placeholder"
 
-        # node_01 should return posted snapshot
+        # node_01 should return a live posted snapshot (non-placeholder JPEG).
         response_01 = client.get(
             f"/api/edge/{node_01}/snapshot/latest", headers=api_headers
         )
-        assert response_01.content == jpeg_01
+        assert response_01.status_code == 200
+        assert response_01.headers.get("x-snapshot-status") != "placeholder"
+        assert response_01.content.startswith(b"\xff\xd8")
+        assert response_01.content.endswith(b"\xff\xd9")
     
     def test_post_snapshot_updates_timestamp(self, client, api_headers):
         """Test that posting a snapshot updates the timestamp."""

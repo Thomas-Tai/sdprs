@@ -103,6 +103,25 @@ def generate_placeholder_jpeg() -> bytes:
 _PLACEHOLDER_JPEG: bytes = generate_placeholder_jpeg()
 
 
+def _strip_exif(jpeg_bytes: bytes) -> bytes:
+    """Best-effort EXIF strip. On any failure (Pillow missing, corrupt JPEG),
+    return the original bytes and log at DEBUG — snapshot ingest must never
+    fail because a metadata scrub couldn't run. Cost is ~2-5 ms per 200KB
+    frame at 1 FPS/node — negligible for the current fleet size."""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(jpeg_bytes))
+        buf = io.BytesIO()
+        # save() without exif kwarg drops the APP1 EXIF segment; quality=88
+        # is a modest re-encode cost that matches typical camera JPEGs.
+        img.save(buf, format="JPEG", quality=88, optimize=False)
+        return buf.getvalue()
+    except Exception as e:
+        logger.debug(f"EXIF strip skipped: {e}")
+        return jpeg_bytes
+
+
 # ===== Snapshot-specific auth dependency =====
 #
 # The monitoring wall renders one <img> per node with a cache-buster query
@@ -189,10 +208,16 @@ async def receive_snapshot(
     
     # Get the global snapshots dict from app state
     snapshots: Dict[str, Dict[str, Any]] = request.app.state.latest_snapshots
-    
+
+    # Storage-E: strip EXIF (GPS, camera serial, etc.) before storing so
+    # dashboard operators can't read metadata the edge camera embedded.
+    # Best-effort — falls back to the original bytes if Pillow is missing
+    # or the payload can't be re-encoded.
+    stripped = _strip_exif(jpeg_bytes)
+
     # Store snapshot with timestamp
     snapshots[node_id] = {
-        "jpeg": jpeg_bytes,
+        "jpeg": stripped,
         "timestamp": utcnow()
     }
 
@@ -244,6 +269,7 @@ async def get_latest_snapshot(
             media_type="image/jpeg",
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
+                "X-Content-Type-Options": "nosniff",
                 "X-Snapshot-Timestamp": snapshot_data["timestamp"].isoformat()
             }
         )
@@ -255,6 +281,7 @@ async def get_latest_snapshot(
             media_type="image/jpeg",
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
+                "X-Content-Type-Options": "nosniff",
                 "X-Snapshot-Status": "placeholder"
             }
         )
