@@ -29,47 +29,55 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
   const isUrgent = alert.state === 'pending' && alert.sev === 'critical' && alert.ageSec < 60;
   return (
     <div
-      onClick={() => onSelect(alert.id)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(alert.id); }
-      }}
-      className={`relative ${rowH} flex items-center pl-3 pr-3 border-b border-border-subtle/60 cursor-pointer transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
+      className={`relative ${rowH} flex items-center pl-3 border-b border-border-subtle/60 transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
     >
-      <div className="w-6 flex-shrink-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
+      <div className="w-6 flex-shrink-0 flex items-center justify-center">
         <input type="checkbox" checked={checked} onChange={() => onCheck(alert.id)}
-          onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation(); }}
+          aria-label={`選取警報 ${alert.id}`}
           className="w-3.5 h-3.5 rounded border-border-strong bg-surface-base text-sev-info focus:ring-sev-info"/>
       </div>
-      <div className="w-4 flex-shrink-0 flex items-center justify-center">
-        {!alert.seen && alert.state === 'pending' && (
-          <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱"></span>
-        )}
-      </div>
-      <div className="w-20 flex-shrink-0"><AgeCell sec={alert.ageSec}/></div>
-      <div className="w-24 flex-shrink-0 font-mono text-xs tnum text-ink-secondary flex items-center gap-1">
-        <m.Icon/>
-        <span>{alert.node}</span>
-        {siblingCount > 0 && (
-          <span title={`${alert.node} 同節點另有 ${siblingCount} 警報`} className="ml-0.5 text-[9px] font-bold tnum bg-sev-warn/20 text-sev-warn px-1 rounded">+{siblingCount}</span>
-        )}
-      </div>
-      <div className="flex-1 min-w-0 flex items-center gap-2">
-        <span className="text-xs text-ink-secondary truncate">{window.alertTypeLabel(alert.type)} <span className="text-ink-muted">· {node?.location}</span></span>
-        {alert.prevShift && (
-          <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 flex-shrink-0" title="從上一班次承接">↶ 上班</span>
-        )}
-        {alert.viewer && (
-          <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30 flex-shrink-0" title={`${alert.viewer} 正在查看`}>
-            <Icon.Eye size={8}/>{alert.viewer}
-          </span>
-        )}
-      </div>
-      <div className="w-20 flex-shrink-0"><SeverityBadge sev={alert.sev}/></div>
-      <div className="w-20 flex-shrink-0"><StateBadge state={alert.state}/></div>
-      <div className="w-24 flex-shrink-0 font-mono text-[11px] tnum text-ink-muted text-right">
-        {alert.ackBy || '—'}
+      {/* Button-role region is a SIBLING of the checkbox (not parent) — nesting
+          interactive elements inside role="button" collapses screen-reader
+          announcements to just "button" and hides the checkbox (audit H-3). */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        onClick={() => onSelect(alert.id)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(alert.id); }
+        }}
+        className="flex-1 h-full min-w-0 pr-3 flex items-center cursor-pointer"
+      >
+        <div className="w-4 flex-shrink-0 flex items-center justify-center">
+          {!alert.seen && alert.state === 'pending' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱"></span>
+          )}
+        </div>
+        <div className="w-20 flex-shrink-0"><AgeCell sec={alert.ageSec}/></div>
+        <div className="w-24 flex-shrink-0 font-mono text-xs tnum text-ink-secondary flex items-center gap-1">
+          <m.Icon/>
+          <span>{alert.node}</span>
+          {siblingCount > 0 && (
+            <span title={`${alert.node} 同節點另有 ${siblingCount} 警報`} className="ml-0.5 text-[9px] font-bold tnum bg-sev-warn/20 text-sev-warn px-1 rounded">+{siblingCount}</span>
+          )}
+        </div>
+        <div className="flex-1 min-w-0 flex items-center gap-2">
+          <span className="text-xs text-ink-secondary truncate">{window.alertTypeLabel(alert.type)} <span className="text-ink-muted">· {node?.location}</span></span>
+          {alert.prevShift && (
+            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 flex-shrink-0" title="從上一班次承接">↶ 上班</span>
+          )}
+          {alert.viewer && (
+            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30 flex-shrink-0" title={`${alert.viewer} 正在查看`}>
+              <Icon.Eye size={8}/>{alert.viewer}
+            </span>
+          )}
+        </div>
+        <div className="w-20 flex-shrink-0"><SeverityBadge sev={alert.sev}/></div>
+        <div className="w-20 flex-shrink-0"><StateBadge state={alert.state}/></div>
+        <div className="w-24 flex-shrink-0 font-mono text-[11px] tnum text-ink-muted text-right">
+          {alert.ackBy || '—'}
+        </div>
       </div>
     </div>
   );
@@ -181,6 +189,16 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     setSnoozeOpen(false);
     setResolveNote('');
   }, [selectedId]);
+
+  // If the currently-selected alert is filtered out of the visible list
+  // (severity chip flip, tab change, search text), drop the selection so the
+  // detail panel + keyboard shortcuts A/R never target an invisible row
+  // (audit H-1). Same shape as the `checked` intersection pattern above.
+  useEffect_p(() => {
+    if (selectedId == null) return;
+    if (filtered.some(a => a.id === selectedId)) return;
+    setSelectedId(filtered[0]?.id ?? null);
+  }, [filtered, selectedId, setSelectedId]);
 
   return (
     <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr]">
@@ -326,25 +344,30 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
       triggerRef.current?.focus();
       return;
     }
+    // stopPropagation on Arrow/Home/End is REQUIRED because app.jsx also
+    // listens for ArrowUp/ArrowDown on the alerts page and flips selectedId —
+    // without stopping the event, using Arrow keys to navigate the snooze
+    // menu would silently reselect the underlying alert row (audit H-2).
     if (e.key === 'ArrowDown') {
-      e.preventDefault();
+      e.preventDefault(); e.stopPropagation();
       const next = (activeIdx + 1) % SNOOZE_DURATIONS.length;
       setActiveIdx(next);
       itemRefs.current[next]?.focus();
       return;
     }
     if (e.key === 'ArrowUp') {
-      e.preventDefault();
+      e.preventDefault(); e.stopPropagation();
       const prev = (activeIdx - 1 + SNOOZE_DURATIONS.length) % SNOOZE_DURATIONS.length;
       setActiveIdx(prev);
       itemRefs.current[prev]?.focus();
       return;
     }
     if (e.key === 'Home') {
-      e.preventDefault(); setActiveIdx(0); itemRefs.current[0]?.focus(); return;
+      e.preventDefault(); e.stopPropagation();
+      setActiveIdx(0); itemRefs.current[0]?.focus(); return;
     }
     if (e.key === 'End') {
-      e.preventDefault();
+      e.preventDefault(); e.stopPropagation();
       const last = SNOOZE_DURATIONS.length - 1;
       setActiveIdx(last); itemRefs.current[last]?.focus(); return;
     }
