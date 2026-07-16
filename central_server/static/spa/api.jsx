@@ -618,6 +618,15 @@
   const bulkResolveAlerts = (ids, note) => apiFetch('/api/alerts/bulk-resolve',
     jsonBody('POST', { ids: ids || [], note: note || null }));
 
+  // Stream control — MQTT-driven start/stop on an edge camera. Backend
+  // (api/stream.py) 404s on unknown nodes and 503s when the node is offline
+  // or MQTT is down; apiFetch surfaces the FastAPI `detail` in the error
+  // message so the caller's toast reads "串流啟動失敗: Node offline" etc.
+  const startStream = (nodeId) => apiFetch('/api/stream/' + encodeURIComponent(nodeId) + '/start',
+    { method: 'POST' });
+  const stopStream = (nodeId) => apiFetch('/api/stream/' + encodeURIComponent(nodeId) + '/stop',
+    { method: 'POST' });
+
   // Audit CSV export — preflight against the sibling GET /api/audit endpoint
   // (same admin-only gate as export.csv, see api/audit.py) to detect 401/403
   // BEFORE the anchor-click download, otherwise the browser would silently
@@ -774,6 +783,7 @@
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
     snoozeNode, unsnoozeNode, saveHandover, updateNodeLocation,
     exportAuditCsv,
+    startStream, stopStream,
     openSocket,
   };
 })();

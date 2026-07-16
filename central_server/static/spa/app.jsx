@@ -284,6 +284,11 @@ function App({ initialError = null }) {
         setNewAlertBannerCount(c => c + 1);
         scheduleRefresh();
       },
+      // Keepalive pings must reset liveSec so a healthy WS doesn't drift into
+      // the 10s "Reconnecting…" range between 20s poll edges (audit P1 #2).
+      // api.jsx surfaces ping via onPing so we don't leak the keepalive into
+      // the general onEvent whitelist.
+      onPing: () => setLiveSec(0),
       onEvent: (type, _data) => {
         if (type === 'auth_expired') {
           // Server sent {type:'auth_expired'} right before its 1008 close.
