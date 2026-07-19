@@ -326,7 +326,9 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
     const prev = prevUnackRef.current;
     prevUnackRef.current = unackCount;
     if (muted || !window.SDPRS_AUDIO) return;
-    // TODO(audit-2026-07-16-P0#2): WS lightning strike → muteState.lightning auto-flip still unwired (app.jsx/api.jsx).
+    // Operator-armed lightning suppression: skip the alert tone so the
+    // app.jsx `weather` WS handler owns the auto-mute during a strike
+    // (setMuted(true) on count>0, setMuted(false) on clear).
     if (muteState?.lightning) return;
     if (unackCount > prev) {
       const newest = (window.ALERTS || []).find(a => a.state === 'pending' && !(a.acknowledged_by || a.ackBy));

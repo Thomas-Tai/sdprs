@@ -731,10 +731,10 @@ function App({ initialError = null }) {
         // focus into that modal's own search input (e.g. the command palette).
         // Bail so the shortcut stays a header-search shortcut only.
         if (nodePanelNode || shortcutsOpen || muteDrawerOpen || cmdkOpen || sessionExpired) return;
-        // TODO(dashboard-audit-2026-07-15): components.jsx should give the
-        // header search input `id="global-search"` so this lookup is stable;
-        // querySelector fallback matches the first such input anywhere on the
-        // page (currently the command palette input if that's open).
+        // Alerts page carries the header search input at
+        // `pages/alerts.jsx` with `id="global-search"`; getElementById is
+        // the stable lookup. querySelector fallback stays as defence for
+        // future search-input additions on other pages.
         const el = document.getElementById('global-search')
           || document.querySelector('input[type="text"][placeholder*="搜尋"]');
         el?.focus();
