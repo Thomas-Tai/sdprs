@@ -100,6 +100,12 @@ function LiveClockProvider({ children, registerReset }) {
   return <LiveClockContext.Provider value={value}>{children}</LiveClockContext.Provider>;
 }
 
+// Shared frozen empty operators reference — used as the `??` fallback for
+// `window.OPERATORS_ONLINE` so App's render doesn't hand StatusStrip a fresh
+// `[]` on every tick (which would defeat the React.memo shallow-compare and
+// force StatusStrip to re-render every parent update).
+const EMPTY_OPERATORS = Object.freeze([]);
+
 function App({ initialError = null }) {
   const [tweaks, setTweak] = window.useTweaks(DEFAULTS);
 
@@ -240,17 +246,17 @@ function App({ initialError = null }) {
     catch (_) { /* localStorage unavailable (private mode) */ }
   }, [focusMode]);
 
-  // Persist volume + push to Howler whenever muteState.volume changes.
-  // VolumeSlider (in components.jsx) already calls Howler internally for the
-  // slider-driven path; this effect covers persistence AND callers that
-  // mutate muteState.volume directly (e.g. bulk reset).
+  // Persist volume + push to the AudioController whenever muteState.volume
+  // changes. Covers persistence AND callers that mutate muteState.volume
+  // directly (e.g. bulk reset) — VolumeSlider's own onChange already fires
+  // SDPRS_AUDIO.setVolume for the slider-driven path.
   useEffectA(() => {
     try {
       localStorage.setItem('sdprs.volume', String(muteState.volume));
-      if (window.Howler && typeof window.Howler.volume === 'function') {
-        window.Howler.volume(Math.max(0, Math.min(1, muteState.volume / 100)));
+      if (window.SDPRS_AUDIO && typeof window.SDPRS_AUDIO.setVolume === 'function') {
+        window.SDPRS_AUDIO.setVolume(muteState.volume);
       }
-    } catch (_) { /* localStorage / Howler unavailable — safe to swallow */ }
+    } catch (_) { /* localStorage / audio pipeline unavailable — safe to swallow */ }
   }, [muteState.volume]);
 
   const unackCount = useMemoA(() => alerts.filter(a => a.state === 'pending').length, [alerts]);
@@ -890,6 +896,7 @@ function App({ initialError = null }) {
   // Bootstrap error fallback. loadInitial() populates the window.* globals
   // that downstream JSX reads; if it failed we render a retry UI instead of
   // the full app so mount-time `.filter(...)` calls on undefined don't crash.
+  let bootstrapErrorUI = null;
   if (bootstrapError) {
     const retry = async () => {
       const err = bootstrapError;
@@ -907,7 +914,7 @@ function App({ initialError = null }) {
         setBootstrapError(e || err);
       }
     };
-    var bootstrapErrorUI = (
+    bootstrapErrorUI = (
       <div className="h-screen w-screen flex items-center justify-center bg-surface-base text-ink-primary p-6">
         <div className="max-w-md text-center space-y-4">
           <div className="text-2xl font-bold text-sev-critical">無法載入初始資料</div>
@@ -948,7 +955,7 @@ function App({ initialError = null }) {
         onOpenMuteDrawer={onOpenMuteDrawer}
         audioReplayIn={audioReplayIn}
         muteState={muteState}
-        operators={window.OPERATORS_ONLINE ?? []}
+        operators={window.OPERATORS_ONLINE ?? EMPTY_OPERATORS}
         staleAckCount={staleAckCount}
         onOpenCmdK={onOpenCmdK}
         focusMode={focusMode}
