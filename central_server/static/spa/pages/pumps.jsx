@@ -1,7 +1,9 @@
 // SDPRS — Pumps Page
 
-const PumpsPage = ({ onSelectNode }) => {
-  const pumps = window.NODES.filter(n => n.type === 'pump');
+const { useMemo: useMemo_pump } = React;
+
+const PumpsPage = ({ nodes = [], onSelectNode }) => {
+  const pumps = useMemo_pump(() => nodes.filter(n => n.type === 'pump'), [nodes]);
   return (
     <div className="h-full overflow-y-auto scroll-thin p-4">
       <div className="flex items-center gap-2 mb-4">
