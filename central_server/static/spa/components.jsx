@@ -1037,9 +1037,15 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
   // Field-name flex: try the audit-suggested names first, then the current
   // window.SHIFT_SUMMARY shape (alertsHandled/carryOver/highlights) from
   // data.jsx, then '—'. Prevents blanks if backend renames fields.
+  // Audit fix: `snoozed` previously fell back to `s.warn` (a warning-alert
+  // count) which rendered "N snoozed" when zero nodes were snoozed. Falling
+  // back to '—' preserves the "unknown" signal instead of lying with a
+  // semantically-unrelated number.
   const carryOver = s.carryOver ?? s.handled ?? s.alertsHandled ?? '—';
-  const snoozed   = s.snoozed   ?? s.warn ?? '—';
-  const pending   = s.pending   ?? s.critical ?? '—';
+  const snoozed   = s.snoozed   ?? '—';
+  // Same audit fix: `pending` (unhandled-new count) is not `s.critical`
+  // (critical-severity count) — dropping the semantically-wrong fallback.
+  const pending   = s.pending   ?? '—';
   const recent = s.recentIncident
     ?? (Array.isArray(s.highlights) && s.highlights.length ? s.highlights.join(' · ') : '尚無交接事項');
   return (
