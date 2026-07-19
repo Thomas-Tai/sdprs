@@ -1,5 +1,36 @@
 // SDPRS — Weather Page
 
+// Small "資料來源" chip rendered at the bottom of each hero tile.
+// `label` may be undefined (backend didn't attribute this field to any
+// source — happens when the raw reading came from a hardcoded null in
+// api.jsx, e.g. pressure/lightning) — in that case, render nothing so
+// the tile stays clean rather than displaying an em-dash source too.
+const SourceChip = ({ label }) => {
+  if (!label) return null;
+  return (
+    <div className="text-[9px] text-ink-dim mt-2 font-mono truncate" title={`資料來源: ${label}`}>
+      來源: {label}
+    </div>
+  );
+};
+
+// Aggregate 2-field tile (temp + humidity) needs a compact source line
+// that shows BOTH origins when they differ (e.g. temp from SMG, humidity
+// from HKO after per-field merge fill). Skip whichever field wasn't
+// attributed — no misleading "same-source" ellipsis.
+const EnvSourceChip = ({ tempLabel, humidityLabel }) => {
+  if (!tempLabel && !humidityLabel) return null;
+  if (tempLabel && humidityLabel && tempLabel === humidityLabel) {
+    return <SourceChip label={tempLabel}/>;
+  }
+  return (
+    <div className="text-[9px] text-ink-dim mt-2 font-mono space-y-0.5">
+      {tempLabel && <div className="truncate" title={`溫度來源: ${tempLabel}`}>溫度: {tempLabel}</div>}
+      {humidityLabel && <div className="truncate" title={`濕度來源: ${humidityLabel}`}>濕度: {humidityLabel}</div>}
+    </div>
+  );
+};
+
 const WeatherPage = () => {
   // D2 (audit 2026-07-16): distinguish loading vs unavailable. api.jsx
   // loadInitial()/refreshLive() only assign window.WEATHER once the fetch
@@ -21,6 +52,10 @@ const WeatherPage = () => {
   const wind = w.wind || {};
   const rain = w.rain || {};
   const lightning = w.lightning || {};
+  // Per-field sources dict from backend Phase 1 multi-source merge (2026-07-19).
+  // Missing key = that field wasn't supplied by any provider — SourceChip
+  // renders nothing rather than misleading label.
+  const sources = w.sources || {};
   // Filter nulls before Math.max — api.jsx C5 fix emits `null` for future
   // hours whose data hasn't landed yet; a single NaN in Math.max poisons the
   // whole axis and every bar height becomes `NaNpx` → blank chart.
@@ -60,7 +95,10 @@ const WeatherPage = () => {
                   <Icon.CloudRain size={14}/> 無熱帶氣旋警報
                 </div>
                 <div className="text-xs text-ink-muted mt-0.5 font-mono tnum">
-                  測站 {w.station || '—'} · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}
+                  主測站 {w.station || '—'} · 主源 {w.source}{w.stale ? ' · 資料較舊' : ''}
+                  {Object.keys(sources).length > 0 && (
+                    <span className="ml-1 text-ink-dim">· 各欄位來源見下方標籤</span>
+                  )}
                 </div>
               </>
             )}
@@ -76,6 +114,7 @@ const WeatherPage = () => {
               <span className="text-ink-muted text-sm">km/h</span>
             </div>
             <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">陣風 {wind.gust != null ? wind.gust : '—'} · {wind.dir || '—'}</div>
+            <SourceChip label={sources.wind_speed_ms}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
@@ -94,6 +133,7 @@ const WeatherPage = () => {
             <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
               24h 累計 {rain.day != null ? rain.day : '—'} mm
             </div>
+            <SourceChip label={sources.rainfall_24h_mm}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Zap size={10}/> 雷擊</div>
@@ -112,6 +152,9 @@ const WeatherPage = () => {
                 </div>
               );
             })()}
+            {/* No source label — lightning has no backend source yet
+                (rendered as null in api.jsx mapWeather). Reserved for a
+                future Blitzortung / HKO thunderstorm-warning integration. */}
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Thermometer size={10}/> 環境</div>
@@ -120,6 +163,7 @@ const WeatherPage = () => {
               <span className="text-ink-muted text-sm">°C</span>
             </div>
             <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">濕度 {w.humidity != null ? w.humidity : '—'}%{w.pressure != null ? ` · ${w.pressure}hPa` : ''}</div>
+            <EnvSourceChip tempLabel={sources.temperature_c} humidityLabel={sources.humidity_pct}/>
           </div>
         </div>
       </div>

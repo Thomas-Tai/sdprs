@@ -302,6 +302,7 @@
         visibility: null,
         lightning: { count: null, nearest: null },
         source: '—',
+        sources: {}, // consumer safe-access: w.sources[field] returns undefined
         stale: true,
         station: '',
         forecast: [],
@@ -315,6 +316,11 @@
         rain: roundOrNull(b.rainfall_mm),
       };
     });
+    // Backend Phase 1 (2026-07-19) added `sources` — per-field labels
+    // (e.g. sources.temperature_c === "SMG 外港"). Pre-Phase-1 backends
+    // omit the key entirely; default to {} so weather.jsx can safely do
+    // `w.sources[field] || w.source` without an undefined-crash.
+    const backendSources = (current.sources && typeof current.sources === 'object') ? current.sources : {};
     return {
       available: true,
       typhoon: typhoon ? {
@@ -350,6 +356,13 @@
       visibility: null,
       lightning: { count: null, nearest: null },
       source: current.source || 'SMG',
+      // Per-field sources dict from backend Phase 1 multi-source merge.
+      // Keys match CurrentWeather dataclass field names (temperature_c,
+      // humidity_pct, wind_speed_ms, wind_direction_deg, gust_speed_ms,
+      // rainfall_24h_mm). Missing key = that field wasn't supplied by any
+      // provider — the tile must render '—' rather than showing the raw
+      // default (e.g. 0.0 wind from HKO rhrread which has no wind data).
+      sources: backendSources,
       stale: !!current.is_stale,
       station: current.station_name || '',
       forecast: fc,
