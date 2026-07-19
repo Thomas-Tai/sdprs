@@ -54,9 +54,9 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
         {node.type === 'pump' && !frozen && (
           <div className="absolute inset-x-2 bottom-8">
             <div className="h-1.5 bg-black/40 rounded overflow-hidden">
-              <div className={`h-full ${node.level > 85 ? 'bg-sev-critical' : node.level > 70 ? 'bg-sev-warn' : 'bg-sev-info'}`} style={{ width: node.level + '%' }}></div>
+              <div className={`h-full ${node.level > 85 ? 'bg-sev-critical' : node.level > 70 ? 'bg-sev-warn' : 'bg-sev-info'}`} style={{ width: (node.level ?? 0) + '%' }}></div>
             </div>
-            <div className="text-[10px] font-mono text-white/90 mt-0.5 tnum text-right">水位 {node.level}%</div>
+            <div className="text-[10px] font-mono text-white/90 mt-0.5 tnum text-right">水位 {node.level != null ? node.level + '%' : '—'}</div>
           </div>
         )}
         {/* Bottom strip — node id + time */}
@@ -75,13 +75,13 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
         <div className="flex flex-col">
           <span className="text-ink-muted">心跳</span>
           <span className={node.heartbeat > 30 ? 'text-sev-critical font-semibold' : node.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {node.heartbeat > 60 ? Math.floor(node.heartbeat/60)+'m' : node.heartbeat+'s'}
+            {node.heartbeat == null ? '—' : node.heartbeat > 60 ? Math.floor(node.heartbeat/60)+'m' : node.heartbeat+'s'}
           </span>
         </div>
         <div className="flex flex-col">
           <span className="text-ink-muted">上傳</span>
           <span className={node.upload > 60 ? 'text-sev-critical font-semibold' : node.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {node.upload > 60 ? Math.floor(node.upload/60)+'m' : node.upload+'s'}
+            {node.upload == null ? '—' : node.upload > 60 ? Math.floor(node.upload/60)+'m' : node.upload+'s'}
           </span>
         </div>
         {node.type === 'camera' ? (
@@ -93,7 +93,7 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
           <div className="flex flex-col">
             <span className="text-ink-muted">本時</span>
             <span className={node.cycles > 20 ? 'text-sev-critical font-semibold' : node.cycles > 15 ? 'text-sev-warn' : 'text-ink-secondary'}>
-              {node.cycles}×
+              {node.cycles != null ? node.cycles + '×' : '—'}
             </span>
           </div>
         )}
@@ -109,7 +109,17 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
 };
 
 const MonitorPage = ({ activeAlerts, onSelectNode }) => {
-  const [tab, setTab] = useState_p('all');
+  // Tab state persisted to sessionStorage so navigating away and back preserves
+  // the user's filter choice. sessionStorage (not localStorage) — fresh browser
+  // session starts on 'all'. try/catch guards Safari private mode.
+  const [tab, setTab] = useState_p(() => {
+    try { return window.sessionStorage.getItem('sdprs.monitor.tab') || 'all'; }
+    catch (_) { return 'all'; }
+  });
+  React.useEffect(() => {
+    try { window.sessionStorage.setItem('sdprs.monitor.tab', tab); }
+    catch (_) {}
+  }, [tab]);
   // Local toast for fullscreen failures etc. Auto-dismissed after 3s.
   const [toast, setToast] = useState_p(null);
   React.useEffect(() => {
@@ -181,7 +191,7 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
               }
             }}
             className="flex items-center gap-1.5 h-7 px-2 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay">
-            <Icon.Maximize size={12}/> 全螢幕 <Kbd>F</Kbd>
+            <Icon.Maximize size={12}/> 全螢幕
           </button>
         </div>
       </div>
@@ -304,14 +314,14 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
             <span className="absolute -top-[7px] right-0.5 text-[8px] font-mono text-sev-warn bg-surface-panel px-0.5 leading-none">70</span>
           </div>
           {/* Water fill */}
-          <div className={`absolute left-3 right-0 bottom-0 transition-all duration-500 ${levelTone === 'critical' ? 'bg-sev-critical/50' : levelTone === 'warn' ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: node.level + '%' }}>
+          <div className={`absolute left-3 right-0 bottom-0 transition-all duration-500 ${levelTone === 'critical' ? 'bg-sev-critical/50' : levelTone === 'warn' ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: (node.level ?? 0) + '%' }}>
             {/* Wave top edge */}
             <div className={`h-0.5 ${levelTone === 'critical' ? 'bg-sev-critical' : levelTone === 'warn' ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
           </div>
           {/* Big % readout */}
           <div className="absolute inset-x-3 top-1/2 -translate-y-1/2 text-center pointer-events-none">
             <div className={`text-xl font-mono font-black tnum leading-none ${levelTone === 'critical' ? 'text-sev-critical' : levelTone === 'warn' ? 'text-sev-warn' : 'text-ink-primary'}`}>
-              {node.level}
+              {node.level != null ? node.level : '—'}
               <span className="text-[10px] text-ink-muted font-normal">%</span>
             </div>
           </div>
