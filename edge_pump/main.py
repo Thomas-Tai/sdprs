@@ -64,11 +64,90 @@ def synthesize_display_level(readings):
     return 0.0
 
 
-def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb):
-    """One control-loop body. Pure of hardware except via injected objects."""
+def apply_manual_override(decision, manual_state, clock):
+    """Optionally override the pure control decision with an operator command.
+
+    Two-slot manual state: {"action": "ON"|"OFF"|None, "expires_ms": int|None}.
+    Returns a new (decision, manual_state) tuple — either passed through
+    unchanged or mutated by the override / expiry / rejection paths.
+
+    Contract:
+      - Manual OFF is ALWAYS honored (safe direction — stopping never damages).
+      - Manual ON is REJECTED (dropped, no retry) when the safety core has
+        engaged `dry_run_protect` or `sensor_conflict` — the pump would
+        damage itself running dry or with contradicting sensors.
+      - Both commands auto-expire once `expires_ms` is reached (bounded pulse).
+        `expires_ms=None` means indefinite (used for OFF-latch, discouraged
+        for ON via the server-side API).
+
+    Design note: no state is added to control_logic — that module stays pure
+    and decides the "normal" outcome, this wrapper layers an override on top.
+    All safety flags from the underlying decision are preserved so the payload
+    still reports why the pump would-otherwise-be-doing what it's doing.
+    """
+    action = manual_state.get("action")
+    if action is None:
+        return decision, manual_state
+
+    expires = manual_state.get("expires_ms")
+    if expires is not None and clock.ticks_diff(clock.ticks_ms(), expires) >= 0:
+        # Expired — clear and pass through the natural decision.
+        return decision, {"action": None, "expires_ms": None}
+
+    flags = decision["flags"]
+
+    if action == "OFF":
+        next_state = dict(decision["next_state"])
+        next_state["pump_state"] = "OFF"
+        return {
+            "action": "OFF",
+            "next_state": next_state,
+            "flags": dict(flags, manual_override="OFF"),
+            "reason": control_logic.MANUAL_OFF,
+        }, manual_state
+
+    if action == "ON":
+        if flags.get("dry_run_protect") or flags.get("sensor_conflict"):
+            # Refuse and DROP the override so it doesn't retry every tick.
+            # The wrapper's caller can inspect the `manual_state["last_rejected"]`
+            # field to surface why the operator's ON click didn't take.
+            return decision, {"action": None, "expires_ms": None,
+                              "last_rejected": control_logic.MANUAL_REJECTED}
+        next_state = dict(decision["next_state"])
+        next_state["pump_state"] = "ON"
+        return {
+            "action": "ON",
+            "next_state": next_state,
+            "flags": dict(flags, manual_override="ON"),
+            "reason": control_logic.MANUAL_ON,
+        }, manual_state
+
+    # Unknown action — ignore, clear the slot to avoid a stuck state.
+    return decision, {"action": None, "expires_ms": None}
+
+
+def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
+                  manual_state=None, clock=None):
+    """One control-loop body. Pure of hardware except via injected objects.
+
+    `manual_state`/`clock` are optional so existing callers (tests + the
+    device main loop before the manual-override wiring) keep working; when
+    both are provided, an outstanding manual command is layered on top of
+    the pure decision via `apply_manual_override` before it hits the pump.
+    """
     readings = sensor_set.read_all()
     timing = pump.snapshot_timing(readings)
     decision = control_logic.decide(readings, timing, pump.ctrl_state, cfg)
+    if manual_state is not None and clock is not None:
+        decision, new_manual = apply_manual_override(decision, manual_state, clock)
+        # In-place mutation so the caller's dict reference stays valid.
+        # BUT: apply_manual_override may return the SAME reference for the
+        # "still-active, pass through" case — clearing manual_state would
+        # then wipe new_manual too and the override would evaporate after
+        # one publish cycle. Only copy back when it's a distinct object.
+        if new_manual is not manual_state:
+            manual_state.clear()
+            manual_state.update(new_manual)
     pump.apply(decision)
     publish_cb(pump_state=pump.state,
                water_level=synthesize_display_level(readings),
@@ -124,6 +203,37 @@ def main():
     last_publish = time.ticks_ms()
     ntp_synced = False
 
+    # Manual override slot. Written by MQTT command callback (called inside
+    # mqtt.check_msg → PumpMQTTClient._dispatch_incoming), read every tick by
+    # apply_manual_override(). Mutation is single-threaded — MicroPython's
+    # umqtt callback runs on the same task as the main loop.
+    manual_state = {"action": None, "expires_ms": None}
+
+    def on_pump_command(data):
+        action = data.get("action")
+        if action not in ("ON", "OFF"):
+            print("[CMD] bad action: %r (ignored)" % action)
+            return
+        # Duration in seconds. ON commands MUST specify a positive duration
+        # so a lost operator/network can't leave the pump running dry
+        # forever; OFF may be indefinite (safe direction).
+        duration_s = data.get("duration_s")
+        if action == "ON" and (not isinstance(duration_s, (int, float)) or duration_s <= 0):
+            print("[CMD] ON refused: positive duration_s required")
+            return
+        if action == "OFF" and (isinstance(duration_s, (int, float)) and duration_s <= 0):
+            duration_s = None
+        now = time.ticks_ms()
+        expires = None
+        if isinstance(duration_s, (int, float)) and duration_s > 0:
+            expires = time.ticks_add(now, int(duration_s * 1000))
+        manual_state["action"] = action
+        manual_state["expires_ms"] = expires
+        manual_state["last_rejected"] = None
+        print("[CMD] manual %s duration_s=%s" % (action, duration_s))
+
+    mqtt._on_pump_command = on_pump_command
+
     def publish_cb(pump_state, water_level, flags, reason):
         nonlocal last_publish, ntp_synced
         now = time.ticks_ms()
@@ -138,7 +248,8 @@ def main():
 
     while True:
         try:
-            run_iteration(sensor_set, pump, mqtt, cfg, publish_cb)
+            run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
+                          manual_state=manual_state, clock=clock)
             if wdt:
                 wdt.feed()           # feed ONLY after a full successful iteration
             import gc

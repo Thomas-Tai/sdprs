@@ -44,6 +44,7 @@ def build_payload(node_id, timestamp, pump_state, water_level, flags, reason,
         "high_water": flags.get("high_water"),
         "sensor_conflict": flags.get("sensor_conflict"),
         "dry_run_protect": flags.get("dry_run_protect"),
+        "manual_override": flags.get("manual_override"),
         "reason": reason,
     }
     if battery_voltage is not None:
@@ -62,7 +63,7 @@ class PumpMQTTClient:
     def __init__(self, ssid, password, broker, port, node_id, topic,
                  retry_interval=60, username="", mqtt_password="",
                  wifi_connect_timeout=15, socket_timeout_s=3,
-                 keepalive=60):
+                 keepalive=60, on_pump_command=None):
         self._ssid = ssid
         self._password = password
         self._broker = broker
@@ -77,6 +78,12 @@ class PumpMQTTClient:
         # MQTT 3.1.1 permits it. umqtt.simple defaults to 0, so we must pass
         # an explicit value here — 60s matches paho-mqtt's default.
         self._keepalive = keepalive
+        # Callback invoked with the parsed dict payload of a manual pump
+        # command received on sdprs/edge/{node_id}/cmd/pump. Optional — when
+        # None, the client subscribes but drops incoming messages.
+        self._on_pump_command = on_pump_command
+        # Cache the command topic so we don't format it twice per check_msg.
+        self._cmd_pump_topic = "sdprs/edge/" + node_id + "/cmd/pump"
 
         self._wifi_connected = False
         self._mqtt_connected = False
@@ -167,6 +174,16 @@ class PumpMQTTClient:
                     self._client.sock.settimeout(self._socket_timeout_s)
                 except Exception:
                     pass
+                # Wire the incoming-message dispatcher BEFORE subscribing so
+                # a message queued during the CONNACK window isn't dropped.
+                try:
+                    self._client.set_callback(self._dispatch_incoming)
+                    self._client.subscribe(self._cmd_pump_topic)
+                    print("[MQTT] Subscribed to %s" % self._cmd_pump_topic)
+                except Exception as e:
+                    # Subscribe failure is non-fatal — telemetry keeps working;
+                    # only manual control is degraded until the next reconnect.
+                    print("[MQTT] Subscribe failed: %s" % str(e))
                 self._mqtt_connected = True
                 print("[MQTT] Connected to broker!")
             except OSError as e:
@@ -202,6 +219,21 @@ class PumpMQTTClient:
         except OSError:
             self._mqtt_connected = False
             self._client = None
+
+    def _dispatch_incoming(self, topic, msg):
+        """umqtt.simple callback — hands off command messages to the
+        registered handler. Runs inside check_msg(); MUST NOT raise or the
+        umqtt read-loop bails out."""
+        try:
+            topic_s = topic.decode("utf-8") if isinstance(topic, (bytes, bytearray)) else topic
+            if topic_s != self._cmd_pump_topic:
+                return
+            if self._on_pump_command is None:
+                return
+            data = json.loads(msg) if not isinstance(msg, dict) else msg
+            self._on_pump_command(data)
+        except Exception as e:
+            print("[MQTT] cmd dispatch error: %s" % str(e))
 
     def disconnect(self):
         """斷開 MQTT 連線。"""

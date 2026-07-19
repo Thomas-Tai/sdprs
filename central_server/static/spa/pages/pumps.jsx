@@ -1,8 +1,63 @@
 // SDPRS — Pumps Page
 
-const { useMemo: useMemo_pump } = React;
+const { useMemo: useMemo_pump, useState: useState_pump } = React;
 
-const PumpsPage = ({ nodes = [], onSelectNode }) => {
+// Manual command control block for a single pump card. `pumpId` uniquely
+// identifies the target for the fetch; `disabled` is set when the pump is
+// offline (server can't reach it) — the button then reads as inert rather
+// than fire-and-fail silently. Bench operators can pick a bounded pulse.
+const PumpManualControls = ({ pumpId, disabled, showToast }) => {
+  const [pending, setPending] = useState_pump(null); // 'ON10' | 'OFF' | null
+
+  const send = async (action, durationS, label) => {
+    if (pending) return;
+    setPending(label);
+    try {
+      const r = await window.SDPRS_API.pumpCommand(pumpId, action, durationS);
+      if (r && r.ok === false) {
+        showToast && showToast(r.error || '指令發送失敗', 'warn');
+      } else {
+        showToast && showToast(
+          action === 'ON' ? `已送出：運轉 ${durationS} 秒` : '已送出：停機',
+          'info');
+      }
+    } catch (e) {
+      showToast && showToast('指令發送失敗（網路或權限問題）', 'warn');
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const cls = 'text-[10px] px-2 py-1 rounded border font-mono transition-colors';
+  return (
+    <div className="mt-3 pt-3 border-t border-border-subtle flex items-center gap-1.5 flex-wrap">
+      <span className="text-[10px] text-ink-muted">手動：</span>
+      <button
+        type="button"
+        disabled={disabled || pending != null}
+        onClick={() => send('ON', 10, 'ON10')}
+        title="送出手動指令：運轉 10 秒後自動停機。乾轉保護仍會攔截。"
+        className={`${cls} bg-sev-info/10 text-sev-info border-sev-info/30 hover:bg-sev-info/20 disabled:opacity-40 disabled:cursor-not-allowed`}
+      >{pending === 'ON10' ? '送出中…' : '▶ 10s'}</button>
+      <button
+        type="button"
+        disabled={disabled || pending != null}
+        onClick={() => send('ON', 30, 'ON30')}
+        title="送出手動指令：運轉 30 秒後自動停機。乾轉保護仍會攔截。"
+        className={`${cls} bg-sev-info/10 text-sev-info border-sev-info/30 hover:bg-sev-info/20 disabled:opacity-40 disabled:cursor-not-allowed`}
+      >{pending === 'ON30' ? '送出中…' : '▶ 30s'}</button>
+      <button
+        type="button"
+        disabled={disabled || pending != null}
+        onClick={() => send('OFF', null, 'OFF')}
+        title="送出手動指令：立即停機（無限期，直到下一個指令覆蓋或人工重設）"
+        className={`${cls} bg-sev-critical/10 text-sev-critical border-sev-critical/30 hover:bg-sev-critical/20 disabled:opacity-40 disabled:cursor-not-allowed`}
+      >{pending === 'OFF' ? '送出中…' : '⏹ 停機'}</button>
+    </div>
+  );
+};
+
+const PumpsPage = ({ nodes = [], onSelectNode, showToast }) => {
   const pumps = useMemo_pump(() => nodes.filter(n => n.type === 'pump'), [nodes]);
   return (
     <div className="h-full overflow-y-auto scroll-thin p-4">
@@ -124,6 +179,11 @@ const PumpsPage = ({ nodes = [], onSelectNode }) => {
                     {p.power === 'mains' ? '市電' : p.power === 'ups' ? 'UPS' : '電池'}
                   </div>
                 </div>
+              </div>
+              {/* Manual override controls — stopPropagation so clicking a
+                  button doesn't also trigger the card's onSelectNode. */}
+              <div onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+                <PumpManualControls pumpId={p.id} disabled={isOffline} showToast={showToast}/>
               </div>
             </div>
           );

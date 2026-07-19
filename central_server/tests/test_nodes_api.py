@@ -451,5 +451,107 @@ def test_delete_node_404_when_missing(client, monkeypatch):
     assert calls["broadcast"] == []
 
 
+# =============================================================================
+# POST /api/nodes/{node_id}/pump — manual pump ON/OFF command
+# =============================================================================
+
+def test_pump_command_on_publishes_and_audits(client, monkeypatch):
+    """ON with a valid duration_s: publishes to MQTT via send_pump_command,
+    audits with the action + duration, returns 200 with queued=True."""
+    calls = {"mqtt": [], "log": []}
+
+    class _FakeMqtt:
+        def send_pump_command(self, node_id, action, duration_s):
+            calls["mqtt"].append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action",
+                        lambda user, action, target_id=None, details=None:
+                        calls["log"].append({"user": user, "action": action,
+                                             "target_id": target_id,
+                                             "details": details}))
+
+    response = client.post("/api/nodes/pump_node_01/pump",
+                           json={"action": "ON", "duration_s": 15})
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"node_id": "pump_node_01", "action": "ON",
+                    "duration_s": 15, "queued": True}
+    assert calls["mqtt"] == [("pump_node_01", "ON", 15)]
+    assert calls["log"] == [{
+        "user": "test_user", "action": "PUMP_COMMAND",
+        "target_id": "pump_node_01",
+        "details": {"action": "ON", "duration_s": 15},
+    }]
+
+
+def test_pump_command_off_indefinite_ok(client, monkeypatch):
+    """OFF without duration_s is legal — holds indefinitely (safe direction).
+    duration_s must be forwarded verbatim (None) to the edge."""
+    mqtt_calls = []
+
+    class _FakeMqtt:
+        def send_pump_command(self, node_id, action, duration_s):
+            mqtt_calls.append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.post("/api/nodes/pump_node_01/pump", json={"action": "OFF"})
+    assert response.status_code == 200
+    assert response.json()["action"] == "OFF"
+    assert response.json()["duration_s"] is None
+    assert mqtt_calls == [("pump_node_01", "OFF", None)]
+
+
+def test_pump_command_on_without_duration_rejected(client, monkeypatch):
+    """ON without duration_s must 400. The edge silently drops any ON
+    command without a positive duration_s too — this is the front-line check
+    that gives operators a clear error."""
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    response = client.post("/api/nodes/pump_node_01/pump", json={"action": "ON"})
+    assert response.status_code == 400
+    assert "duration_s" in response.json()["detail"]
+
+
+def test_pump_command_bad_action_rejected(client, monkeypatch):
+    """Only ON / OFF are legal. Anything else 422 at Pydantic layer."""
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    response = client.post("/api/nodes/pump_node_01/pump",
+                           json={"action": "TOGGLE", "duration_s": 10})
+    assert response.status_code == 422
+
+
+def test_pump_command_wrong_node_type_rejected(client, monkeypatch):
+    """Sending a pump command to a glass node is a 400 — glass nodes have no
+    pump, forwarding the command would just be broker noise."""
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    # glass_node_01 exists via fixture as node_type='glass'
+    monkeypatch.setattr(nodes_api, "db_get_node",
+                        lambda nid: {"node_id": nid, "node_type": "glass"},
+                        raising=False)
+    response = client.post("/api/nodes/glass_node_01/pump",
+                           json={"action": "OFF"})
+    assert response.status_code == 400
+    assert "not a pump" in response.json()["detail"]
+
+
+def test_pump_command_missing_node_returns_404(client, monkeypatch):
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    monkeypatch.setattr(nodes_api, "db_get_node", lambda nid: None, raising=False)
+    response = client.post("/api/nodes/does-not-exist/pump",
+                           json={"action": "OFF"})
+    assert response.status_code == 404
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -556,6 +556,31 @@ class MQTTService:
         logger.info(f"Sending snooze config to {node_id}: until={snooze_until}")
         return self.publish(topic, payload, qos=1)
 
+    def send_pump_command(self, node_id: str, action: str,
+                          duration_s: Optional[int] = None) -> bool:
+        """Push a manual pump ON/OFF command to a pump edge node.
+
+        Publishes to `sdprs/edge/{node_id}/cmd/pump` with a payload the ESP32
+        firmware (see edge_pump/main.py's on_pump_command) parses to set its
+        manual override slot. ON commands MUST carry a positive duration_s so
+        a lost network / operator can't leave a pump running dry indefinitely;
+        OFF may omit duration_s to hold indefinitely.
+
+        The safety core (control_logic + apply_manual_override) is the final
+        arbiter — an ON command is silently dropped by the node when
+        dry_run_protect / sensor_conflict are engaged. Server-side we do NOT
+        pre-check safety flags: the freshest sensor state lives on the
+        device, and gating here would just add a stale-cache race.
+        """
+        topic = topic_cmd(node_id, "pump")
+        payload = {
+            "action": action,
+            "duration_s": duration_s,
+            "timestamp": utcnow().isoformat(),
+        }
+        logger.info(f"Sending pump command to {node_id}: action={action} duration_s={duration_s}")
+        return self.publish(topic, payload, qos=1)
+
     # ===== Offline Detection =====
     
     def _start_offline_detection(self):

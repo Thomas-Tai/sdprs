@@ -470,6 +470,72 @@ class SnoozeRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=200)
 
 
+class PumpCommandRequest(BaseModel):
+    """Body for POST /api/nodes/{node_id}/pump.
+
+    - action: "ON" or "OFF" — anything else is a 400.
+    - duration_s: how long to hold the override, in seconds.
+      * ON REQUIRES a positive integer 1..600 (upper bound = MAX_RUN_MS/1000
+        on the device); this prevents a lost network/operator from leaving
+        the pump running dry indefinitely.
+      * OFF may omit or set 0 to hold indefinitely (safe direction).
+    """
+    action: str = Field(..., pattern="^(ON|OFF)$")
+    duration_s: Optional[int] = Field(None, ge=0, le=600)
+
+
+@router.post("/nodes/{node_id}/pump")
+async def pump_command(
+    node_id: str,
+    body: PumpCommandRequest,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Push a manual pump ON/OFF command to a pump edge node via MQTT.
+
+    Server-side we don't pre-check safety flags — the device's control_logic
+    is the final arbiter and stale server-cached state would only add races.
+    The device silently drops an ON command when `dry_run_protect` /
+    `sensor_conflict` are engaged; the caller learns about the actual pump
+    state from the next telemetry publish (~2s cadence).
+
+    Audit-logs the action so operator commands are traceable.
+    """
+    from ..services.audit_service import log_action, ACTION_PUMP_COMMAND
+
+    # ON must specify a bounded duration — see PumpCommandRequest docstring
+    # for why. Enforced here rather than in Pydantic so the OFF path can pass
+    # duration_s=None.
+    if body.action == "ON" and (body.duration_s is None or body.duration_s <= 0):
+        raise HTTPException(
+            status_code=400,
+            detail="pump ON requires a positive duration_s (1..600 seconds)",
+        )
+
+    node = db_get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    if (node.get("node_type") or "").lower() != "pump":
+        raise HTTPException(status_code=400,
+                            detail=f"Node {node_id} is not a pump (type={node.get('node_type')!r})")
+
+    mqtt_svc = get_mqtt_service()
+    if mqtt_svc is None:
+        raise HTTPException(status_code=503, detail="MQTT service not available")
+    ok = mqtt_svc.send_pump_command(node_id, body.action, body.duration_s)
+    if not ok:
+        raise HTTPException(status_code=502,
+                            detail="Failed to publish pump command to broker")
+
+    log_action(user, ACTION_PUMP_COMMAND, target_id=node_id,
+               details={"action": body.action, "duration_s": body.duration_s})
+    return {
+        "node_id": node_id,
+        "action": body.action,
+        "duration_s": body.duration_s,
+        "queued": True,
+    }
+
+
 @router.post("/nodes/{node_id}/snooze")
 async def snooze_node(
     node_id: str,

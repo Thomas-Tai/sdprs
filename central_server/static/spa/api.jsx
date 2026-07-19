@@ -773,6 +773,17 @@
   const unsnoozeNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
     { method: 'DELETE' });
 
+  // Manual pump ON/OFF command. ON requires a positive duration_s (1..600);
+  // OFF may omit it (holds indefinitely). Fire-and-forget from the SPA — the
+  // truth about whether the pump actually turned on lives on the device and
+  // reaches back via the next pump_status publish (~2s cadence).
+  const pumpCommand = (nodeId, action, durationS) => apiFetch(
+    '/api/nodes/' + encodeURIComponent(nodeId) + '/pump',
+    jsonBody('POST', { action, duration_s: durationS != null ? durationS : null }));
+
+  const deleteNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId),
+    { method: 'DELETE' });
+
   const saveHandover = (note) => apiFetch('/api/handover/note', jsonBody('PUT', { note: note || '' }));
 
   const updateNodeLocation = (id, location) => apiFetch('/api/nodes/' + encodeURIComponent(id),
@@ -880,7 +891,7 @@
   window.SDPRS_API = {
     loadInitial, refreshLive, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
-    snoozeNode, unsnoozeNode, saveHandover, updateNodeLocation,
+    snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
     exportAuditCsv,
     startStream, stopStream,
     openSocket,

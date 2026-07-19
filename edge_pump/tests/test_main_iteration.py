@@ -55,6 +55,43 @@ def test_synthesize_display_level_digital_only_float_safe():
         {"level_pct": None, "high_water": False, "float_dry": False}) == 50.0
 
 
+def test_manual_override_persists_across_iterations_until_expiry():
+    """Regression: run_iteration must not lose the manual_state between
+    calls. The initial bug was `manual_state.clear() ; manual_state.update(
+    new_manual)` when apply_manual_override returned the SAME reference —
+    clear() wiped new_manual too and the override evaporated after one
+    tick. This test flexes 4 consecutive run_iteration calls with a live
+    OFF command and asserts the payload keeps carrying MANUAL_OFF the
+    whole time, then flips to STANDBY exactly once after expiry."""
+    clk = FakeClock(start_ms=0)
+    cfg = main.build_config()
+    config = {"level_enabled": False, "float_enabled": False,
+              "rain_enabled": False, "high_water_enabled": False,
+              "float_active_low": True, "rain_active_low": True,
+              "high_water_active_low": False, "debounce_ms": 2500}
+    ss = sensors.SensorSet(config, {"adc": make_reader(0),
+                                    "float": make_reader(1),
+                                    "rain": make_reader(1),
+                                    "high_water": make_reader(0)}, clk)
+    pc = build_pc(clk)
+    manual = {"action": "OFF", "expires_ms": 3500}  # 3.5s window at clk=0
+    published = []
+    # 4 iterations, each spaced 1s apart — first 4 (t=0..3s) inside window.
+    for _ in range(4):
+        main.run_iteration(ss, pc, None, cfg,
+                           lambda **kw: published.append(kw),
+                           manual_state=manual, clock=clk)
+        clk.advance(1000)
+    # clk=4000 now, past expires_ms=3500 — next iteration MUST see expiry.
+    main.run_iteration(ss, pc, None, cfg,
+                       lambda **kw: published.append(kw),
+                       manual_state=manual, clock=clk)
+    reasons = [p["reason"] for p in published]
+    assert reasons[0:4] == ["MANUAL_OFF"] * 4, f"expected 4 MANUAL_OFF, got {reasons}"
+    assert reasons[4] != "MANUAL_OFF"  # expired -> back to natural
+    assert manual["action"] is None    # slot cleared
+
+
 def test_synthesize_display_level_digital_only_all_dry():
     assert main.synthesize_display_level(
         {"level_pct": None, "high_water": False, "float_dry": True}) == 0.0

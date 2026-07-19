@@ -27,12 +27,14 @@ class FakeMQTTClient:
     settimeout attempt is observable and call order can be asserted.
     """
 
-    def __init__(self, client_id, server, port, user=None, password=None):
+    def __init__(self, client_id, server, port, user=None, password=None,
+                 keepalive=0):
         self.calls = []
         self.sock = FakeSocket(self.calls)
         self.client_id = client_id
         self.server = server
         self.port = port
+        self.keepalive = keepalive
 
     def set_last_will(self, topic, msg, retain=False, qos=0):
         self.calls.append(("set_last_will",))
@@ -42,6 +44,18 @@ class FakeMQTTClient:
 
     def publish(self, topic, msg):
         self.calls.append(("publish",))
+
+    # umqtt.simple callback + subscribe surface for manual pump command
+    # dispatch (edge_pump/mqtt_client.py:_dispatch_incoming path).
+    def set_callback(self, cb):
+        self.calls.append(("set_callback",))
+        self._cb = cb
+
+    def subscribe(self, topic):
+        self.calls.append(("subscribe", topic))
+
+    def check_msg(self):
+        self.calls.append(("check_msg",))
 
 
 class FakeWLAN:

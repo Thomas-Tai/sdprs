@@ -1025,7 +1025,7 @@ function App({ initialError = null }) {
       case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
       case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
-      case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode}/>);
+      case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);
       case 'weather': return wrap(<window.WeatherPage/>);
       case 'handover': return wrap(<window.HandoverPage/>);
       case 'audit': return wrap(<window.AuditPage auditLog={window.AUDIT ?? []}/>);
