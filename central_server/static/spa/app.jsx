@@ -721,7 +721,7 @@ function App({ initialError = null }) {
   const renderPage = () => {
     switch (page) {
       case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy}/>;
-      case 'monitor': return <window.MonitorPage activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
+      case 'monitor': return <window.MonitorPage nodes={nodes} activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
       case 'status': return <window.StatusPage onSelectNode={onSelectNode} onRefresh={refresh}/>;
       case 'pumps': return <window.PumpsPage onSelectNode={onSelectNode}/>;
       case 'weather': return <window.WeatherPage/>;

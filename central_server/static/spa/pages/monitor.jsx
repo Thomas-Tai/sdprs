@@ -108,7 +108,7 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
   );
 };
 
-const MonitorPage = ({ activeAlerts, onSelectNode }) => {
+const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
   // Tab state persisted to sessionStorage so navigating away and back preserves
   // the user's filter choice. sessionStorage (not localStorage) — fresh browser
   // session starts on 'all'. try/catch guards Safari private mode.
@@ -136,8 +136,13 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  // Filter nodes by tab
-  const allNodes = window.NODES;
+  // Audit fix: read from React `nodes` prop (fed by app.jsx setNodes on every
+  // refreshLive tick), NOT `window.NODES` directly. The window mirror is
+  // updated in the same tick but consuming it bypasses the load-bearing
+  // React state contract — any future refactor that updates NODES without
+  // triggering a re-render would silently freeze this page.
+  // Fallback to window.NODES + [] preserves the pre-hydration cold-start path.
+  const allNodes = nodes ?? window.NODES ?? [];
   const cameraNodes = allNodes.filter(n => n.type === 'camera');
   const pumpNodes = allNodes.filter(n => n.type === 'pump');
   const visibleNodes = tab === 'cameras' ? cameraNodes : tab === 'pumps' ? pumpNodes : allNodes;
@@ -148,10 +153,10 @@ const MonitorPage = ({ activeAlerts, onSelectNode }) => {
   });
 
   const summary = {
-    online: window.NODES.filter(n => n.status === 'online').length,
-    warn: window.NODES.filter(n => n.status === 'warn').length,
-    critical: window.NODES.filter(n => n.status === 'critical').length,
-    offline: window.NODES.filter(n => n.status === 'offline').length,
+    online: allNodes.filter(n => n.status === 'online').length,
+    warn: allNodes.filter(n => n.status === 'warn').length,
+    critical: allNodes.filter(n => n.status === 'critical').length,
+    offline: allNodes.filter(n => n.status === 'offline').length,
   };
 
   return (
