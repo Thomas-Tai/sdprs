@@ -43,6 +43,7 @@ class CurrentWeather:
     fetched_at: datetime
     source: str = "SMG"  # "SMG" or "Open-Meteo"
     station_name: str = "外港"  # Station name for display
+    gust_speed_ms: Optional[float] = None  # Wind gust in m/s; None when provider has no gust data
 
 
 @dataclass
@@ -147,6 +148,20 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                 wind_kmh = _get_float('WindSpeed')
                 wind_ms = wind_kmh * 0.27778
 
+                # Wind gust (km/h → m/s). SMG may omit this element entirely
+                # or emit an empty/placeholder value; _get_optional_float returns
+                # None in those cases so the UI shows "—" instead of a fake 0.
+                def _get_optional_float(tag: str) -> Optional[float]:
+                    val = station.findtext(tag)
+                    if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
+                        return None
+                    try:
+                        return float(val) * 0.27778  # km/h → m/s
+                    except (TypeError, ValueError):
+                        return None
+
+                gust_ms = _get_optional_float('WindGust')
+
                 # Rainfall - use Rainfall (hourly) or DailyRainfall
                 rainfall_hourly = _get_float('Rainfall')
 
@@ -161,6 +176,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     fetched_at=datetime.now(timezone.utc),
                     source="SMG",
                     station_name=name,
+                    gust_speed_ms=gust_ms,
                 )
 
         logger.warning(f"SMG XML: station '{station_name}' not found")
@@ -242,7 +258,7 @@ async def _fetch_openmeteo_current(
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation",
+            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation",
             "wind_speed_unit": "ms",
             "timezone": "Asia/Macau",
         }
@@ -259,6 +275,13 @@ async def _fetch_openmeteo_current(
         # For display, we use the hourly value as "24h" since it's the available data
         precip_current = float(cur.get("precipitation", 0) or 0)
 
+        # Wind gusts — Open-Meteo returns wind_gusts_10m in the same unit as
+        # wind_speed_unit (m/s here). May be absent in some response shapes;
+        # treat None / 0 as missing so the UI renders "—" rather than a
+        # deceptive zero during a typhoon.
+        gust_raw = cur.get("wind_gusts_10m")
+        gust_ms = float(gust_raw) if gust_raw is not None else None
+
         return CurrentWeather(
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
@@ -270,6 +293,7 @@ async def _fetch_openmeteo_current(
             fetched_at=datetime.now(timezone.utc),
             source="Open-Meteo",
             station_name=f"{lat:.3f},{lon:.3f}",
+            gust_speed_ms=gust_ms,
         )
     except Exception as e:
         logger.warning(f"Open-Meteo fetch failed: {e}")
