@@ -71,7 +71,7 @@ const StreamRowButton = ({ node, onDone, onError }) => {
   );
 };
 
-const StatusPage = ({ onSelectNode, onRefresh }) => {
+const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
   const [locationFilter, setLocationFilter] = useState_p('all');
@@ -86,15 +86,15 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
   // so a new deployment doesn't need a config change.
   const locations = useMemo_p(() => {
     const set = new Set();
-    window.NODES.forEach(n => { if (n.location) set.add(n.location); });
+    nodes.forEach(n => { if (n.location) set.add(n.location); });
     return ['all', ...Array.from(set)];
-  }, [window.NODES]);
-  const filtered = useMemo_p(() => window.NODES.filter(n => {
+  }, [nodes]);
+  const filtered = useMemo_p(() => nodes.filter(n => {
     if (typeFilter !== 'all' && n.type !== typeFilter) return false;
     if (statusFilter !== 'all' && n.status !== statusFilter) return false;
     if (locationFilter !== 'all' && n.location !== locationFilter) return false;
     return true;
-  }), [typeFilter, statusFilter, locationFilter, window.NODES]);
+  }), [typeFilter, statusFilter, locationFilter, nodes]);
   // Cycle through preset values for the chip dropdowns (real dropdown UI is
   // a bigger design decision — keep the click surface working with cycling).
   const cycleType = () => setTypeFilter(t => t === 'all' ? 'camera' : t === 'camera' ? 'pump' : 'all');
@@ -113,7 +113,7 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
   return (
     <div className="h-full flex flex-col min-h-0">
       {toast && (
-        <div className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
+        <div role="status" aria-live="polite" className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
           toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
             : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
             : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
@@ -123,7 +123,7 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">節點狀態</h1>
         <span className="text-xs text-ink-muted tnum">
-          {filtered.length}{filtered.length !== window.NODES.length && ` / ${window.NODES.length}`} 個節點
+          {filtered.length}{filtered.length !== nodes.length && ` / ${nodes.length}`} 個節點
         </span>
         <div className="flex-1"></div>
         <div className="flex gap-1.5">
