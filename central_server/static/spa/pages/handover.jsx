@@ -180,11 +180,16 @@ const HandoverPage = () => {
   }
 
   const writeGeneratedSummary = () => {
+    // Audit fix: template literals interpolate `undefined` literally when
+    // a shift-summary field is missing (cold-start race, backend hiccup),
+    // producing garbage like "本班次摘要 (undefined)" and "處理警報 undefined 筆"
+    // in the operator's saved note. Normalise every field to '—' first.
+    const d = (v) => (v == null ? '—' : v);
     const lines = [
-      `本班次摘要 (${s.duration})`,
-      `處理警報 ${s.alertsHandled} 筆 — 嚴重 ${s.critical} · 警告 ${s.warn} · 資訊 ${s.info}`,
-      `中位認領時間 ${s.ackMedian} · 中位解決時間 ${s.resolveMedian}`,
-      `仍未解決承接 ${s.carryOver} 筆`,
+      `本班次摘要 (${d(s.duration)})`,
+      `處理警報 ${d(s.alertsHandled)} 筆 — 嚴重 ${d(s.critical)} · 警告 ${d(s.warn)} · 資訊 ${d(s.info)}`,
+      `中位認領時間 ${d(s.ackMedian)} · 中位解決時間 ${d(s.resolveMedian)}`,
+      `仍未解決承接 ${d(s.carryOver)} 筆`,
     ];
     if (s.highlights && s.highlights.length) {
       lines.push('', '主要事件:');
