@@ -1,6 +1,6 @@
 // Shared UI components
 
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // ---------- Safe meta lookups ----------
 // Backend can send severities / states / detector-health values the UI has not
@@ -31,6 +31,13 @@ const safeDetectorHealthMeta = (v) => {
 window.safeSevMeta = safeSevMeta;
 window.safeStateMeta = safeStateMeta;
 window.safeDetectorHealthMeta = safeDetectorHealthMeta;
+
+// ---------- LiveClockContext ----------
+// Shared context for the 1-second drift timer. LiveClockProvider (app.jsx)
+// owns the state; StatusStrip and DriftMeter are the only consumers. This
+// prevents the entire App tree from re-rendering every second.
+const LiveClockContext = React.createContext({ liveSec: 0, resetClock: () => {} });
+window.LiveClockContext = LiveClockContext;
 
 // ---------- AudioController — synthetic-tone alert audio ----------
 // Zero external assets: uses the Web Audio API to generate oscillator tones.
@@ -80,6 +87,13 @@ const AudioController = (() => {
     osc.stop(start + dur + 0.05);
   };
 
+  // Beep-overlap guard: rapid playCritical/playWarning calls (e.g. two
+  // unacked alerts arriving within a second) stack oscillators on top of
+  // each other and produce ugly distortion. Track the last fire time per
+  // category and skip if the previous sequence hasn't finished playing.
+  let lastCriticalTime = 0;
+  let lastWarningTime = 0;
+
   const api = {
     arm: () => {
       if (armed) return;
@@ -89,8 +103,18 @@ const AudioController = (() => {
       notify();
     },
     isArmed: () => armed,
-    playCritical: () => { beep(880, 0.25); beep(660, 0.25, 'sine', 0.30); beep(880, 0.40, 'sine', 0.60); },
-    playWarning:  () => { beep(660, 0.20); beep(880, 0.30, 'sine', 0.25); },
+    playCritical: () => {
+      const now = Date.now();
+      if (now - lastCriticalTime < 1000) return;
+      lastCriticalTime = now;
+      beep(880, 0.25); beep(660, 0.25, 'sine', 0.30); beep(880, 0.40, 'sine', 0.60);
+    },
+    playWarning: () => {
+      const now = Date.now();
+      if (now - lastWarningTime < 600) return;
+      lastWarningTime = now;
+      beep(660, 0.20); beep(880, 0.30, 'sine', 0.25);
+    },
     playAck:      () => { beep(1200, 0.10, 'triangle'); },
     playTest: (severity) => {
       if (severity === 'critical') return api.playCritical();
@@ -129,9 +153,9 @@ window.SDPRS_AUDIO = AudioController;
 
 // ---------- Atoms ----------
 
-const Kbd = ({ children }) => <kbd className="kbd noselect">{children}</kbd>;
+const Kbd = React.memo(({ children }) => <kbd className="kbd noselect">{children}</kbd>);
 
-const SeverityBadge = ({ sev, withLabel = true, size = 'sm' }) => {
+const SeverityBadge = React.memo(({ sev, withLabel = true, size = 'sm' }) => {
   const m = safeSevMeta(sev);
   const Ico = m.Icon;
   const sz = size === 'md' ? 'text-sm px-2 py-0.5' : 'text-[10px] px-1.5 py-0.5';
@@ -141,18 +165,18 @@ const SeverityBadge = ({ sev, withLabel = true, size = 'sm' }) => {
       {withLabel && <span>{m.label}</span>}
     </span>
   );
-};
+}, (prev, next) => prev.sev === next.sev && prev.withLabel === next.withLabel && prev.size === next.size);
 
-const StateBadge = ({ state }) => {
+const StateBadge = React.memo(({ state }) => {
   const m = safeStateMeta(state);
   return <span className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border font-medium ${m.cls}`}>{m.label}</span>;
-};
+}, (prev, next) => prev.state === next.state);
 
-const AgeCell = ({ sec }) => (
+const AgeCell = React.memo(({ sec }) => (
   <span className={`font-mono text-xs tnum ${window.ageColor(sec)}`}>{window.fmtAge(sec)}</span>
-);
+), (prev, next) => prev.sec === next.sec);
 
-const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
+const Pill = React.memo(({ tone = 'neutral', children, dot, pulse, className = '' }) => {
   const tones = {
     neutral: 'bg-surface-elevated text-ink-secondary border-border-strong',
     critical: 'bg-sev-critical/15 text-sev-critical border-sev-critical/40',
@@ -174,7 +198,7 @@ const Pill = ({ tone = 'neutral', children, dot, pulse, className = '' }) => {
       {children}
     </span>
   );
-};
+}, (prev, next) => prev.tone === next.tone && prev.children === next.children && prev.dot === next.dot && prev.pulse === next.pulse && prev.className === next.className);
 
 // ---------- SnapshotImage — live camera frame or icon fallback ----------
 // Used by NodeCard tile (pages/monitor.jsx), the big monitor wall (app.jsx), and
@@ -226,7 +250,7 @@ const DetectorHealth = ({ node }) => {
 
 // ---------- Drift Meter — segmented dot rail for live connection ----------
 
-const DriftMeter = ({ sec, max = 30 }) => {
+const DriftMeter = React.memo(({ sec, max = 30 }) => {
   const n = 15;
   const lit = Math.min(n, Math.ceil((sec / max) * n));
   const color = sec < 10 ? '#10B981' : sec < 20 ? '#F59E0B' : '#DC2626';
@@ -240,15 +264,49 @@ const DriftMeter = ({ sec, max = 30 }) => {
       ))}
     </span>
   );
-};
+}, (prev, next) => prev.sec === next.sec && prev.max === next.max);
 
 // ---------- Status Strip ----------
 
-const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
+const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
+  const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
   const liveLabel = liveSec < 10 ? `Live · ${liveSec}s` : liveSec < 30 ? `Reconnecting… ${liveSec}s` : `Disconnected ${liveSec}s`;
   const tones = { ok: 'bg-sev-ok/15 text-sev-ok border-sev-ok/40', warn: 'bg-sev-warn/15 text-sev-warn border-sev-warn/40', critical: 'bg-sev-critical/15 text-sev-critical border-sev-critical/40' };
   const activeMutes = (muted ? 1 : 0) + (muteState?.nodes?.length || 0) + (muteState?.lightning ? 1 : 0);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const logoutDialogRef = useRef(null);
+  const logoutTriggerRef = useRef(null);
+
+  // Focus trap for logout confirmation dialog. Captures the trigger element
+  // on open so focus can be restored on close. Traps Tab/Shift+Tab within
+  // the dialog's focusable elements.
+  useEffect(() => {
+    if (!logoutConfirmOpen) return;
+    logoutTriggerRef.current = document.activeElement;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Tab' && logoutDialogRef.current) {
+        const focusable = logoutDialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (logoutTriggerRef.current && typeof logoutTriggerRef.current.focus === 'function') {
+        try { logoutTriggerRef.current.focus(); } catch (_) {}
+      }
+    };
+  }, [logoutConfirmOpen]);
 
   // Reactive audio-armed state — flips true after the first user gesture
   // anywhere on the page (see AudioController's one-shot listener). The
@@ -413,7 +471,7 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
           {activeMutes > 0 && <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sev-warn text-[9px] font-bold text-black flex items-center justify-center tnum">{activeMutes}</span>}
         </button>
         <div className="w-px h-6 bg-border-subtle mx-1"></div>
-        <button onClick={() => { if (confirm('登出?')) window.location.href = '/logout'; }} className="flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
+        <button onClick={() => setLogoutConfirmOpen(true)} className="flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
           <div className="w-6 h-6 rounded-full bg-gradient-to-br from-sev-info to-purple-500 flex items-center justify-center text-[10px] font-semibold text-white">
             {(window.SDPRS_USER || '?').slice(0, 2).toUpperCase()}
           </div>
@@ -424,9 +482,20 @@ const StatusStrip = ({ liveSec, unackCount, muted, setMuted, theme, setTheme, on
           <Icon.ChevronDown size={12} className="text-ink-muted"/>
         </button>
       </div>
+      {logoutConfirmOpen && (
+        <div ref={logoutDialogRef} role="dialog" aria-modal="true" aria-label="確認登出" className="fixed inset-0 z-[110] bg-black/60 flex items-center justify-center p-4" onClick={() => setLogoutConfirmOpen(false)}>
+          <div className="bg-surface-elevated border border-border-strong rounded-lg p-5 max-w-xs w-full shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="text-sm font-semibold text-ink-primary mb-3">確定要登出嗎？</div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setLogoutConfirmOpen(false)} className="px-3 h-8 rounded text-sm text-ink-secondary hover:bg-surface-overlay">取消</button>
+              <button onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-};
+});
 
 // ---------- Nav Rail ----------
 
@@ -440,13 +509,64 @@ const NAV_ITEMS = [
   { id: 'audit',    label: '稽核',     hotkey: '7', Icon: Icon.FileSearch },
 ];
 
-const NavRail = ({ page, setPage, density, setDensity, unackCount, offlineCount }) => {
-  // TODO(dashboard-audit-2026-07-15): mobile nav drawer — currently the rail
-  // just hides on <md. app.jsx <main> should mirror this (ml-0 md:ml-56) and
-  // add a hamburger toggle that slides this nav in. Layout-only fix here so
-  // portrait mobile doesn't crush the content underneath.
-  return (
-    <nav className="hidden md:flex w-56 fixed left-0 top-12 bottom-10 bg-surface-panel border-r border-border-subtle flex-col noselect">
+const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, offlineCount }) => {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const drawerRef = useRef(null);
+  const hamburgerRef = useRef(null);
+  // Element that had focus before the drawer opened; restored on close so
+  // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
+  const lastFocusedRef = useRef(null);
+
+  const closeDrawer = () => setMobileNavOpen(false);
+
+  // Navigate and close drawer on nav item click.
+  const handleNavClick = (id) => {
+    setPage(id);
+    setMobileNavOpen(false);
+  };
+
+  // Focus trap + Escape + focus restore. On open, capture the currently-focused
+  // element then move focus into the drawer. On close, restore focus. Tab and
+  // Shift+Tab are trapped within the drawer's focusable elements.
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
+    // Focus the first nav button inside the drawer after the slide-in begins.
+    const focusTimer = setTimeout(() => {
+      const firstBtn = drawerRef.current && drawerRef.current.querySelector('button');
+      if (firstBtn) { try { firstBtn.focus(); } catch (_) {} }
+    }, 50);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { closeDrawer(); return; }
+      if (e.key === 'Tab' && drawerRef.current) {
+        const focusable = drawerRef.current.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+        } else {
+          if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(focusTimer);
+      window.removeEventListener('keydown', onKey);
+      const el = lastFocusedRef.current;
+      lastFocusedRef.current = null;
+      if (el && typeof el.focus === 'function') {
+        try { el.focus(); } catch (_) {}
+      }
+    };
+  }, [mobileNavOpen]);
+
+  // Shared nav content rendered inside both the desktop rail and mobile drawer.
+  const navContent = (
+    <>
       <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-ink-muted font-semibold">操作站</div>
       <div className="flex-1 px-2 space-y-0.5 overflow-y-auto scroll-thin">
         {NAV_ITEMS.map(item => {
@@ -456,7 +576,7 @@ const NavRail = ({ page, setPage, density, setDensity, unackCount, offlineCount 
           return (
             <button
               key={item.id}
-              onClick={() => setPage(item.id)}
+              onClick={() => handleNavClick(item.id)}
               className={`w-full flex items-center gap-2.5 h-9 px-2.5 rounded text-sm transition-colors group relative ${active ? 'bg-surface-elevated text-ink-primary' : 'text-ink-secondary hover:bg-surface-elevated/60 hover:text-ink-primary'}`}
             >
               {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-sev-info rounded-r"></span>}
@@ -486,13 +606,57 @@ const NavRail = ({ page, setPage, density, setDensity, unackCount, offlineCount 
           <span className="text-sev-ok">●</span>
         </div>
       </div>
-    </nav>
+    </>
   );
-};
+
+  return (
+    <>
+      {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
+      <button
+        ref={hamburgerRef}
+        type="button"
+        onClick={() => setMobileNavOpen(v => !v)}
+        aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
+        aria-expanded={mobileNavOpen}
+        className="md:hidden fixed top-1.5 left-2 z-[60] w-9 h-9 rounded bg-surface-elevated border border-border-subtle text-ink-primary text-lg leading-none flex items-center justify-center hover:bg-surface-overlay"
+      >
+        {mobileNavOpen ? '✕' : '☰'}
+      </button>
+
+      {/* Mobile backdrop — semi-transparent overlay, click to dismiss */}
+      {mobileNavOpen && (
+        <div
+          className="md:hidden fixed inset-0 z-40 bg-black/50"
+          onClick={closeDrawer}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Mobile slide-out drawer — always rendered, off-screen when closed so
+          the CSS transition can animate the slide-in. aria-hidden when closed
+          prevents screen readers from reading the off-screen content. */}
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal={mobileNavOpen}
+        aria-label="導覽選單"
+        aria-hidden={!mobileNavOpen}
+        className={`md:hidden fixed left-0 top-12 bottom-10 w-56 z-50 bg-surface-panel border-r border-border-subtle flex flex-col noselect transform transition-transform duration-300 ease-in-out ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      >
+        {navContent}
+      </div>
+
+      {/* Desktop nav rail */}
+      <nav className="hidden md:flex w-56 fixed left-0 top-12 bottom-10 bg-surface-panel border-r border-border-subtle flex-col noselect">
+        {navContent}
+      </nav>
+    </>
+  );
+});
 
 // ---------- Footer ----------
 
-const Sparkline = ({ data, width = 240, height = 28 }) => {
+const Sparkline = React.memo(({ data, width = 240, height = 28 }) => {
   if (!Array.isArray(data) || data.length === 0) {
     return (
       <div className="flex items-center justify-center h-7 text-[10px] text-ink-muted font-mono tnum" style={{ width, height }}>
@@ -515,9 +679,9 @@ const Sparkline = ({ data, width = 240, height = 28 }) => {
       })}
     </div>
   );
-};
+}, (prev, next) => prev.data === next.data && prev.width === next.width && prev.height === next.height);
 
-const Footer = ({ data, handover }) => {
+const Footer = React.memo(({ data, handover }) => {
   const arr = Array.isArray(data) && data.length ? data : [0];
   const avg = arr.reduce((a,b)=>a+b,0) / arr.length;
   const cur = arr[arr.length-1];
@@ -558,7 +722,7 @@ const Footer = ({ data, handover }) => {
       </div>
     </div>
   );
-};
+});
 
 // ---------- Shortcuts Modal ----------
 
@@ -568,26 +732,46 @@ const SHORTCUTS = [
   { keys: ['A'], label: '認領並前往下一筆', cat: '警報處置' },
   { keys: ['Shift','A'], label: '認領但停留', cat: '警報處置' },
   { keys: ['R'], label: '解決選取的警報', cat: '警報處置' },
-  { keys: ['S'], label: '延期所選節點', cat: '警報處置' },
   { keys: ['N'], label: '跳至下一筆未認領', cat: '警報處置' },
   { keys: ['1','...','6'], label: '套用解決模板', cat: '警報處置' },
   { keys: ['M'], label: '開啟音效抑制面板', cat: '全域' },
   { keys: ['T'], label: '切換主題', cat: '全域' },
   { keys: ['Shift','D'], label: '切換密度', cat: '全域' },
-  { keys: ['F'], label: '切換全螢幕 (監看牆)', cat: '監看' },
   { keys: ['Esc'], label: '關閉詳情/對話框', cat: '全域' },
   { keys: ['↑','↓'], label: '上下移動列表', cat: '警報處置' },
-  { keys: ['Enter'], label: '開啟所選列詳情', cat: '警報處置' },
   { keys: ['?'], label: '顯示此說明', cat: '全域' },
 ];
 
 const ShortcutsModal = ({ open, onClose }) => {
   const [q, setQ] = useState('');
+  const dialogRef = useRef(null);
+  const lastFocusedRef = useRef(null);
   React.useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    lastFocusedRef.current = document.activeElement;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = dialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (lastFocusedRef.current && typeof lastFocusedRef.current.focus === 'function') {
+        try { lastFocusedRef.current.focus(); } catch (_) {}
+      }
+    };
   }, [open, onClose]);
   if (!open) return null;
   const matches = SHORTCUTS.filter(s =>
@@ -597,6 +781,7 @@ const ShortcutsModal = ({ open, onClose }) => {
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="鍵盤捷徑"
@@ -614,6 +799,7 @@ const ShortcutsModal = ({ open, onClose }) => {
               autoFocus
               value={q} onChange={e => setQ(e.target.value)}
               placeholder="搜尋捷徑或動作..."
+              aria-label="搜尋快捷鍵"
               className="w-full h-9 pl-8 pr-3 bg-surface-base border border-border-subtle rounded text-sm placeholder-ink-muted focus:border-sev-info focus:outline-none"
             />
           </div>
@@ -685,12 +871,8 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     };
   }, [open, onClose]);
   if (!open) return null;
-  // Prefer prop-supplied nodes (React state from caller — always fresh); fall
-  // back to window.NODES only if the caller didn't wire it up. Callers should
-  // pass `nodes={nodes}` from useState so refreshes reach the drawer.
-  // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
-  // call site (app.jsx / pages/*) passes the `nodes` prop.
-  const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
+  // Use prop-supplied nodes (React state from caller — always fresh).
+  const nodeList = Array.isArray(nodes) ? nodes : [];
   const activeCount = (muteState.global ? 1 : 0) + muteState.nodes.length + (muteState.lightning ? 1 : 0);
   const nearestKm = window.WEATHER?.lightning?.nearest;
   // Test buttons: actually play a synthetic tone via AudioController AND keep
@@ -720,7 +902,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     }
     try {
       await window.SDPRS_API.unsnoozeNode(nid);
-      setMuteState({ ...muteState, nodes: muteState.nodes.filter(x => x !== nid) });
+      setMuteState(prev => ({ ...prev, nodes: prev.nodes.filter(x => x !== nid) }));
     } catch (err) {
       console.error('unsnooze failed', err);
       setUnsnoozeErr({ nid, msg: '伺服器解除失敗，請重試' });
@@ -735,12 +917,24 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     const targets = [...muteState.nodes];
     if (window.SDPRS_API && typeof window.SDPRS_API.unsnoozeNode === 'function' && targets.length > 0) {
       const results = await Promise.allSettled(targets.map(nid => window.SDPRS_API.unsnoozeNode(nid)));
-      const failed = results.map((r, i) => r.status === 'rejected' ? targets[i] : null).filter(Boolean);
-      if (failed.length > 0) {
-        setUnsnoozeErr({ nid: null, msg: `${failed.length} 個節點解除失敗: ${failed.join(', ')}` });
+      // Only remove nodes whose API call actually succeeded — a blanket
+      // clear on partial failure silently drops still-snoozed nodes from
+      // the UI until the next 20s poll re-surfaces them (operator thinks
+      // "解除" worked when it didn't).
+      const succeededNodes = targets.filter((nodeId, index) =>
+        results[index].status === 'fulfilled'
+      );
+      const failedCount = results.filter(r => r.status === 'rejected').length;
+      setMuteState(prev => ({
+        ...prev,
+        nodes: prev.nodes.filter(nodeId => !succeededNodes.includes(nodeId))
+      }));
+      if (failedCount > 0) {
+        setUnsnoozeErr({ nid: null, msg: `${failedCount} 個節點解除失敗` });
       }
+    } else {
+      setMuteState(prev => ({ ...prev, nodes: [] }));
     }
-    setMuteState({ ...muteState, nodes: [] });
   };
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
@@ -772,7 +966,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
               <VolumeSlider
                 value={muteState.volume ?? 70}
                 onChange={(v) => {
-                  setMuteState({ ...muteState, volume: v });
+                  setMuteState(prev => ({ ...prev, volume: v }));
                   if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setVolume(v); } catch (_) {} }
                 }}
               />
@@ -812,7 +1006,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
               <button
                 onClick={() => {
                   const next = !muteState.global;
-                  setMuteState({ ...muteState, global: next });
+                  setMuteState(prev => ({ ...prev, global: next }));
                   if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setMuted(next); } catch (_) {} }
                 }}
                 className={`px-2.5 h-6 rounded text-xs font-medium ${muteState.global ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
@@ -895,7 +1089,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                 )}
               </div>
               <button
-                onClick={() => setMuteState({ ...muteState, lightning: !muteState.lightning })}
+                onClick={() => setMuteState(prev => ({ ...prev, lightning: !prev.lightning }))}
                 className={`px-2.5 h-6 rounded text-xs font-medium ${muteState.lightning ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
               >
                 {muteState.lightning ? '啟用' : '停用'}
@@ -1034,14 +1228,12 @@ const NewAlertBanner = ({ count, onClick }) => {
 const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
   const s = shiftSummary || {};
   const operator = s.operator ?? window.SDPRS_USER ?? '—';
-  // Field-name flex: try the audit-suggested names first, then the current
-  // window.SHIFT_SUMMARY shape (alertsHandled/carryOver/highlights) from
-  // data.jsx, then '—'. Prevents blanks if backend renames fields.
-  // Audit fix: `snoozed` previously fell back to `s.warn` (a warning-alert
-  // count) which rendered "N snoozed" when zero nodes were snoozed. Falling
-  // back to '—' preserves the "unknown" signal instead of lying with a
-  // semantically-unrelated number.
-  const carryOver = s.carryOver ?? s.handled ?? s.alertsHandled ?? '—';
+  // Field-name flex: try the audit-suggested name first, then fall back to
+  // '—'. Previously fell back to s.handled / s.alertsHandled (total resolved
+  // count) which is semantically wrong — carryOver means "still unresolved",
+  // so substituting the handled count tells the operator the opposite of
+  // reality (audit fix).
+  const carryOver = s.carryOver ?? '—';
   const snoozed   = s.snoozed   ?? '—';
   // Same audit fix: `pending` (unhandled-new count) is not `s.critical`
   // (critical-severity count) — dropping the semantically-wrong fallback.
@@ -1081,14 +1273,9 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
           </div>
           <p className="text-ink-secondary leading-relaxed">{recent}</p>
         </div>
-        {/* TODO(dashboard-audit-2026-07-15): needs handover-history route.
-            When app.jsx wires onViewHandover (e.g. setPage('handover')),
-            this button becomes live. Until then it renders disabled. */}
         <button
-          onClick={onViewHandover || undefined}
-          disabled={!onViewHandover}
-          title={onViewHandover ? undefined : '尚未實作'}
-          className="w-full h-8 bg-sev-info text-white rounded text-xs font-semibold hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={onViewHandover ?? (() => {})}
+          className="w-full h-8 bg-sev-info text-white rounded text-xs font-semibold hover:bg-blue-600"
         >
           檢視完整交接紀錄 →
         </button>
@@ -1103,26 +1290,45 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
   const paletteRef = useRef(null);
+  const lastFocusedRef = useRef(null);
 
   React.useEffect(() => {
     if (open) { setQ(''); setHi(0); }
   }, [open]);
 
-  // Escape closes; focus handled by <input autoFocus/>.
+  // Escape closes + focus trap + focus restore on close.
   React.useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    lastFocusedRef.current = document.activeElement;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Tab' && paletteRef.current) {
+        const focusable = paletteRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (lastFocusedRef.current && typeof lastFocusedRef.current.focus === 'function') {
+        try { lastFocusedRef.current.focus(); } catch (_) {}
+      }
+    };
   }, [open, onClose]);
 
   if (!open) return null;
 
-  // Prefer React-state nodes from the caller; window.NODES is a stale-read
-  // fallback for legacy call sites.
-  // TODO(dashboard-audit-2026-07-15): remove window.NODES fallback once every
-  // call site (app.jsx / pages/*) passes the `nodes` prop.
-  const nodeList = Array.isArray(nodes) ? nodes : (window.NODES || []);
+  // Use React-state nodes from the caller.
+  const nodeList = Array.isArray(nodes) ? nodes : [];
 
   // Build searchable items
   const items = [
@@ -1172,6 +1378,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
             onChange={e => { setQ(e.target.value); setHi(0); }}
             onKeyDown={onKey}
             placeholder="輸入頁面、警報 ID、節點、指令... (↑↓ 選擇 · Enter 開啟)"
+            aria-label="搜尋指令、警報和頁面"
             className="flex-1 h-11 px-3 bg-transparent text-sm placeholder-ink-muted focus:outline-none"
             role="combobox"
             aria-expanded="true"
@@ -1510,19 +1717,9 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
 // ---------- Volume Slider (for MuteDrawer) ----------
 
 const VolumeSlider = ({ value, onChange, onVolumeChange }) => {
-  // TODO(dashboard-audit-2026-07-15): wire onVolumeChange to audio player
-  // in app.jsx. Right now this only calls Howler.volume() if the global is
-  // present, and fires an optional onVolumeChange prop for the parent to
-  // route to its <audio> element. Without one, the slider is a placebo:
-  // muteState.volume is written but never read by any player.
   const emit = (v) => {
     onChange && onChange(v);
     onVolumeChange && onVolumeChange(v);
-    // Optional: if the page bundles Howler for alert audio, drive it directly
-    // so the slider works even before app.jsx wires the prop.
-    if (window.Howler && typeof window.Howler.volume === 'function') {
-      try { window.Howler.volume(Math.max(0, Math.min(1, v / 100))); } catch (_) {}
-    }
   };
   return (
     <div className="flex items-center gap-2">
