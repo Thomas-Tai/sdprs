@@ -73,10 +73,15 @@ const PumpsPage = ({ onSelectNode }) => {
               )}
 
               {/* Water level visualization */}
-              <div className={`relative h-32 bg-surface-base border rounded overflow-hidden ${isNoTelemetry ? 'border-dashed border-sev-warn/40' : 'border-border-subtle'}`}>
-                {!isNoTelemetry && (
-                  <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${isOffline ? 'bg-sev-stale/30' : isCritical ? 'bg-sev-critical/40' : isWarn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
-                    <div className={`h-1 ${isOffline ? 'bg-sev-stale' : isCritical ? 'bg-sev-critical' : isWarn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
+              {/* Audit fix: offline cards previously rendered the last-known
+                  `p.level` (potentially days stale) with stale-tone color +
+                  fill. Treat offline the same as isNoTelemetry — dashed
+                  border + em-dash + no fill — so a stale number never reads
+                  as a live measurement. Only ok/warn/critical draw a fill. */}
+              <div className={`relative h-32 bg-surface-base border rounded overflow-hidden ${(isOffline || isNoTelemetry) ? 'border-dashed border-sev-warn/40' : 'border-border-subtle'}`}>
+                {!(isOffline || isNoTelemetry) && p.level != null && (
+                  <div className={`absolute inset-x-0 bottom-0 transition-all duration-500 ${isCritical ? 'bg-sev-critical/40' : isWarn ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: p.level + '%' }}>
+                    <div className={`h-1 ${isCritical ? 'bg-sev-critical' : isWarn ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
                   </div>
                 )}
                 {/* Threshold markers */}
@@ -90,7 +95,7 @@ const PumpsPage = ({ onSelectNode }) => {
                 </div>
                 {/* Center value */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <span className={`text-4xl font-mono font-bold tnum ${isOffline ? 'text-sev-stale' : isNoTelemetry ? 'text-sev-warn' : isCritical ? 'text-sev-critical' : isWarn ? 'text-sev-warn' : 'text-ink-primary'}`}>{isNoTelemetry ? '—' : <>{p.level}<span className="text-base text-ink-muted">%</span></>}</span>
+                  <span className={`text-4xl font-mono font-bold tnum ${isOffline ? 'text-sev-stale' : isNoTelemetry ? 'text-sev-warn' : isCritical ? 'text-sev-critical' : isWarn ? 'text-sev-warn' : 'text-ink-primary'}`}>{(isOffline || isNoTelemetry) ? '—' : <>{p.level}<span className="text-base text-ink-muted">%</span></>}</span>
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-2 mt-3 text-xs font-mono tnum">
