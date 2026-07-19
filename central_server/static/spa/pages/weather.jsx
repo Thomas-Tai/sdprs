@@ -67,17 +67,30 @@ const WeatherSettings = ({ onSaved, showToast }) => {
       // If it fails (503 / network), we still call onRefresh so the SPA
       // reflects whatever the server currently has cached — degrades to
       // "changes visible on next tick" rather than blocking the save.
+      // We track the outcome so the toast doesn't lie: on refresh failure
+      // the config IS in the DB but tiles won't show it until the next
+      // scheduled tick (up to WEATHER_REFRESH_SECONDS later).
+      let refreshOk = true;
       try {
         await window.SDPRS_API.refreshWeather();
       } catch (refreshErr) {
-        // Non-fatal — the config IS saved and will apply on next tick.
-        // Log so operators can grep browser console if they suspect a
-        // stale-cache issue after a save.
+        refreshOk = false;
         console.warn('[weather] refresh-after-save failed:', refreshErr);
       }
-      // Now fetch the freshly-cached data.
+      // Now fetch the freshly-cached data (or the still-stale cache if
+      // the refresh above failed — SPA will show the latest server state
+      // either way).
       onSaved && onSaved();
-      showToast && showToast('天氣設定已儲存並套用', 'info');
+      if (refreshOk) {
+        showToast && showToast('天氣設定已儲存並套用', 'info');
+      } else {
+        // Honest: save succeeded but immediate re-tick didn't. Operator
+        // needs to know they won't see the new source labels until the
+        // scheduled tick fires (up to 10 minutes).
+        showToast && showToast(
+          '設定已儲存，但即時重刷失敗 · 下次自動更新（最多 10 分鐘）後套用',
+          'warn');
+      }
     } catch (e) {
       showToast && showToast('儲存失敗：' + (e && e.message ? e.message : '未知錯誤'), 'warn');
     } finally {
