@@ -31,6 +31,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+to_native() {
+    local p="$1"
+    if command -v cygpath >/dev/null 2>&1 && [[ -n "$p" ]]; then
+        cygpath -w "$p"
+    else
+        printf '%s\n' "$p"
+    fi
+}
+
 usage() {
     sed -n '2,22p' "$0" | sed 's/^# \?//'
 }
@@ -153,7 +162,7 @@ if [[ $SKIP_FLASH -eq 0 ]]; then
 
     echo -e "${BLUE}[Step 4/6] 刷寫 MicroPython 韌體（這可能需要 30-60 秒）...${NC}"
     $esptool_cmd --port "$SERIAL_PORT" erase_flash
-    $esptool_cmd --chip esp32 --port "$SERIAL_PORT" --baud 460800 write_flash -z -fm dio 0x1000 "$FIRMWARE_FILE"
+    $esptool_cmd --chip esp32 --port "$SERIAL_PORT" --baud 460800 write_flash -z -fm dio 0x1000 "$(to_native "$FIRMWARE_FILE")"
     echo -e "${GREEN}✓ MicroPython 已刷寫${NC}"
     sleep 2
 else
@@ -166,7 +175,7 @@ if [[ $SKIP_CONFIG -eq 0 ]]; then
     TMP_CONFIG="$(mktemp)"
     trap 'rm -f "$TMP_CONFIG"' EXIT
 
-    python3 - "$PUMP_DIR" "$WIFI_SSID" "$WIFI_PASS" "$MQTT_BROKER" \
+    PYTHONIOENCODING=utf-8 python3 - "$(to_native "$PUMP_DIR")" "$WIFI_SSID" "$WIFI_PASS" "$MQTT_BROKER" \
         "$MQTT_PORT" "$MQTT_USERNAME" "$MQTT_PASSWORD" "$NODE_ID" \
         > "$TMP_CONFIG" <<'PYEOF'
 import os, re, sys
@@ -196,13 +205,13 @@ fi
 echo -e "${BLUE}[Step 6/6] 上傳水泵控制程式...${NC}"
 
 # config.py 先上傳（其他模組 import 它），boot.py 最後（避免半成品開機）
-mpremote connect "$SERIAL_PORT" cp "$TMP_CONFIG" :config.py
+mpremote connect "$SERIAL_PORT" cp "$(to_native "$TMP_CONFIG")" :config.py
 echo "  ✓ config.py"
 
 for file in main.py control_logic.py sensors.py pump_controller.py mqtt_client.py boot.py; do
     src="$PUMP_DIR/$file"
     if [[ -f "$src" ]]; then
-        mpremote connect "$SERIAL_PORT" cp "$src" :"$file"
+        mpremote connect "$SERIAL_PORT" cp "$(to_native "$src")" :"$file"
         echo "  ✓ $file"
     else
         echo -e "${YELLOW}  ! 檔案不存在: $src${NC}"
