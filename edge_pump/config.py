@@ -47,7 +47,11 @@ BATTERY_ADC_PIN = None    # 電池電壓 ADC 輸入（接線後改為 35，ADC1_
 POWER_SOURCE_PIN = None   # 電源來源檢測 GPIO（接線後改為 21；高電位 = 外接電源/UPS；低電位 = 電池）
 
 # ============ 時間間隔 ============
-PUBLISH_INTERVAL = 10   # MQTT 發布間隔（秒）
+# PUBLISH_INTERVAL lowered from 10→2 (2026-07-19) so the dashboard reacts
+# within ~2s of a sensor state change instead of feeling like it lags on the
+# 20s SPA safety-net poll cadence. One node at 2s ≈ 30 msgs/min, well
+# below the broker throughput used by the glass fleet's heartbeats.
+PUBLISH_INTERVAL = 2    # MQTT 發布間隔（秒）
 POLL_INTERVAL = 1       # 水位讀取間隔（秒）
 WIFI_RETRY_INTERVAL = 60  # WiFi 重連間隔（秒）
 WIFI_CONNECT_TIMEOUT = 15  # 單次 WiFi 連線等待（秒）— 由 mqtt_client._wait_wifi 使用
