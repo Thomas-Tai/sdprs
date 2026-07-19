@@ -1026,7 +1026,7 @@ function App({ initialError = null }) {
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
       case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
       case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);
-      case 'weather': return wrap(<window.WeatherPage/>);
+      case 'weather': return wrap(<window.WeatherPage showToast={showToast} onRefresh={refresh}/>);
       case 'handover': return wrap(<window.HandoverPage/>);
       case 'audit': return wrap(<window.AuditPage auditLog={window.AUDIT ?? []}/>);
       default: return null;

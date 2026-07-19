@@ -1,5 +1,185 @@
 // SDPRS — Weather Page
 
+const { useState: useState_w, useEffect: useEffect_w } = React;
+
+// Option C settings pane (2026-07-19). Expandable ⚙️ panel above the
+// hero tiles that lets operators pick the SMG station, HKO station,
+// fallback provider, and site lat/lon that feed the multi-source merge.
+// Fetches station lists on expand (not on mount) — the SMG/HKO
+// enumeration endpoints hit their upstreams live, so we avoid the
+// extra HTTPs until the operator actually clicks to configure.
+const WeatherSettings = ({ onSaved, showToast }) => {
+  const [open, setOpen] = useState_w(false);
+  const [loading, setLoading] = useState_w(false);
+  const [saving, setSaving] = useState_w(false);
+  const [config, setConfig] = useState_w({
+    site_lat: null, site_lon: null,
+    smg_station: '', hko_station: '', fallback_provider: 'both',
+  });
+  const [smgList, setSmgList] = useState_w([]);
+  const [hkoList, setHkoList] = useState_w([]);
+  const [loadError, setLoadError] = useState_w(null);
+
+  useEffect_w(() => {
+    if (!open) return;
+    // Only fetch once per expand — the lists rarely change hour-to-hour.
+    if (smgList.length > 0 || hkoList.length > 0) return;
+    setLoading(true);
+    setLoadError(null);
+    Promise.all([
+      window.SDPRS_API.getWeatherConfig().catch(() => ({})),
+      window.SDPRS_API.listSmgStations().catch(() => ({ stations: [] })),
+      window.SDPRS_API.listHkoStations().catch(() => ({ stations: [] })),
+    ]).then(([cfg, smgResp, hkoResp]) => {
+      setConfig({
+        site_lat: cfg.site_lat != null ? cfg.site_lat : null,
+        site_lon: cfg.site_lon != null ? cfg.site_lon : null,
+        smg_station: cfg.smg_station || '',
+        hko_station: cfg.hko_station || '',
+        fallback_provider: cfg.fallback_provider || 'both',
+      });
+      setSmgList(smgResp.stations || []);
+      setHkoList(hkoResp.stations || []);
+      if ((smgResp.stations || []).length === 0 && (hkoResp.stations || []).length === 0) {
+        setLoadError('無法載入測站清單（上游服務可能不可用）');
+      }
+    }).finally(() => setLoading(false));
+  }, [open, smgList.length, hkoList.length]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const payload = {
+        site_lat: config.site_lat != null && config.site_lat !== '' ? Number(config.site_lat) : null,
+        site_lon: config.site_lon != null && config.site_lon !== '' ? Number(config.site_lon) : null,
+        smg_station: config.smg_station || null,
+        hko_station: config.hko_station || null,
+        fallback_provider: config.fallback_provider || null,
+      };
+      await window.SDPRS_API.setWeatherConfig(payload);
+      showToast && showToast('天氣設定已儲存 · 下一次更新（~10 秒）生效', 'info');
+      onSaved && onSaved();
+    } catch (e) {
+      showToast && showToast('儲存失敗：' + (e && e.message ? e.message : '未知錯誤'), 'warn');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls = 'text-xs bg-surface-base border border-border-subtle rounded px-2 py-1 font-mono';
+  return (
+    <div className="border-b border-border-subtle bg-surface-panel/40">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full px-6 py-2 text-left text-xs text-ink-muted hover:text-ink-primary flex items-center gap-2 transition-colors"
+        aria-expanded={open}
+      >
+        <Icon.Settings size={12}/>
+        <span>天氣資料來源設定</span>
+        <span className="text-ink-dim">{open ? '▲ 收合' : '▼ 展開'}</span>
+      </button>
+      {open && (
+        <div className="px-6 pb-4 space-y-3">
+          {loading && <div className="text-xs text-ink-muted">載入中…</div>}
+          {loadError && <div className="text-xs text-sev-warn">{loadError}</div>}
+          {!loading && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-ink-muted uppercase tracking-wider">SMG 澳門觀測站</span>
+                  <select
+                    value={config.smg_station}
+                    onChange={e => setConfig({...config, smg_station: e.target.value})}
+                    className={inputCls}
+                  >
+                    <option value="">(預設: 外港)</option>
+                    {smgList.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-ink-muted uppercase tracking-wider">HKO 香港天文台測站</span>
+                  <select
+                    value={config.hko_station}
+                    onChange={e => setConfig({...config, hko_station: e.target.value})}
+                    className={inputCls}
+                  >
+                    <option value="">(預設: Hong Kong Observatory)</option>
+                    {hkoList.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+              </div>
+
+              <fieldset className="border border-border-subtle rounded p-2">
+                <legend className="text-[10px] text-ink-muted uppercase tracking-wider px-1">備援資料源優先順序</legend>
+                <div className="flex gap-4 flex-wrap text-xs">
+                  {[
+                    { v: 'both', label: '兩者皆抓 (SMG > HKO > Open-Meteo)', hint: '推薦：地理相鄰的 HKO 優先，Open-Meteo 補氣壓/能見度' },
+                    { v: 'hko', label: '偏好 HKO', hint: '與 both 相同順序；語意標籤明確為 HKO 優先' },
+                    { v: 'openmeteo', label: '偏好 Open-Meteo', hint: 'SMG > Open-Meteo > HKO；模型座標精確時選' },
+                  ].map(opt => (
+                    <label key={opt.v} className="flex items-start gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="fallback"
+                        checked={config.fallback_provider === opt.v}
+                        onChange={() => setConfig({...config, fallback_provider: opt.v})}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="font-mono text-[11px]">{opt.label}</span>
+                        <div className="text-[10px] text-ink-dim">{opt.hint}</div>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-ink-muted uppercase tracking-wider">站台緯度 (Open-Meteo)</span>
+                  <input
+                    type="number" step="any" min="-90" max="90"
+                    placeholder="22.19"
+                    value={config.site_lat != null ? config.site_lat : ''}
+                    onChange={e => setConfig({...config, site_lat: e.target.value})}
+                    className={inputCls}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-ink-muted uppercase tracking-wider">站台經度</span>
+                  <input
+                    type="number" step="any" min="-180" max="180"
+                    placeholder="113.55"
+                    value={config.site_lon != null ? config.site_lon : ''}
+                    onChange={e => setConfig({...config, site_lon: e.target.value})}
+                    className={inputCls}
+                  />
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  disabled={saving}
+                  className="text-xs px-3 py-1 rounded border border-border-subtle hover:bg-surface-panel"
+                >取消</button>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving || loading}
+                  className="text-xs px-3 py-1 rounded border border-sev-info/40 bg-sev-info/10 text-sev-info hover:bg-sev-info/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                >{saving ? '儲存中…' : '儲存設定'}</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Small "資料來源" chip rendered at the bottom of each hero tile.
 // `label` may be undefined (backend didn't attribute this field to any
 // source — happens when the raw reading came from a hardcoded null in
@@ -38,7 +218,7 @@ const MultiSourceChip = ({ items }) => {
   );
 };
 
-const WeatherPage = () => {
+const WeatherPage = ({ showToast, onRefresh } = {}) => {
   // D2 (audit 2026-07-16): distinguish loading vs unavailable. api.jsx
   // loadInitial()/refreshLive() only assign window.WEATHER once the fetch
   // settles, so `undefined` = still loading (show spinner-style hint); an
@@ -83,6 +263,10 @@ const WeatherPage = () => {
   }
   return (
     <div className="h-full overflow-y-auto scroll-thin">
+      {/* Settings pane (Option C, 2026-07-19) — collapsed by default so
+          operators aren't distracted. Save triggers onRefresh so tile
+          values update on the next weather tick (~10s worst case). */}
+      <WeatherSettings onSaved={onRefresh} showToast={showToast}/>
       {/* Hero */}
       <div className="px-6 py-5 border-b border-border-subtle bg-gradient-to-b from-surface-panel to-surface-base">
         <div className="flex items-start gap-6">

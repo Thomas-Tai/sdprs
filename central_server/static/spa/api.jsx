@@ -798,6 +798,15 @@
     '/api/nodes/' + encodeURIComponent(nodeId) + '/pump',
     jsonBody('POST', { action, duration_s: durationS != null ? durationS : null }));
 
+  // Weather multi-source settings (Option C, 2026-07-19) — hits the
+  // config API landed alongside the SPA settings pane. All 4 helpers
+  // gracefully swallow 503 (weather service disabled) so the SPA can
+  // hide the settings pane in that case without a console error storm.
+  const getWeatherConfig = () => apiFetch('/api/weather/config');
+  const setWeatherConfig = (cfg) => apiFetch('/api/weather/config', jsonBody('PUT', cfg));
+  const listSmgStations = () => apiFetch('/api/weather/smg/stations');
+  const listHkoStations = () => apiFetch('/api/weather/hko/stations');
+
   const deleteNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId),
     { method: 'DELETE' });
 
@@ -909,6 +918,7 @@
     loadInitial, refreshLive, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
+    getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations,
     exportAuditCsv,
     startStream, stopStream,
     openSocket,
