@@ -352,8 +352,12 @@
       },
       temp: roundOrNull(current.temperature_c),
       humidity: current.humidity_pct != null ? current.humidity_pct : null,
-      pressure: null,
-      visibility: null,
+      // Option D (2026-07-19): pressure_hpa and visibility_km now flow
+      // from backend when any provider supplies them (SMG's fixed
+      // stations for pressure; Open-Meteo for both). Round on the way
+      // through so tile renders "1005 hPa · 17km" not "1005.4 hPa".
+      pressure: current.pressure_hpa != null ? Math.round(current.pressure_hpa) : null,
+      visibility: current.visibility_km != null ? Math.round(current.visibility_km * 10) / 10 : null,
       lightning: { count: null, nearest: null },
       source: current.source || 'SMG',
       // Per-field sources dict from backend Phase 1 multi-source merge.

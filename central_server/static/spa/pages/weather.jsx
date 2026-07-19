@@ -14,19 +14,26 @@ const SourceChip = ({ label }) => {
   );
 };
 
-// Aggregate 2-field tile (temp + humidity) needs a compact source line
-// that shows BOTH origins when they differ (e.g. temp from SMG, humidity
-// from HKO after per-field merge fill). Skip whichever field wasn't
-// attributed — no misleading "same-source" ellipsis.
-const EnvSourceChip = ({ tempLabel, humidityLabel }) => {
-  if (!tempLabel && !humidityLabel) return null;
-  if (tempLabel && humidityLabel && tempLabel === humidityLabel) {
-    return <SourceChip label={tempLabel}/>;
+// Multi-field tile source line. Accepts an array of {label, sourceLabel}
+// tuples (label = "溫度"/"濕度"/"氣壓"/"能見度", sourceLabel = provider
+// string from the sources dict). Collapses to a single SourceChip when
+// every provided sourceLabel is identical (SMG-only, HKO-only, etc.);
+// otherwise stacks per-field rows so operators immediately see the
+// Env tile is showing mixed-provider data.
+const MultiSourceChip = ({ items }) => {
+  const nonEmpty = (items || []).filter(it => it && it.sourceLabel);
+  if (nonEmpty.length === 0) return null;
+  const uniqueSources = new Set(nonEmpty.map(it => it.sourceLabel));
+  if (uniqueSources.size === 1) {
+    return <SourceChip label={nonEmpty[0].sourceLabel}/>;
   }
   return (
     <div className="text-[9px] text-ink-dim mt-2 font-mono space-y-0.5">
-      {tempLabel && <div className="truncate" title={`溫度來源: ${tempLabel}`}>溫度: {tempLabel}</div>}
-      {humidityLabel && <div className="truncate" title={`濕度來源: ${humidityLabel}`}>濕度: {humidityLabel}</div>}
+      {nonEmpty.map((it, i) => (
+        <div key={i} className="truncate" title={`${it.label}來源: ${it.sourceLabel}`}>
+          {it.label}: {it.sourceLabel}
+        </div>
+      ))}
     </div>
   );
 };
@@ -162,8 +169,17 @@ const WeatherPage = () => {
               <span className="text-4xl font-mono font-bold tnum">{w.temp != null ? w.temp : '—'}</span>
               <span className="text-ink-muted text-sm">°C</span>
             </div>
-            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">濕度 {w.humidity != null ? w.humidity : '—'}%{w.pressure != null ? ` · ${w.pressure}hPa` : ''}</div>
-            <EnvSourceChip tempLabel={sources.temperature_c} humidityLabel={sources.humidity_pct}/>
+            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
+              濕度 {w.humidity != null ? w.humidity : '—'}%
+              {w.pressure != null ? ` · ${w.pressure} hPa` : ''}
+              {w.visibility != null ? ` · 能見度 ${w.visibility}km` : ''}
+            </div>
+            <MultiSourceChip items={[
+              { label: '溫度', sourceLabel: sources.temperature_c },
+              { label: '濕度', sourceLabel: sources.humidity_pct },
+              { label: '氣壓', sourceLabel: sources.pressure_hpa },
+              { label: '能見度', sourceLabel: sources.visibility_km },
+            ]}/>
           </div>
         </div>
       </div>

@@ -50,6 +50,15 @@ class CurrentWeather:
     # "Open-Meteo (22.19,113.55)" — the exact label operators see on each tile.
     # Empty dict = single-source cache; consumers fall back to `.source` field.
     sources: Dict[str, str] = field(default_factory=dict)
+    # Option D (2026-07-19): fill previously-null tiles. Both Optional
+    # because not every provider or station supplies them (SMG's
+    # `MeanSeaLevelPressure` is only present on ~half the stations;
+    # Open-Meteo returns visibility only when the model has cloud data
+    # for the coordinate). Merge treats absence-from-sources as "provider
+    # didn't supply" so the SPA tile can render '—' instead of a
+    # suspicious default.
+    pressure_hpa: Optional[float] = None
+    visibility_km: Optional[float] = None
 
 
 @dataclass
@@ -192,6 +201,24 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
 
                 gust_ms = _get_optional_float('WindGust/Value')
 
+                # Pressure (Option D, 2026-07-19): ~half of SMG stations
+                # (mostly the fixed-installation ones — 外港, 澳門大學, 大潭山,
+                # 媽閣, etc.) publish <MeanSeaLevelPressure><Value>1005.3
+                # </Value></MeanSeaLevelPressure>. The bridge stations
+                # (澳門大橋北, 友誼大橋南, ...) omit it — parser returns
+                # None so the merge fills from another provider (or leaves
+                # the tile as '—').
+                def _get_optional_plain_float(tag: str) -> Optional[float]:
+                    val = station.findtext(tag)
+                    if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
+                        return None
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return None
+
+                pressure_hpa = _get_optional_plain_float('MeanSeaLevelPressure/Value')
+
                 # Rainfall - SMG usually emits multiple <Rainfall> elements
                 # differentiated by <Type> (3=current hour, 5=daily total).
                 # findtext returns the FIRST match; Type 3 (hourly) is the
@@ -231,6 +258,8 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                 if station.find('Rainfall/Value') is not None and \
                         (station.findtext('Rainfall/Value') or '').strip() not in ('', '-', 'X', 'x', '-99'):
                     sources['rainfall_24h_mm'] = station_label
+                if pressure_hpa is not None:
+                    sources['pressure_hpa'] = station_label
 
                 return CurrentWeather(
                     obs_time=datetime.now(timezone.utc),
@@ -245,6 +274,8 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     station_name=name,
                     gust_speed_ms=gust_ms,
                     sources=sources,
+                    pressure_hpa=pressure_hpa,
+                    visibility_km=None,  # SMG XML has no visibility data
                 )
 
         logger.warning(f"SMG XML: station '{station_name}' not found")
@@ -326,7 +357,15 @@ async def _fetch_openmeteo_current(
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation",
+            # Option D (2026-07-19): pressure_msl added to fill the Env
+            # tile's previously-null pressure display. Visibility isn't in
+            # Open-Meteo `current` variable set (only in hourly) so it
+            # comes via a separate hourly-window request below to avoid
+            # bundling into the forecast fetch which has a different
+            # purpose and buffer size.
+            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,pressure_msl",
+            "hourly": "visibility",
+            "forecast_hours": 1,
             "wind_speed_unit": "ms",
             "timezone": "Asia/Macau",
         }
@@ -368,6 +407,34 @@ async def _fetch_openmeteo_current(
         if cur.get("precipitation") is not None:
             sources['rainfall_24h_mm'] = station_label
 
+        # Pressure (Option D): pressure_msl arrives in the same current
+        # response since we added it to the params. Units: hPa. Nullable
+        # in edge cases where the model has no data at the coordinate.
+        pressure_hpa: Optional[float] = None
+        pressure_raw = cur.get("pressure_msl")
+        if pressure_raw is not None:
+            try:
+                pressure_hpa = float(pressure_raw)
+                sources['pressure_hpa'] = station_label
+            except (TypeError, ValueError):
+                pressure_hpa = None
+
+        # Visibility (Option D): only available in Open-Meteo `hourly` (not
+        # `current`). We requested forecast_hours=1 so hourly.visibility[0]
+        # is the closest-to-now value. Meters → km for the SPA. Missing key
+        # or empty list is legitimate (Open-Meteo omits visibility for some
+        # model coverages) — leaves the tile as '—'.
+        visibility_km: Optional[float] = None
+        hourly = data.get("hourly", {})
+        vis_arr = hourly.get("visibility", []) if isinstance(hourly, dict) else []
+        if vis_arr:
+            try:
+                v_m = float(vis_arr[0])
+                visibility_km = round(v_m / 1000.0, 1)
+                sources['visibility_km'] = station_label
+            except (TypeError, ValueError):
+                visibility_km = None
+
         return CurrentWeather(
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
@@ -381,6 +448,8 @@ async def _fetch_openmeteo_current(
             station_name=f"{lat:.3f},{lon:.3f}",
             gust_speed_ms=gust_ms,
             sources=sources,
+            pressure_hpa=pressure_hpa,
+            visibility_km=visibility_km,
         )
     except Exception as e:
         logger.warning(f"Open-Meteo fetch failed: {e}")
@@ -588,6 +657,8 @@ _MERGEABLE_FIELDS = (
     "wind_direction_deg",
     "gust_speed_ms",
     "rainfall_24h_mm",
+    "pressure_hpa",
+    "visibility_km",
 )
 
 
@@ -655,6 +726,8 @@ def merge_currents(
         station_name=primary.station_name,
         gust_speed_ms=merged_values.get("gust_speed_ms"),
         sources=merged_sources,
+        pressure_hpa=merged_values.get("pressure_hpa"),
+        visibility_km=merged_values.get("visibility_km"),
     )
 
 

@@ -53,6 +53,12 @@ SMG_XML_FIXTURE = """<?xml version='1.0' encoding='utf-8'?>
         <WindGust><Value>17</Value></WindGust>
         <WindDirection><Value>S</Value><Degree>168</Degree></WindDirection>
         <Rainfall><Type>3</Type><Value>2.5</Value></Rainfall>
+        <MeanSeaLevelPressure><Value>1005.3</Value></MeanSeaLevelPressure>
+      </station>
+      <station code="MN">
+        <stationname>澳門大橋北</stationname>
+        <WindSpeed><Value>17</Value></WindSpeed>
+        <WindDirection><Value>SSW</Value><Degree>196</Degree></WindDirection>
       </station>
       <station code="EMPTY_TEST">
         <stationname>殘缺數據</stationname>
@@ -149,6 +155,40 @@ def test_smg_returns_none_on_malformed_xml():
     client = _FakeClient(_FakeResponse(200, "not xml <>"))
     cur = asyncio.run(_fetch_smg_current(client, "外港"))
     assert cur is None
+
+
+def test_smg_parses_pressure_when_station_supplies_it():
+    """Option D (2026-07-19): 外港 station has MeanSeaLevelPressure/Value.
+    Parser must read + surface it + label the source. Missing from
+    bridge stations (澳門大橋北) — those stay pressure_hpa=None."""
+    client = _FakeClient(_FakeResponse(200, SMG_XML_FIXTURE))
+    cur = asyncio.run(_fetch_smg_current(client, "外港"))
+    assert cur is not None
+    assert cur.pressure_hpa == 1005.3
+    assert cur.sources.get('pressure_hpa') == "SMG 外港"
+
+
+def test_smg_pressure_none_when_station_omits_it():
+    """Bridge stations (澳門大橋北) publish wind-only data; the fixture's
+    MN station has NO MeanSeaLevelPressure element. Parser must NOT
+    fabricate zero — the merge layer needs None to fall through."""
+    client = _FakeClient(_FakeResponse(200, SMG_XML_FIXTURE))
+    cur = asyncio.run(_fetch_smg_current(client, "澳門大橋北"))
+    assert cur is not None
+    assert cur.pressure_hpa is None
+    assert 'pressure_hpa' not in cur.sources
+    # Wind IS available — confirm it's labeled
+    assert 'wind_speed_ms' in cur.sources
+
+
+def test_smg_visibility_always_none():
+    """SMG XML doesn't publish visibility on any station. The Optional
+    field defaults to None; parser must not accidentally set it."""
+    client = _FakeClient(_FakeResponse(200, SMG_XML_FIXTURE))
+    cur = asyncio.run(_fetch_smg_current(client, "外港"))
+    assert cur is not None
+    assert cur.visibility_km is None
+    assert 'visibility_km' not in cur.sources
 
 
 if __name__ == "__main__":

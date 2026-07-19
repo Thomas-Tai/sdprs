@@ -220,6 +220,35 @@ def test_merge_skips_none_candidates_transparently():
     assert merged.source == "HKO"
 
 
+def test_merge_pressure_and_visibility_fill_from_available_sources():
+    """Option D (2026-07-19): pressure_hpa and visibility_km must be in
+    _MERGEABLE_FIELDS so merge picks them per-provider like other fields.
+
+    Scenario: SMG bridge station reports only wind, no pressure. HKO doesn't
+    supply visibility or pressure. Open-Meteo supplies both. Result:
+    pressure_hpa and visibility_km both come from Open-Meteo with source
+    labels; wind stays SMG."""
+    smg_bridge = _cur("SMG", "澳門大橋北", ['wind_speed_ms'], wind_speed_ms=4.72)
+    hko = _cur("HKO", "Central Weather Station", ['temperature_c'], temperature_c=30.0)
+    om = _cur("Open-Meteo", "22.19,113.55",
+              ['temperature_c', 'humidity_pct', 'wind_speed_ms', 'pressure_hpa', 'visibility_km'],
+              temperature_c=29.5, humidity_pct=80, wind_speed_ms=2.5,
+              pressure_hpa=1005.3, visibility_km=12.5)
+    merged = merge_currents([(smg_bridge, "SMG"), (hko, "HKO"), (om, "Open-Meteo")])
+    assert merged is not None
+    # Wind stays SMG (highest priority + supplied it)
+    assert merged.wind_speed_ms == 4.72
+    assert merged.sources['wind_speed_ms'] == "SMG 澳門大橋北"
+    # Temperature: SMG didn't supply, HKO did → HKO wins
+    assert merged.temperature_c == 30.0
+    assert merged.sources['temperature_c'] == "HKO Central Weather Station"
+    # Pressure + visibility: only Open-Meteo supplied → labeled Open-Meteo
+    assert merged.pressure_hpa == 1005.3
+    assert merged.visibility_km == 12.5
+    assert merged.sources['pressure_hpa'] == "Open-Meteo 22.19,113.55"
+    assert merged.sources['visibility_km'] == "Open-Meteo 22.19,113.55"
+
+
 def test_merge_leaves_field_unlabeled_when_no_source_supplied_it():
     """If NO candidate claims 'pressure' (or other field), it stays
     absent from sources dict — SPA renders '—' on that tile instead
