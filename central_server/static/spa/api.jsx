@@ -306,6 +306,7 @@
         stale: true,
         station: '',
         forecast: [],
+        fetchedAt: null,  // "N seconds ago" ticker treats this as never
       };
     }
     const fc = (forecast || []).slice(0, 16).map((b) => {
@@ -370,6 +371,11 @@
       stale: !!current.is_stale,
       station: current.station_name || '',
       forecast: fc,
+      // ISO string from backend CurrentWeather.fetched_at (serialized by
+      // api/weather.py _serialize). Consumed by the WeatherPage's
+      // live-updating "更新於 N 秒前" ticker so operators can see data
+      // freshness at a glance without knowing internal tick timing.
+      fetchedAt: current.fetched_at || null,
     };
   }
 
