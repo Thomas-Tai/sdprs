@@ -44,7 +44,10 @@
       clearTimeout(t);
     }
     if (res.status === 401) {
-      window.location.href = '/login';
+      // Set a flag instead of hard-redirecting so app.jsx can show the
+      // session-expiry modal (which preserves handover drafts, resolve notes,
+      // and page state through the H-1 cross-login flow).
+      window.__SDPRS_SESSION_EXPIRED = true;
       throw new Error('unauthorized');
     }
     if (!res.ok) {
@@ -251,8 +254,10 @@
       upload: up != null ? Math.round(up) : 999,
       temp: roundOrNull(n.cpu_temp),
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
+             : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
              : ss.bitrate != null ? ss.bitrate : 0,
       drops: ss.dropped_frames != null ? ss.dropped_frames
+           : ss.dropped != null ? ss.dropped
            : ss.drops != null ? ss.drops : 0,
       level, // null = sensor down / no reading (was previously coerced to 0 → misleading)
       cycles: n._cycles != null ? n._cycles : 0,
@@ -295,7 +300,7 @@
         humidity: null,
         pressure: null,
         visibility: null,
-        lightning: { count: 0, nearest: null },
+        lightning: { count: null, nearest: null },
         source: '—',
         stale: true,
         station: '',
@@ -321,21 +326,20 @@
       } : null,
       wind: {
         speed: roundOrNull(current.wind_speed_ms != null ? current.wind_speed_ms * 3.6 : null),
-        // TODO(dashboard-audit-2026-07-15): backend has no gust field yet
-        // (weather_service.CurrentWeather has wind_speed_ms only). Bind
-        // when Open-Meteo/CWA gust ingestion lands. Do NOT default to 0 —
-        // that reads as "no gust during a typhoon" which is a safety lie.
-        gust: null,
+        gust: roundOrNull(current.gust_speed_ms != null ? current.gust_speed_ms * 3.6 : null),
         dir: compass(current.wind_direction_deg),
         degree: current.wind_direction_deg != null ? current.wind_direction_deg : null,
       },
       rain: {
         // Backend only exposes rainfall_24h_mm (see services/weather_service.py
-        // CurrentWeather). The "10min" and "1h" buckets don't exist yet, so
-        // leave now/hour null rather than reusing the 24h value under other
-        // labels (the audit specifically flagged that lie).
-        // TODO(dashboard-audit-2026-07-15): bind now/hour when backend
-        // exposes rainfall_10min_mm / rainfall_1h_mm.
+        // CurrentWeather). There are NO sub-24h buckets (no rainfall_10min_mm,
+        // no rainfall_1h_mm). Deriving `now` as rainfall_24h_mm / 24 would
+        // fabricate an instantaneous rate from a daily total — dishonest during
+        // a typhoon where rain is anything but uniform. Keep now/hour null.
+        // The weather.jsx display MUST render null as "—" / "N/A" (honest
+        // labeling), never substitute the 24h value under a different label.
+        // TODO(dashboard-audit-2026-07-15): bind now/hour only when backend
+        // exposes true rainfall_10min_mm / rainfall_1h_mm fields.
         now: null,
         hour: null,
         day: roundOrNull(current.rainfall_24h_mm),
@@ -344,7 +348,7 @@
       humidity: current.humidity_pct != null ? current.humidity_pct : null,
       pressure: null,
       visibility: null,
-      lightning: { count: 0, nearest: null },
+      lightning: { count: null, nearest: null },
       source: current.source || 'SMG',
       stale: !!current.is_stale,
       station: current.station_name || '',
@@ -535,8 +539,19 @@
     window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
     window.OPERATOR = { name: window.SDPRS_USER || '', role: 'op', shiftStart: '', shiftRemaining: 0 };
 
-    const failed = results.filter((r) => r.status === 'rejected');
-    if (failed.length) console.warn('[SDPRS] some data failed to load:', failed.map((f) => f.reason));
+    const _loaderKeys = ['nodes', 'alerts', 'history', 'rate', 'weather', 'handover', 'audit'];
+    const failedKeys = [];
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        failedKeys.push(_loaderKeys[i]);
+        console.warn('[SDPRS] loader "' + _loaderKeys[i] + '" failed:', r.reason);
+      }
+    });
+    // Expose failed loader names so app.jsx can show a partial-failure banner
+    // ("Alert feed unavailable — displaying cached data") instead of silently
+    // serving stale data from a previous successful load.
+    window.__SDPRS_LOAD_FAILURES = failedKeys;
+    if (failedKeys.length) console.warn('[SDPRS] some data failed to load:', failedKeys);
   }
 
   // Re-fetches the volatile data (alerts, nodes, rate). Returns the new
@@ -579,6 +594,11 @@
       if (handover) window.HANDOVER = handover;
       if (audit) window.AUDIT = audit;
       window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
+      // Track which loaders failed so app.jsx can surface partial-failure
+      // warnings (mirrors loadInitial's __SDPRS_LOAD_FAILURES contract).
+      const _rlKeys = ['nodes', 'alerts', 'history', 'rate', 'weather', 'handover', 'audit'];
+      const rlFailed = [];
+      results.forEach((r, i) => { if (r.status === 'rejected') rlFailed.push(_rlKeys[i]); });
       return {
         nodes: window.NODES,
         alerts: window.ALERTS,
@@ -587,6 +607,7 @@
         weather: window.WEATHER,
         handover: window.HANDOVER,
         audit: window.AUDIT,
+        failures: rlFailed,
       };
     })()
       .catch((err) => {
@@ -601,6 +622,7 @@
           weather: window.WEATHER,
           handover: window.HANDOVER,
           audit: window.AUDIT,
+          failures: [],
         };
       })
       .finally(() => {
