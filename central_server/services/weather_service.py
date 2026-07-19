@@ -144,8 +144,20 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     except (TypeError, ValueError):
                         return default
 
+                # SMG schema wraps every numeric reading in a <Value> child:
+                #     <Temperature>
+                #       <Value>29</Value>       ← this is the number
+                #       <dValue>29.3</dValue>   ← alt precision
+                #       <Type>3</Type>          ← measurement classification
+                #     </Temperature>
+                # `station.findtext('Temperature')` returns the parent's own
+                # text (empty whitespace between the children) — so the
+                # helpers below MUST be called with the '/Value' suffix, or
+                # every reading silently returns the default (0.0).
+                # Regression bug caught 2026-07-19; see test_smg_xml_parser.py.
+
                 # Wind speed in km/h, convert to m/s (1 km/h = 0.27778 m/s)
-                wind_kmh = _get_float('WindSpeed')
+                wind_kmh = _get_float('WindSpeed/Value')
                 wind_ms = wind_kmh * 0.27778
 
                 # Wind gust (km/h → m/s). SMG may omit this element entirely
@@ -160,18 +172,23 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     except (TypeError, ValueError):
                         return None
 
-                gust_ms = _get_optional_float('WindGust')
+                gust_ms = _get_optional_float('WindGust/Value')
 
-                # Rainfall - use Rainfall (hourly) or DailyRainfall
-                rainfall_hourly = _get_float('Rainfall')
+                # Rainfall - SMG usually emits multiple <Rainfall> elements
+                # differentiated by <Type> (3=current hour, 5=daily total).
+                # findtext returns the FIRST match; Type 3 (hourly) is the
+                # instantaneous rate suitable for the dashboard's mm/h field.
+                rainfall_hourly = _get_float('Rainfall/Value')
 
+                # WindDirection has <Value>SW</Value> (compass letters) plus
+                # <Degree>230</Degree> (numeric). We need the numeric.
                 return CurrentWeather(
                     obs_time=datetime.now(timezone.utc),
                     wind_speed_ms=wind_ms,
-                    wind_direction_deg=_get_int('WindDirection'),
+                    wind_direction_deg=_get_int('WindDirection/Degree'),
                     rainfall_24h_mm=rainfall_hourly,  # Hourly rainfall
-                    temperature_c=_get_float('Temperature'),
-                    humidity_pct=_get_int('Humidity'),
+                    temperature_c=_get_float('Temperature/Value'),
+                    humidity_pct=_get_int('Humidity/Value'),
                     is_stale=False,
                     fetched_at=datetime.now(timezone.utc),
                     source="SMG",
@@ -448,11 +465,19 @@ class WeatherService:
 
     async def _tick(self) -> None:
         s = self._settings
-        # Read weather config from database (user-configurable via UI)
-        # If lat/lon is None, use SMG Macau only; if set, also use Open-Meteo fallback
+        # Read weather config from database (user-configurable via UI).
+        # Falls back to settings.SITE_LAT/LON so Open-Meteo forecast populates
+        # out-of-the-box even before an operator sets a custom location — the
+        # dashboard's 36h forecast chart is otherwise silently empty on a
+        # fresh deploy. Settings default is Macau (matches SMG primary source);
+        # set SITE_LAT/SITE_LON env vars on Zeabur if deploying elsewhere.
         weather_cfg = get_weather_config()
         lat = weather_cfg.get("site_lat")
+        if lat is None:
+            lat = s.SITE_LAT
         lon = weather_cfg.get("site_lon")
+        if lon is None:
+            lon = s.SITE_LON
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
             # Primary: SMG Macau XML (免費、免 API Key、澳門專用)
