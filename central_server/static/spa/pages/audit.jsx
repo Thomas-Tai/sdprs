@@ -223,15 +223,15 @@ const AuditPage = ({ auditLog = [] }) => {
           <span className="text-[10px] text-ink-muted tnum ml-1">最多 10000 筆</span>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto scroll-thin">
+      <div className="flex-1 overflow-y-auto overflow-x-auto scroll-thin">
         <table className="w-full text-xs tnum">
           <thead className="sticky top-0 bg-surface-base z-10 border-b border-border-strong">
             <tr className="text-[10px] text-ink-muted uppercase tracking-wider">
-              <th className="text-left font-semibold px-4 py-2 w-28">時間</th>
-              <th className="text-left font-semibold px-4 py-2 w-32">操作者</th>
-              <th className="text-left font-semibold px-4 py-2 w-32">動作</th>
-              <th className="text-left font-semibold px-4 py-2 w-48">目標</th>
-              <th className="text-left font-semibold px-4 py-2">詳情</th>
+              <th scope="col" className="text-left font-semibold px-4 py-2 w-28">時間</th>
+              <th scope="col" className="text-left font-semibold px-4 py-2 w-32">操作者</th>
+              <th scope="col" className="text-left font-semibold px-4 py-2 w-32">動作</th>
+              <th scope="col" className="text-left font-semibold px-4 py-2 w-48">目標</th>
+              <th scope="col" className="text-left font-semibold px-4 py-2">詳情</th>
             </tr>
           </thead>
           <tbody>

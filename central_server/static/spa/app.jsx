@@ -114,7 +114,17 @@ function App({ initialError = null }) {
   // reads of window.ALERTS/NODES don't crash on undefined.
   const [bootstrapError, setBootstrapError] = useStateA(initialError);
 
-  const [page, setPageRaw] = useStateA(RESTORED_STATE?.page ?? 'alerts');
+  // F2: RESTORED_STATE (H-1 cross-login roundtrip) wins if present; otherwise
+  // fall back to the page persisted in sessionStorage (see the persistence
+  // effect below) so an F5 / tab reload doesn't dump the operator back to
+  // Alerts. sessionStorage is tab-scoped and survives reloads but not tab
+  // close, which is the right lifetime for "where was I" — try/catch covers
+  // sessionStorage-disabled contexts (e.g. some locked-down kiosk browsers).
+  const [page, setPageRaw] = useStateA(() => {
+    if (RESTORED_STATE?.page) return RESTORED_STATE.page;
+    try { return sessionStorage.getItem('sdprs.page') ?? 'alerts'; }
+    catch (_) { return 'alerts'; }
+  });
   const [pageHistory, setPageHistory] = useStateA([]); // for Alt+← back
   const [alerts, setAlerts] = useStateA(window.ALERTS ?? []);
   // load-bearing: setNodes() forces re-render so window.NODES reads pick up new data. DO NOT remove.
@@ -124,7 +134,22 @@ function App({ initialError = null }) {
   // events until re-opened. Hoist history into React state so refresh() /
   // WS events propagate to the panel automatically.
   const [nodeHistory, setNodeHistory] = useStateA(window.NODE_HISTORY ?? {});
-  const [selectedId, setSelectedId] = useStateA(RESTORED_STATE?.selectedId ?? window.ALERTS?.[0]?.id ?? null);
+  // F2 (nice-to-have): same idea as `page` above, for the selected alert.
+  // Matched by String() comparison since sessionStorage only stores strings
+  // but alert ids may not be — on match we return the LIVE alert's `.id` (not
+  // the raw string) so downstream `a.id === selectedId` strict-equality
+  // checks throughout this file keep working against the original type.
+  const [selectedId, setSelectedId] = useStateA(() => {
+    if (RESTORED_STATE?.selectedId != null) return RESTORED_STATE.selectedId;
+    try {
+      const savedId = sessionStorage.getItem('sdprs.selectedId');
+      if (savedId != null) {
+        const match = (window.ALERTS ?? []).find(a => String(a.id) === savedId);
+        if (match) return match.id;
+      }
+    } catch (_) { /* sessionStorage unavailable */ }
+    return window.ALERTS?.[0]?.id ?? null;
+  });
   // LiveClock ref — LiveClockProvider registers its reset function here so
   // runRefresh and onPing can reset the drift counter without App owning the state.
   const resetClockRef = useRefA(() => {});
@@ -133,7 +158,21 @@ function App({ initialError = null }) {
   const [muteDrawerOpen, setMuteDrawerOpen] = useStateA(false);
   const [cmdkOpen, setCmdkOpen] = useStateA(false);
   const [shiftBannerOpen, setShiftBannerOpen] = useStateA(false);
-  const [nodePanelNode, setNodePanelNode] = useStateA(null);
+  // F3: store only the id, not a snapshot of the node object — the old
+  // `useStateA(null)`-with-whole-node approach froze the panel's data at the
+  // moment it opened, never re-syncing with live `nodes` updates (refresh /
+  // WS events). Deriving the node from current `nodes` below keeps it live.
+  const [nodePanelNodeId, setNodePanelNodeId] = useStateA(null);
+  // Reactive lookup — recomputes whenever `nodes` refreshes (poll/WS) or the
+  // selected id changes, instead of freezing a snapshot from open-time.
+  // NodeSidePanel itself already treats a null `node` prop as "closed"
+  // (`if (!node) return null;` in components.jsx), so a momentary miss here
+  // (id set but the matching node hasn't landed in `nodes` yet/was removed)
+  // safely renders nothing rather than crashing.
+  const nodePanelNode = useMemoA(
+    () => (nodePanelNodeId == null ? null : (nodes.find(n => n.id === nodePanelNodeId) ?? null)),
+    [nodes, nodePanelNodeId]
+  );
   // B4: persist focus mode across reloads (try/catch for Safari private mode).
   const [focusMode, setFocusMode] = useStateA(() => {
     try { return window.localStorage.getItem('sdprs.focusMode') === '1'; }
@@ -201,6 +240,27 @@ function App({ initialError = null }) {
   // frozen at their initial values inside the callback.
   const muteStateRef = useRefA(muteState);
   muteStateRef.current = muteState;
+  // F4: ref mirror of `sessionExpired` so the 20s poll interval and the
+  // `online` recovery handler (both set up in effects with stable/unrelated
+  // dep arrays — see below) can read the CURRENT modal-open state without
+  // needing `sessionExpired` in their deps (which would tear down/rebuild
+  // the WebSocket or the online/offline listeners on every expiry toggle).
+  // Deliberately NOT window.__SDPRS_SESSION_EXPIRED: that flag is a one-shot
+  // signal api.jsx/the 401-poll effect below reset to `false` the instant
+  // it's consumed (see the `window.__SDPRS_SESSION_EXPIRED = false` line),
+  // so it does not represent "the modal is currently up" — `sessionExpired`
+  // state (also what gates the modal's own JSX and the Escape/Cmd+K guards
+  // above) is the actual source of truth for that.
+  const sessionExpiredRef = useRefA(sessionExpired);
+  sessionExpiredRef.current = sessionExpired;
+  // F5: guards the browser-history pushState effect below so it doesn't
+  // double-push — once on mount (the initial entry is already seeded via
+  // history.replaceState in the mount effect) and once whenever a `page`
+  // change originates FROM a popstate event (which must only sync `page`,
+  // never push ANOTHER entry on top of the one the user just navigated to).
+  // Starts true to skip the mount run. Same idiom as skipNextHistoryPushRef
+  // above, just for the browser's history stack instead of the Alt+← stack.
+  const skipNextUrlPushRef = useRefA(true);
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
@@ -230,6 +290,59 @@ function App({ initialError = null }) {
     skipNextHistoryPushRef.current = true;
     setPageHistory(h.slice(0, -1));
     setPageRaw(prev);
+  }, []);
+
+  // F2: persist the current page to sessionStorage on every change, whatever
+  // the source (setPage, goBack(), or the popstate listener below) — so an
+  // F5 / tab reload restores the page the operator was actually on instead
+  // of dumping them back to Alerts.
+  useEffectA(() => {
+    try { sessionStorage.setItem('sdprs.page', page); }
+    catch (_) { /* sessionStorage unavailable (private mode) */ }
+  }, [page]);
+
+  // F2 (nice-to-have): same for the selected alert.
+  useEffectA(() => {
+    try {
+      if (selectedId != null) sessionStorage.setItem('sdprs.selectedId', String(selectedId));
+      else sessionStorage.removeItem('sdprs.selectedId');
+    } catch (_) { /* sessionStorage unavailable (private mode) */ }
+  }, [selectedId]);
+
+  // F5: push a browser-history entry on every `page` change so the Back
+  // button navigates in-app pages instead of leaving the SPA entirely.
+  // Skipped once right after mount (that entry is seeded by the
+  // replaceState in the mount effect below) and once right after a
+  // popstate-driven change (see onPopState) — both via skipNextUrlPushRef —
+  // so we never push a duplicate entry on top of the one already reflecting
+  // reality. Deliberately keyed on `page` (not folded into setPage) so it
+  // catches goBack() too, same reasoning as the sessionStorage effect above.
+  useEffectA(() => {
+    if (skipNextUrlPushRef.current) {
+      skipNextUrlPushRef.current = false;
+      return;
+    }
+    try { window.history.pushState({ page }, '', window.location.pathname + window.location.search); }
+    catch (_) { /* history API unavailable (e.g. sandboxed iframe) */ }
+  }, [page]);
+
+  // F5: seed the initial history entry (so the very first Back press has
+  // somewhere in-app to land) and install the popstate listener that takes
+  // over from there. Runs once on mount — AFTER RESTORED_STATE/sessionStorage
+  // have already produced the initial `page` value above, so this only tags
+  // that existing entry (replaceState, not pushState) rather than
+  // re-deriving it; the H-1 cross-login roundtrip is untouched.
+  useEffectA(() => {
+    try { window.history.replaceState({ page }, '', window.location.pathname + window.location.search); }
+    catch (_) { /* history API unavailable */ }
+    const onPopState = (event) => {
+      skipNextUrlPushRef.current = true;
+      setPageRaw(event.state?.page ?? 'alerts');
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+    // eslint: intentionally mount-only — `page` here is only the initial
+    // seed value; subsequent navigation is driven by the effect above.
   }, []);
 
   // Apply theme/wall/focus classes
@@ -435,7 +548,14 @@ function App({ initialError = null }) {
       },
     });
     wsStopRef.current = stop;
-    const poll = setInterval(scheduleRefresh, 20000);
+    // F4: don't poll while the session-expiry modal is blocking — the
+    // session is dead, so the refresh would just be a wasted 401 round-trip
+    // (and briefly flash "stale" state before the next 401 re-triggers the
+    // modal-open path).
+    const poll = setInterval(() => {
+      if (sessionExpiredRef.current) return;
+      scheduleRefresh();
+    }, 20000);
     return () => {
       stop();
       wsStopRef.current = null;
@@ -465,7 +585,11 @@ function App({ initialError = null }) {
   // replaced immediately.
   useEffectA(() => {
     const handleOffline = () => showToast('網路連線中斷', 'warn');
+    // F4: skip the recovery toast + refresh while the session-expiry modal
+    // is up — same reasoning as the poll guard above (session is dead, the
+    // refresh would just 401 again).
     const handleOnline = () => {
+      if (sessionExpiredRef.current) return;
       showToast('網路已恢復', 'ok');
       refresh();
     };
@@ -697,6 +821,14 @@ function App({ initialError = null }) {
         showToast(focusMode ? '已關閉專注模式' : '已啟用專注模式 — 隱藏資訊級警報', 'info');
         return;
       }
+      // F1: every shortcut below this point is a single-key (or Shift+key)
+      // binding with no Ctrl/Cmd involvement. Without this guard, Ctrl/Cmd+A,
+      // +R, +N, +M, +T, and even Ctrl+1..7 collide with browser-native
+      // Select-All / Reload / New-Window / tab-switch, firing OUR handler
+      // (ack/resolve/next-unack/etc.) on top of — or instead of — the
+      // browser's own action. Cmd/Ctrl+K and Cmd/Ctrl+. are the only
+      // combos meant to work everywhere and are both handled above this line.
+      if (e.ctrlKey || e.metaKey) return;
       // Alt+← back navigation
       // B1: only consume the event when we have app-internal history to pop;
       // otherwise let the browser handle its native back so a first-load user
@@ -718,7 +850,7 @@ function App({ initialError = null }) {
         if (sessionExpired) return; // blocking modal — never Esc-dismissible
         if (cmdkOpen) { setCmdkOpen(false); return; }
         if (shortcutsOpen) { setShortcutsOpen(false); return; }
-        if (nodePanelNode) { setNodePanelNode(null); return; }
+        if (nodePanelNode) { setNodePanelNodeId(null); return; }
         if (muteDrawerOpen) { setMuteDrawerOpen(false); return; }
         if (shiftBannerOpen) { setShiftBannerOpen(false); return; }
         return;
@@ -747,11 +879,17 @@ function App({ initialError = null }) {
       const navMap = { '1': 'alerts', '2': 'monitor', '3': 'status', '4': 'pumps', '5': 'weather', '6': 'handover', '7': 'audit' };
       const sel = alerts.find(a => a.id === selectedId);
       const inResolveTemplateFlow = page === 'alerts' && sel && sel.state === 'acknowledged';
-      // Suppress ALL number-key nav (1-7) while an acknowledged alert has focus —
-      // otherwise '7' would teleport the operator to Audit mid-resolve even though
-      // 1-6 are template shortcuts. '7' has no template; it just no-ops here.
+      // Suppress ALL number-key nav (1-7) while an acknowledged alert has
+      // focus: keys 1-6 apply resolve templates, and 7 is intentionally
+      // swallowed (no template exists) rather than teleporting the operator
+      // to Audit mid-resolve and losing their in-progress resolve-note.
+      // Feedback for 7 is handled below (toast "無此模板").
       if (navMap[e.key] && !(inResolveTemplateFlow && /^[1-7]$/.test(e.key))) {
         setPage(navMap[e.key]);
+        return;
+      }
+      if (inResolveTemplateFlow && e.key === '7') {
+        showToast('無此模板', 'info');
         return;
       }
       if (inResolveTemplateFlow && /^[1-6]$/.test(e.key)) {
@@ -762,8 +900,6 @@ function App({ initialError = null }) {
         }
         return;
       }
-      // '7' inside the resolve-template flow: intentionally swallowed (see above).
-      if (inResolveTemplateFlow && e.key === '7') return;
 
       if (page !== 'alerts' || !selectedId || !sel) return;
 
@@ -848,14 +984,18 @@ function App({ initialError = null }) {
 
   const onUpdateNode = useCallbackA(async (id, patch) => {
     if (patch.location) await window.SDPRS_API.updateNodeLocation(id, patch.location);
-    setNodePanelNode(prev => prev && prev.id === id ? { ...prev, ...patch } : prev);
+    // F3: no more local-state patch needed here — nodePanelNode is now
+    // derived from `nodes`, so the `await refresh()` below (which replaces
+    // `nodes` with fresh server data) is what makes the panel pick up the
+    // edit. The optimistic setNodePanelNode(...) patch this used to do is
+    // gone along with the state it patched.
     showToast(`${id} 配置已更新`, 'ok');
     await refresh();
   }, [showToast, refresh]);
 
-  const onSelectNode = useCallbackA((n) => setNodePanelNode(n), []);
+  const onSelectNode = useCallbackA((n) => setNodePanelNodeId(n?.id ?? null), []);
   const onJumpAlert = useCallbackA((id) => {
-    setNodePanelNode(null);
+    setNodePanelNodeId(null);
     setPage('alerts');
     setSelectedId(id);
   }, [setPage]);
@@ -1000,7 +1140,7 @@ function App({ initialError = null }) {
       <window.NodeSidePanel
         node={nodePanelNode}
         history={nodePanelNode ? (nodeHistory[nodePanelNode.id] || []) : []}
-        onClose={() => setNodePanelNode(null)}
+        onClose={() => setNodePanelNodeId(null)}
         onJumpAlert={onJumpAlert}
         onSelectAlert={onJumpAlert}
         onNavigate={setPage}

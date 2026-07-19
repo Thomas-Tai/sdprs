@@ -412,7 +412,26 @@
       const r = await apiFetch('/api/alerts/rate?bucket=15m&window=4h');
       const buckets = (r && r.buckets) || [];
       return buckets.map((b) => b.count || 0);
-    } catch (e) { return new Array(16).fill(0); }
+    } catch (e) {
+      const status = e && e.status;
+      const msg = e && e.message ? String(e.message) : '';
+
+      // 401: session expired (soft-401 flag already set by apiFetch)
+      // Return placeholder so sparkline stays interactive
+      if (msg === 'unauthorized' || status === 401) {
+        return new Array(16).fill(0);
+      }
+
+      // 403: should not happen for rate, but handle gracefully
+      const is403 = status === 403 || msg.indexOf('403') !== -1;
+      if (is403) {
+        return new Array(16).fill(0);
+      }
+
+      // Any other error (network, 5xx, parse) → re-throw so
+      // Promise.allSettled marks it rejected and dataWarnings banner shows
+      throw e;
+    }
   }
 
   // 503 = feature disabled server-side (no CWA_API_KEY); expected in dev.
@@ -459,7 +478,24 @@
         history: [],
       };
     } catch (e) {
-      return { current: '', pinned: { by: '—', at: '', text: '尚無交接備註', ageMin: 0 }, history: [] };
+      const status = e && e.status;
+      const msg = e && e.message ? String(e.message) : '';
+
+      // 401: session expired (soft-401 flag already set by apiFetch)
+      // Return stub so UI stays interactive
+      if (msg === 'unauthorized' || status === 401) {
+        return { current: '', pinned: { by: '—', at: '', text: '尚無交接備註', ageMin: 0 }, history: [] };
+      }
+
+      // 403: should not happen for handover, but handle gracefully
+      const is403 = status === 403 || msg.indexOf('403') !== -1;
+      if (is403) {
+        return { current: '', pinned: { by: '—', at: '', text: '尚無交接備註', ageMin: 0 }, history: [] };
+      }
+
+      // Any other error (network, 5xx, parse) → re-throw so
+      // Promise.allSettled marks it rejected and dataWarnings banner shows
+      throw e;
     }
   }
 
@@ -479,11 +515,25 @@
     } catch (e) {
       const status = e && e.status;
       const msg = e && e.message ? String(e.message) : '';
+
+      // 401: session expired (soft-401 flag already set by apiFetch)
+      // Keep prior state so audit rows don't disappear mid-shift
+      if (msg === 'unauthorized' || status === 401) {
+        return window.AUDIT;
+      }
+
+      // 403: non-admin operator — expected, silence without banner
       const is403 = status === 403 || msg.indexOf('403') !== -1;
-      const entries = [];
-      entries.forbidden = !!is403;
-      window.AUDIT = entries;
-      return entries;
+      if (is403) {
+        const entries = [];
+        entries.forbidden = true;
+        window.AUDIT = entries;
+        return entries;
+      }
+
+      // Any other error (network, 5xx, parse) → re-throw so
+      // Promise.allSettled marks it rejected and dataWarnings banner shows
+      throw e;
     }
   }
 

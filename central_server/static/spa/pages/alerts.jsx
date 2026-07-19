@@ -42,7 +42,9 @@ const SystemOKState = ({ nodes = [] }) => {
 const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount, nodes = [] }) => {
   const m = window.safeSevMeta(alert.sev);
   const node = nodes.find(n => n.id === alert.node);
-  const rowH = density === 'compact' ? 'h-9' : 'h-12';
+  // Fixed row height only applies at md+ (real table row). Below md the row
+  // is a stacked card with natural height driven by its own py padding (F1).
+  const rowH = density === 'compact' ? 'md:h-9' : 'md:h-12';
   const isUrgent = alert.state === 'pending' && alert.sev === 'critical' && alert.ageSec < 60;
   // PENDING_VIDEO heuristic — api.jsx collapses PENDING_VIDEO → 'pending', so
   // we detect the pre-upload state via absence of the UPLOADED timeline entry
@@ -51,7 +53,7 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
   const isWaitingForVideo = alert.state === 'pending' && !(alert.timeline || []).some(t => t.label === 'UPLOADED');
   return (
     <div
-      className={`relative ${rowH} flex items-center pl-3 border-b border-border-subtle/60 transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
+      className={`relative ${rowH} flex items-start md:items-center pl-3 py-2 md:py-0 border-b border-border-subtle/60 transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
     >
       <div className="w-6 flex-shrink-0 flex items-center justify-center">
         <input type="checkbox" checked={checked} onChange={() => onCheck(alert.id)}
@@ -69,20 +71,26 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
         onKeyDown={e => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(alert.id); }
         }}
-        className="flex-1 h-full min-w-0 pr-3 flex items-center cursor-pointer"
+        className="flex-1 md:h-full min-w-0 pr-3 flex flex-col md:flex-row md:items-center gap-1 md:gap-0 cursor-pointer"
       >
-        <div className="w-4 flex-shrink-0 flex items-center justify-center">
-          {!alert.seen && alert.state === 'pending' && (
-            <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱"></span>
-          )}
-        </div>
-        <div className="w-20 flex-shrink-0"><AgeCell sec={alert.ageSec}/></div>
-        <div className="w-24 flex-shrink-0 font-mono text-xs tnum text-ink-secondary flex items-center gap-1">
-          <m.Icon/>
-          <span>{alert.node}</span>
-          {siblingCount > 0 && (
-            <span title={`${alert.node} 同節點另有 ${siblingCount} 警報`} className="ml-0.5 text-[9px] font-bold tnum bg-sev-warn/20 text-sev-warn px-1 rounded">+{siblingCount}</span>
-          )}
+        {/* Metadata line (mobile) / dot+age+node cells (md+). `md:contents`
+            drops this wrapper from the box model at md+ so its children flow
+            as direct siblings in the original column order — no duplicated
+            elements needed to support both layouts (F1). */}
+        <div className="flex items-center gap-2 md:contents">
+          <div className="w-4 flex-shrink-0 flex items-center justify-center">
+            {!alert.seen && alert.state === 'pending' && (
+              <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱"></span>
+            )}
+          </div>
+          <div className="w-auto md:w-20 flex-shrink-0"><AgeCell sec={alert.ageSec}/></div>
+          <div className="w-auto md:w-24 flex-shrink-0 font-mono text-xs tnum text-ink-secondary flex items-center gap-1">
+            <m.Icon/>
+            <span>{alert.node}</span>
+            {siblingCount > 0 && (
+              <span title={`${alert.node} 同節點另有 ${siblingCount} 警報`} className="ml-0.5 text-[9px] font-bold tnum bg-sev-warn/20 text-sev-warn px-1 rounded">+{siblingCount}</span>
+            )}
+          </div>
         </div>
         <div className="flex-1 min-w-0 flex items-center gap-2">
           <span className="text-xs text-ink-secondary truncate">{window.alertTypeLabel(alert.type)} <span className="text-ink-muted">· {node?.location}</span></span>
@@ -98,10 +106,15 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
             </span>
           )}
         </div>
-        <div className="w-20 flex-shrink-0"><SeverityBadge sev={alert.sev}/></div>
-        <div className="w-20 flex-shrink-0"><StateBadge state={alert.state}/></div>
-        <div className="w-24 flex-shrink-0 font-mono text-[11px] tnum text-ink-muted text-right">
-          {alert.ackBy || '—'}
+        {/* Severity+state+operator line (mobile) / cells (md+), same
+            md:contents trick — order (severity, state, operator) is
+            preserved once the wrapper disappears at md+. */}
+        <div className="flex items-center gap-1.5 md:contents">
+          <div className="w-auto md:w-20 flex-shrink-0"><SeverityBadge sev={alert.sev}/></div>
+          <div className="w-auto md:w-20 flex-shrink-0"><StateBadge state={alert.state}/></div>
+          <div className="w-auto md:w-24 flex-shrink-0 font-mono text-[11px] tnum text-ink-muted md:text-right">
+            {alert.ackBy || '—'}
+          </div>
         </div>
       </div>
     </div>
@@ -288,7 +301,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   }, [filtered, selectedId, setSelectedId]);
 
   return (
-    <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr] relative">
+    <div className="h-full grid grid-cols-1 md:grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr] relative">
       <h1 className="sr-only">警報</h1>
       {pageToast && (
         <div role="status" aria-live="polite"
@@ -300,8 +313,11 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
           {pageToast.msg}
         </div>
       )}
-      {/* LEFT: List */}
-      <div className="border-r border-border-subtle flex flex-col min-h-0">
+      {/* LEFT: List — on mobile (<md), hide once an alert is selected so the
+          detail pane gets the full viewport instead of a squeezed 3fr column
+          (F1: no more clipped severity/state/operator cells at 375px). md+
+          always shows both columns side-by-side regardless of selection. */}
+      <div className={`border-r border-border-subtle flex-col min-h-0 ${selectedId != null ? 'hidden md:flex' : 'flex'}`}>
         {/* Tabs + filters */}
         <div className="border-b border-border-subtle bg-surface-panel">
           <div className="flex items-center px-3 pt-2.5">
@@ -360,12 +376,13 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               placeholder="批次備註 (解決時必填)..."
               aria-label="批次操作備註"
               className="flex-1 h-7 px-2 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
-            <button onClick={() => { setChecked(new Set()); setBulkNote(''); }} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
+            <button onClick={() => { setChecked(new Set()); setBulkNote(''); }} aria-label="清除批次選取" title="清除批次選取 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
           </div>
         )}
 
-        {/* Column headers */}
-        <div className="h-7 flex items-center pl-3 pr-3 bg-surface-base border-b border-border-strong text-[10px] text-ink-muted uppercase tracking-wider font-semibold">
+        {/* Column headers — desktop-only; mobile rows are stacked cards, not
+            a table, so fixed-width column labels don't apply below md. */}
+        <div className="h-7 hidden md:flex items-center pl-3 pr-3 bg-surface-base border-b border-border-strong text-[10px] text-ink-muted uppercase tracking-wider font-semibold">
           <div className="w-6 flex-shrink-0"></div>
           <div className="w-4 flex-shrink-0"></div>
           <div className="w-20 flex-shrink-0">等待</div>
@@ -405,8 +422,20 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         </div>
       </div>
 
-      {/* RIGHT: Detail */}
-      <div className="flex flex-col min-h-0 bg-surface-base">
+      {/* RIGHT: Detail — full-width on mobile once an alert is selected
+          (see LEFT column above); "返回列表" clears selectedId to swap back
+          to the list column. Hidden entirely at md+ isn't right either — at
+          md+ both columns always show, so this only ever hides on mobile
+          when nothing is selected. */}
+      <div className={`flex-col min-h-0 bg-surface-base ${selectedId != null ? 'flex' : 'hidden md:flex'}`}>
+        {selected && (
+          <div className="md:hidden border-b border-border-subtle px-3 py-2">
+            <button onClick={() => setSelectedId(null)}
+              className="inline-flex items-center gap-1.5 text-xs text-ink-secondary hover:text-ink-primary">
+              <Icon.ChevronRight size={14} className="rotate-180" aria-hidden="true"/> 返回列表
+            </button>
+          </div>
+        )}
         {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy} nodes={nodes} nodeHistory={nodeHistory}/> : (
           <EmptyState icon={Icon.AlertCircle} title="選擇警報以查看詳情" hint="使用 ↑/↓ 鍵或滑鼠點選"/>
         )}
@@ -490,7 +519,11 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
         aria-expanded={open}
         className="h-9 px-3 bg-surface-elevated hover:bg-surface-overlay border border-border-strong rounded text-sm flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        <Icon.Clock size={14} aria-hidden="true"/> 延期節點 <Kbd aria-hidden="true">S</Kbd> <Icon.ChevronDown size={12} aria-hidden="true"/>
+        {/* F2: no local/global "S" keydown handler is wired for this menu (only
+            Escape/ArrowUp/ArrowDown/Home/End inside the open menu, see
+            onKeyDown below) — the button no longer advertises a shortcut that
+            doesn't exist. */}
+        <Icon.Clock size={14} aria-hidden="true"/> 延期節點 <Icon.ChevronDown size={12} aria-hidden="true"/>
       </button>
       {open && (
         <div

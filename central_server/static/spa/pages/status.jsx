@@ -189,20 +189,20 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           </FilterChip>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto scroll-thin">
+      <div className="flex-1 overflow-y-auto overflow-x-auto scroll-thin">
         <table className="w-full text-xs tnum">
           <thead className="sticky top-0 bg-surface-base z-10 border-b border-border-strong">
             <tr className="text-[10px] text-ink-muted uppercase tracking-wider">
-              <th className="text-left font-semibold px-3 py-2">節點</th>
-              <th className="text-left font-semibold px-3 py-2">類型</th>
-              <th className="text-left font-semibold px-3 py-2">位置</th>
-              <th className="text-left font-semibold px-3 py-2">狀態</th>
-              <th className="text-right font-semibold px-3 py-2">心跳</th>
-              <th className="text-right font-semibold px-3 py-2">上傳</th>
-              <th className="text-left font-semibold px-3 py-2">串流健康</th>
-              <th className="text-right font-semibold px-3 py-2">溫度 / 水位</th>
-              <th className="text-left font-semibold px-3 py-2">電源</th>
-              <th className="text-right font-semibold px-3 py-2 pr-4">動作</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">節點</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">類型</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">位置</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">狀態</th>
+              <th scope="col" className="text-right font-semibold px-3 py-2">心跳</th>
+              <th scope="col" className="text-right font-semibold px-3 py-2">上傳</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">串流健康</th>
+              <th scope="col" className="text-right font-semibold px-3 py-2">溫度 / 水位</th>
+              <th scope="col" className="text-left font-semibold px-3 py-2">電源</th>
+              <th scope="col" className="text-right font-semibold px-3 py-2 pr-4">動作</th>
             </tr>
           </thead>
           <tbody>

@@ -133,35 +133,48 @@ const WeatherPage = () => {
               comment for restoration guidance. */}
         </div>
         <div className="bg-surface-panel border border-border-subtle rounded p-4 overflow-x-auto">
-          <div className="flex gap-1 items-end" style={{ minWidth: '720px' }}>
-            {fc.map((f, i) => {
-              // Distinguish "no data yet" (null from backend) from a genuine
-              // zero. Zero rain/wind should look like a flat bar; null should
-              // read as "we don't have this hour" (dashed placeholder + em-dash
-              // label) so operators don't misread absent data as calm weather.
-              const hasRain = Number.isFinite(f.rain);
-              const hasWind = Number.isFinite(f.wind);
-              return (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
-                  <div className="text-[10px] text-sev-info font-mono tnum">{hasRain ? f.rain : '—'}</div>
-                  <div
-                    className={`w-full rounded-t ${hasRain ? 'bg-sev-info/40' : 'border-t border-dashed border-sev-info/40'}`}
-                    style={{ height: hasRain ? (f.rain / maxRain) * 60 + 'px' : '4px' }}
-                  ></div>
-                  <div
-                    className={`w-full rounded-t ${hasWind ? 'bg-sev-warn/40' : 'border-t border-dashed border-sev-warn/40'}`}
-                    style={{ height: hasWind ? (f.wind / maxWind) * 60 + 'px' : '4px' }}
-                  ></div>
-                  <div className="text-[10px] text-sev-warn font-mono tnum">{hasWind ? f.wind : '—'}</div>
-                  <div className="text-[10px] text-ink-muted font-mono tnum mt-1">{f.h}</div>
-                </div>
-              );
-            })}
-          </div>
-          <div className="flex items-center gap-4 mt-3 text-[10px] text-ink-muted">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-sev-info/60"></span>雨量 mm/h</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-sev-warn/60"></span>風速 km/h</span>
-          </div>
+          {/* F5 (audit 2026-07-19): fc is [] when /api/weather/current
+              succeeded (w.available true, page renders) but
+              /api/weather/forecast failed or returned no rows. Previously
+              this fell through to an empty flex row + legend with no
+              explanation. Show an explicit EmptyState instead of a silent
+              blank chart. */}
+          {fc.length === 0 ? (
+            <EmptyState icon={Icon.CloudRain} title="36 小時預報暫時無法載入"
+              hint="目前僅有即時天氣資料，預報資料稍後會自動重試"/>
+          ) : (
+            <>
+              <div className="flex gap-1 items-end" style={{ minWidth: '720px' }}>
+                {fc.map((f, i) => {
+                  // Distinguish "no data yet" (null from backend) from a genuine
+                  // zero. Zero rain/wind should look like a flat bar; null should
+                  // read as "we don't have this hour" (dashed placeholder + em-dash
+                  // label) so operators don't misread absent data as calm weather.
+                  const hasRain = Number.isFinite(f.rain);
+                  const hasWind = Number.isFinite(f.wind);
+                  return (
+                    <div key={i} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
+                      <div className="text-[10px] text-sev-info font-mono tnum">{hasRain ? f.rain : '—'}</div>
+                      <div
+                        className={`w-full rounded-t ${hasRain ? 'bg-sev-info/40' : 'border-t border-dashed border-sev-info/40'}`}
+                        style={{ height: hasRain ? (f.rain / maxRain) * 60 + 'px' : '4px' }}
+                      ></div>
+                      <div
+                        className={`w-full rounded-t ${hasWind ? 'bg-sev-warn/40' : 'border-t border-dashed border-sev-warn/40'}`}
+                        style={{ height: hasWind ? (f.wind / maxWind) * 60 + 'px' : '4px' }}
+                      ></div>
+                      <div className="text-[10px] text-sev-warn font-mono tnum">{hasWind ? f.wind : '—'}</div>
+                      <div className="text-[10px] text-ink-muted font-mono tnum mt-1">{f.h}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-4 mt-3 text-[10px] text-ink-muted">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-sev-info/60"></span>雨量 mm/h</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-sev-warn/60"></span>風速 km/h</span>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

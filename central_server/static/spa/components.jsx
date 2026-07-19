@@ -266,6 +266,37 @@ const DriftMeter = React.memo(({ sec, max = 30 }) => {
   );
 }, (prev, next) => prev.sec === next.sec && prev.max === next.max);
 
+// ---------- Overlay stack (Escape-key top-of-stack precedence) ----------
+// Every overlay in this file (ShortcutsModal, MuteDrawer, CommandPalette,
+// NodeSidePanel, the logout confirmation dialog, the mobile nav drawer)
+// registers its own Escape-key listener. Without coordination, opening a
+// second overlay on top of a first means BOTH close on a single Escape press
+// (every listener fires independently — they're all attached to
+// window/document, not nested inside one another, so stopPropagation between
+// them does nothing). window.__SDPRS_OVERLAY_STACK tracks currently-open
+// overlays in open-order; each overlay calls useOverlayTop(isOpen) and only
+// acts on Escape when it reports true (i.e. it is the most-recently-opened
+// overlay still open).
+window.__SDPRS_OVERLAY_STACK = window.__SDPRS_OVERLAY_STACK || [];
+let __sdprsOverlaySeq = 0;
+function useOverlayTop(active) {
+  const idRef = useRef(null);
+  useEffect(() => {
+    if (!active) return;
+    const id = ++__sdprsOverlaySeq;
+    idRef.current = id;
+    window.__SDPRS_OVERLAY_STACK.push(id);
+    return () => {
+      window.__SDPRS_OVERLAY_STACK = window.__SDPRS_OVERLAY_STACK.filter(x => x !== id);
+      idRef.current = null;
+    };
+  }, [active]);
+  return () => {
+    const stack = window.__SDPRS_OVERLAY_STACK;
+    return stack.length > 0 && stack[stack.length - 1] === idRef.current;
+  };
+}
+
 // ---------- Status Strip ----------
 
 const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
@@ -277,14 +308,28 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const logoutDialogRef = useRef(null);
   const logoutTriggerRef = useRef(null);
+  const logoutConfirmBtnRef = useRef(null);
+  const isLogoutTop = useOverlayTop(logoutConfirmOpen);
 
   // Focus trap for logout confirmation dialog. Captures the trigger element
   // on open so focus can be restored on close. Traps Tab/Shift+Tab within
-  // the dialog's focusable elements.
+  // the dialog's focusable elements. On open, focus moves to the primary
+  // (destructive) button so keyboard users land directly on it. Escape closes
+  // — guarded by useOverlayTop so it only fires when this dialog is the
+  // topmost open overlay (see F4 / useOverlayTop above).
   useEffect(() => {
     if (!logoutConfirmOpen) return;
     logoutTriggerRef.current = document.activeElement;
+    if (logoutConfirmBtnRef.current) {
+      try { logoutConfirmBtnRef.current.focus(); } catch (_) {}
+    }
     const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (!isLogoutTop()) return;
+        e.stopPropagation();
+        setLogoutConfirmOpen(false);
+        return;
+      }
       if (e.key === 'Tab' && logoutDialogRef.current) {
         const focusable = logoutDialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
         if (focusable.length === 0) return;
@@ -359,7 +404,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
   }, [audioReplayIn, unackCount, muted, muteState]);
 
   return (
-    <div className="h-12 fixed inset-x-0 top-0 z-40 bg-surface-panel border-b border-border-subtle flex items-center px-4 gap-3 noselect">
+    <div className="h-12 fixed inset-x-0 top-0 z-40 bg-surface-panel border-b border-border-subtle flex items-center pl-14 md:pl-4 pr-4 gap-3 noselect">
       {/* Logo + wordmark */}
       <div className="flex items-center gap-2.5 pr-3 border-r border-border-subtle h-full">
         <div className={`w-7 h-7 rounded flex items-center justify-center ${unackCount > 0 ? 'bg-sev-critical/15 text-sev-critical' : 'bg-sev-ok/15 text-sev-ok'}`}>
@@ -425,24 +470,31 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
         )}
       </div>
 
-      {/* Right cluster */}
-      <div className="flex items-center gap-1">
+      {/* Right cluster. On <md this row can exceed the viewport width (all
+          controls render at every breakpoint save for the three explicitly
+          `hidden md:*`'d below); the body has global overflow:hidden so any
+          overflow here would be invisible AND unreachable. overflow-x-auto +
+          flex-shrink-0 on each child keeps every control reachable via a
+          horizontal scroll gesture instead of being clipped (F1). */}
+      <div className="flex items-center gap-2 md:gap-1 min-w-0 overflow-x-auto scroll-thin">
         {operators && operators.length > 1 && <OperatorsCluster operators={operators} currentUser={window.SDPRS_USER || ''}/>}
-        <button onClick={onOpenCmdK} title="命令面板 (⌘K / Ctrl+K)" className="hidden md:flex items-center gap-1 h-7 px-2 ml-1 rounded border border-border-subtle bg-surface-elevated hover:bg-surface-overlay text-xs text-ink-muted transition-colors">
+        <button onClick={onOpenCmdK} title="命令面板 (⌘K / Ctrl+K)" className="hidden md:flex flex-shrink-0 items-center gap-1 h-7 px-2 ml-1 rounded border border-border-subtle bg-surface-elevated hover:bg-surface-overlay text-xs text-ink-muted transition-colors">
           <Icon.Search size={12}/> <span>跳轉...</span> <Kbd>⌘K</Kbd>
         </button>
+        {/* Touch targets bumped to 44×44 on mobile (F9); desktop keeps the
+            original 32×32 visual size via the md: override. */}
         <button onClick={onToggleFocus} title="夜深 / 專注模式 (Ctrl+.)"
           aria-pressed={!!focusMode}
           aria-label={focusMode ? '關閉專注模式' : '啟用專注模式（隱藏資訊級警報）'}
-          className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${focusMode ? 'text-sev-info bg-sev-info/10 ring-1 ring-sev-info/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}>
+          className={`flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center transition-colors ${focusMode ? 'text-sev-info bg-sev-info/10 ring-1 ring-sev-info/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}>
           <Icon.Moon size={16} aria-hidden="true"/>
         </button>
-        <button onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" aria-label="開啟鍵盤捷徑說明" className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
+        <button onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" aria-label="開啟鍵盤捷徑說明" className="flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
           <Icon.Keyboard size={16} aria-hidden="true"/>
         </button>
         <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Theme (T)"
           aria-label={theme === 'dark' ? '切換為淺色主題' : '切換為深色主題'}
-          className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
+          className="flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
           {theme === 'dark' ? <Icon.Moon size={16} aria-hidden="true"/> : <Icon.Sun size={16} aria-hidden="true"/>}
         </button>
         {/* Audio-armed pill — browsers block AudioContext playback until the
@@ -453,7 +505,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             onClick={() => { try { window.SDPRS_AUDIO.arm(); } catch (_) {} }}
             title={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效 (瀏覽器需要一次使用者互動)'}
             disabled={audioArmed}
-            className={`hidden md:inline-flex items-center gap-1 h-6 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
+            className={`hidden md:inline-flex flex-shrink-0 items-center gap-1 h-6 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
           >
             {audioArmed ? '🔊 音效已啟用' : '🔇 點擊啟用音效'}
           </button>
@@ -467,13 +519,13 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
               ? `開啟音效抽屜（目前全域靜音，${activeMutes} 個來源已抑制）`
               : `開啟音效抽屜（${activeMutes} 個來源已抑制）`
           }
-          className={`relative w-8 h-8 rounded flex items-center justify-center transition-colors ${activeMutes > 0 ? 'text-sev-warn hover:bg-sev-warn/10 ring-1 ring-sev-warn/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}
+          className={`relative flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center transition-colors ${activeMutes > 0 ? 'text-sev-warn hover:bg-sev-warn/10 ring-1 ring-sev-warn/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}
         >
           {muted ? <Icon.VolumeX size={16} aria-hidden="true"/> : <Icon.Volume2 size={16} aria-hidden="true"/>}
           {activeMutes > 0 && <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sev-warn text-[9px] font-bold text-black flex items-center justify-center tnum">{activeMutes}</span>}
         </button>
-        <div className="w-px h-6 bg-border-subtle mx-1"></div>
-        <button onClick={() => setLogoutConfirmOpen(true)} className="flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
+        <div className="flex-shrink-0 w-px h-6 bg-border-subtle mx-1"></div>
+        <button onClick={() => setLogoutConfirmOpen(true)} className="flex-shrink-0 flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
           <div className="w-6 h-6 rounded-full bg-gradient-to-br from-sev-info to-purple-500 flex items-center justify-center text-[10px] font-semibold text-white">
             {(window.SDPRS_USER || '?').slice(0, 2).toUpperCase()}
           </div>
@@ -485,12 +537,12 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
         </button>
       </div>
       {logoutConfirmOpen && (
-        <div ref={logoutDialogRef} role="dialog" aria-modal="true" aria-label="確認登出" className="fixed inset-0 z-[110] bg-black/60 flex items-center justify-center p-4" onClick={() => setLogoutConfirmOpen(false)}>
+        <div ref={logoutDialogRef} role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title" className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-4" onClick={() => setLogoutConfirmOpen(false)}>
           <div className="bg-surface-elevated border border-border-strong rounded-lg p-5 max-w-xs w-full shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="text-sm font-semibold text-ink-primary mb-3">確定要登出嗎？</div>
+            <div id="logout-confirm-title" className="text-sm font-semibold text-ink-primary mb-3">確定要登出嗎？</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setLogoutConfirmOpen(false)} className="px-3 h-8 rounded text-sm text-ink-secondary hover:bg-surface-overlay">取消</button>
-              <button onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
+              <button ref={logoutConfirmBtnRef} onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
             </div>
           </div>
         </div>
@@ -520,6 +572,7 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
   const lastFocusedRef = useRef(null);
 
   const closeDrawer = () => setMobileNavOpen(false);
+  const isNavDrawerTop = useOverlayTop(mobileNavOpen);
 
   // Navigate and close drawer on nav item click.
   const handleNavClick = (id) => {
@@ -529,7 +582,10 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
 
   // Focus trap + Escape + focus restore. On open, capture the currently-focused
   // element then move focus into the drawer. On close, restore focus. Tab and
-  // Shift+Tab are trapped within the drawer's focusable elements.
+  // Shift+Tab are trapped within the drawer's focusable elements. Escape is
+  // guarded by useOverlayTop so it only closes this drawer when it's the
+  // topmost open overlay (see F4 / useOverlayTop above) — otherwise a
+  // MuteDrawer/CommandPalette/etc. opened on top of it would also disappear.
   useEffect(() => {
     if (!mobileNavOpen) return;
     lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
@@ -539,7 +595,12 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
       if (firstBtn) { try { firstBtn.focus(); } catch (_) {} }
     }, 50);
     const onKey = (e) => {
-      if (e.key === 'Escape') { closeDrawer(); return; }
+      if (e.key === 'Escape') {
+        if (!isNavDrawerTop()) return;
+        e.stopPropagation();
+        closeDrawer();
+        return;
+      }
       if (e.key === 'Tab' && drawerRef.current) {
         const focusable = drawerRef.current.querySelectorAll(
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -636,13 +697,22 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
 
       {/* Mobile slide-out drawer — always rendered, off-screen when closed so
           the CSS transition can animate the slide-in. aria-hidden when closed
-          prevents screen readers from reading the off-screen content. */}
+          prevents screen readers from reading the off-screen content, and
+          `inert` (F11) additionally removes its buttons from the tab order
+          and blocks interaction — aria-hidden alone doesn't stop a sighted
+          keyboard user from tabbing into off-screen content. Empty-string
+          value (rather than a boolean) is intentional: this React/react-dom
+          build (18.3.1) has no built-in prop mapping for `inert`, so it falls
+          through the generic custom-attribute path, where a boolean `true`
+          is dropped entirely but a string value is passed through verbatim
+          via setAttribute, and `undefined` removes the attribute. */}
       <div
         ref={drawerRef}
         role="dialog"
         aria-modal={mobileNavOpen}
         aria-label="導覽選單"
         aria-hidden={!mobileNavOpen}
+        inert={!mobileNavOpen ? '' : undefined}
         className={`md:hidden fixed left-0 top-12 bottom-10 w-56 z-50 bg-surface-panel border-r border-border-subtle flex flex-col noselect transform transition-transform duration-300 ease-in-out ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {navContent}
@@ -748,11 +818,17 @@ const ShortcutsModal = ({ open, onClose }) => {
   const [q, setQ] = useState('');
   const dialogRef = useRef(null);
   const lastFocusedRef = useRef(null);
+  const isTop = useOverlayTop(open);
   React.useEffect(() => {
     if (!open) return;
     lastFocusedRef.current = document.activeElement;
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Escape') {
+        if (!isTop()) return;
+        e.stopPropagation();
+        onClose();
+        return;
+      }
       if (e.key === 'Tab' && dialogRef.current) {
         const focusable = dialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
         if (focusable.length === 0) return;
@@ -781,7 +857,7 @@ const ShortcutsModal = ({ open, onClose }) => {
   );
   const byCat = matches.reduce((acc, s) => { (acc[s.cat] = acc[s.cat] || []).push(s); return acc; }, {});
   return (
-    <div className="fixed inset-0 z-50 bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
       <div
         ref={dialogRef}
         role="dialog"
@@ -792,7 +868,7 @@ const ShortcutsModal = ({ open, onClose }) => {
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
           <h2 className="text-base font-semibold flex items-center gap-2"><Icon.Keyboard size={18}/> 鍵盤捷徑</h2>
-          <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
         </div>
         <div className="px-5 pt-3 pb-2 border-b border-border-subtle">
           <div className="relative">
@@ -844,6 +920,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const lastFocusedRef = useRef(null);
   // Inline error for the "解除" unsnooze API call; keyed by node id.
   const [unsnoozeErr, setUnsnoozeErr] = useState(null);
+  const isTop = useOverlayTop(open);
   // No local countdown ticker: n.snoozeMin is already a whole-minute value
   // from api.jsx mapNode and only refreshes on the parent poll (~20s). A
   // sub-minute setInterval would just re-render without changing the number,
@@ -853,14 +930,36 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // Focus + Escape trap. On open, capture the currently-focused element then
   // focus lands on the panel's heading (not the ✕ close button) so screen
   // readers announce the panel's purpose. On close, focus is restored to the
-  // element that opened the drawer. See H-9.
+  // element that opened the drawer. See H-9. Tab/Shift+Tab are trapped within
+  // the drawer's focusable elements (F8); Escape is guarded by useOverlayTop
+  // so it only closes this drawer when it's the topmost open overlay (F4).
   useEffect(() => {
     if (!open) return;
     lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
     if (headingRef.current) {
       try { headingRef.current.focus(); } catch (_) {}
     }
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (!isTop()) return;
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key === 'Tab' && drawerRef.current) {
+        const focusable = drawerRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
@@ -957,7 +1056,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
             <Icon.VolumeX size={18} className={activeCount > 0 ? 'text-sev-warn' : ''}/>
             音效抑制 / 音量
           </h2>
-          <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
         </div>
 
         <div className="p-5 space-y-4">
@@ -1179,7 +1278,7 @@ Object.assign(window, {
 
 const OperatorsCluster = ({ operators, currentUser }) => {
   return (
-    <div className="flex items-center gap-1 h-6 px-1.5 rounded border border-border-subtle bg-surface-elevated">
+    <div className="flex-shrink-0 flex items-center gap-1 h-6 px-1.5 rounded border border-border-subtle bg-surface-elevated">
       <span className="text-[10px] text-ink-muted">線上</span>
       <div className="flex -space-x-1">
         {operators.map(op => (
@@ -1249,7 +1348,7 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
           <Icon.ClipboardList size={14}/>
           <span className="text-sm font-semibold">班次接班摘要 · {operator}</span>
         </div>
-        <button onClick={onDismiss} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
+        <button onClick={onDismiss} aria-label="關閉" title="關閉" className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
       </div>
       <div className="p-4 space-y-3">
         <div>
@@ -1293,17 +1392,25 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const [hi, setHi] = useState(0);
   const paletteRef = useRef(null);
   const lastFocusedRef = useRef(null);
+  const isTop = useOverlayTop(open);
 
   React.useEffect(() => {
     if (open) { setQ(''); setHi(0); }
   }, [open]);
 
-  // Escape closes + focus trap + focus restore on close.
+  // Escape closes + focus trap + focus restore on close. Escape is guarded
+  // by useOverlayTop so it only fires when this palette is the topmost open
+  // overlay (F4 / useOverlayTop above).
   React.useEffect(() => {
     if (!open) return;
     lastFocusedRef.current = document.activeElement;
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Escape') {
+        if (!isTop()) return;
+        e.stopPropagation();
+        onClose();
+        return;
+      }
       if (e.key === 'Tab' && paletteRef.current) {
         const focusable = paletteRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
         if (focusable.length === 0) return;
@@ -1363,7 +1470,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex items-start justify-center pt-24" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] bg-surface-base/60 backdrop-blur-sm flex items-start justify-center pt-24" onClick={onClose}>
       <div
         ref={paletteRef}
         role="dialog"
@@ -1453,6 +1560,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   // Element that had focus before the panel opened; restored on close so
   // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
   const lastFocusedRef = useRef(null);
+  const isTop = useOverlayTop(!!node);
   React.useEffect(() => {
     if (node) {
       setDraft({ location: node.location || '' });
@@ -1462,17 +1570,39 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
     }
   }, [node?.id]);
 
-  // A11y: Escape closes; on open, capture the previously-focused element then
-  // focus lands on the panel heading (not the ✕ close button) so screen
-  // readers announce the node id/name first. On close, focus is restored to
-  // the element that opened the panel. See H-9.
+  // A11y: Escape closes (guarded by useOverlayTop so it only fires when this
+  // panel is the topmost open overlay — F4); Tab/Shift+Tab are trapped within
+  // the panel's focusable elements (F8). On open, capture the
+  // previously-focused element then focus lands on the panel heading (not
+  // the ✕ close button) so screen readers announce the node id/name first.
+  // On close, focus is restored to the element that opened the panel. See H-9.
   React.useEffect(() => {
     if (!node) return;
     lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
     if (headingRef.current) {
       try { headingRef.current.focus(); } catch (_) {}
     }
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (!isTop()) return;
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key === 'Tab' && panelRef.current) {
+        const focusable = panelRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
@@ -1511,6 +1641,16 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
     }
   };
 
+  // F3: Cancel must discard the in-progress edit, not just close the editor.
+  // Previously this only flipped `editing` back to false — `draft` (and any
+  // `locationError`) were left as-is, so reopening the editor on the same
+  // node showed the abandoned edit instead of the saved node.location.
+  const cancelEdits = () => {
+    setDraft({ location: node.location || '' });
+    setLocationError(null);
+    setEditing(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-surface-base/40 flex justify-end" onClick={onClose}>
       <div
@@ -1531,7 +1671,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
             <span className={`w-2 h-2 rounded-full bg-sev-${node.status === 'offline' || node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok'}`}></span>
             <span className="text-sm text-ink-secondary">{node.name}</span>
           </h2>
-          <button onClick={onClose} className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
         </div>
         <div className="p-4 space-y-4">
           {/* Snapshot — live JPEG (camera + fresh frame) or fallback icon */}
@@ -1552,7 +1692,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                 </button>
               ) : (
                 <div className="flex gap-1">
-                  <button onClick={() => setEditing(false)} disabled={saving} className="text-[10px] text-ink-muted hover:text-ink-primary px-1.5 h-5 rounded bg-surface-elevated disabled:opacity-50">取消</button>
+                  <button onClick={cancelEdits} disabled={saving} className="text-[10px] text-ink-muted hover:text-ink-primary px-1.5 h-5 rounded bg-surface-elevated disabled:opacity-50">取消</button>
                   <button onClick={saveEdits} disabled={saving} aria-busy={saving} className="text-[10px] text-white px-1.5 h-5 rounded bg-sev-info hover:bg-blue-600 disabled:opacity-50">{saving ? '儲存中…' : '儲存'}</button>
                 </div>
               )}
@@ -1569,10 +1709,11 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
               </div>
               {editing ? (
                 <div className="pt-2 border-t border-border-subtle/60">
-                  <label className="text-[10px] text-ink-muted block mb-0.5">
+                  <label htmlFor="node-location-input" className="text-[10px] text-ink-muted block mb-0.5">
                     位置 <span className="text-ink-dim">(格式: 樓層 · 區域)</span>
                   </label>
                   <input
+                    id="node-location-input"
                     value={draft?.location ?? ''}
                     onChange={e => {
                       setDraft({ ...(draft || {}), location: e.target.value });
@@ -1580,10 +1721,11 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                     }}
                     placeholder="例: 3F · 西側走廊"
                     aria-invalid={!!locationError}
+                    aria-describedby={locationError ? 'node-location-error' : undefined}
                     className={`w-full h-7 px-2 text-xs bg-surface-base border rounded focus:outline-none ${locationError ? 'border-sev-critical focus:border-sev-critical' : 'border-border-strong focus:border-sev-info'}`}
                   />
                   {locationError && (
-                    <div className="text-sev-critical text-xs mt-1">{locationError}</div>
+                    <div id="node-location-error" className="text-sev-critical text-xs mt-1">{locationError}</div>
                   )}
                   <div className="text-[10px] text-ink-dim mt-1 flex items-center gap-1">
                     <Icon.Info size={10}/>
