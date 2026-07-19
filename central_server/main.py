@@ -214,10 +214,24 @@ class CSRFOriginMiddleware(BaseHTTPMiddleware):
 
         # Same-origin allowlist: derived from the request's own Host header
         # and URL scheme. This is what makes a same-origin browser POST work.
+        # Behind a TLS-terminating reverse proxy (Zeabur, nginx, cloudfront…)
+        # request.url.scheme is the INTERNAL scheme (usually http) while the
+        # browser's Origin/Referer carries the EXTERNAL scheme (https). Trust
+        # X-Forwarded-Proto if present, and additionally allow both schemes on
+        # the same host so a proxy that strips the forwarded header doesn't
+        # produce a false-positive CSRF rejection for a same-origin request.
         allowed = set()
         host = request.headers.get("host", "").strip()
         if host:
-            allowed.add(f"{request.url.scheme.lower()}://{host.lower()}")
+            host_lc = host.lower()
+            allowed.add(f"http://{host_lc}")
+            allowed.add(f"https://{host_lc}")
+            fwd_proto = request.headers.get("x-forwarded-proto", "").strip().lower()
+            if fwd_proto:
+                # In case a proxy rewrites Host and forwards the original
+                # externally-facing host in X-Forwarded-Host.
+                fwd_host = request.headers.get("x-forwarded-host", host).strip().lower()
+                allowed.add(f"{fwd_proto}://{fwd_host}")
 
         # Optional extra trusted origins from env (comma-separated). For
         # deployments that front the app under additional hostnames.

@@ -215,6 +215,38 @@ def test_csrf_referer_fallback_passes_when_origin_absent(client):
     assert "CSRF" not in r.text
 
 
+def test_csrf_https_origin_passes_when_request_scheme_is_http(client):
+    """Regression: behind a TLS-terminating proxy (Zeabur, nginx, cloudfront)
+    the app sees `http://` internally while the browser's Origin header is
+    `https://<same-host>`. The middleware must NOT 403 that — same-host
+    same-origin is legitimate regardless of internal scheme. Before the fix,
+    the allowlist was computed as `{request.url.scheme}://{host}` = `http://testserver`,
+    so an `https://testserver` Origin fell out of allowed and 403'd all
+    state-changing SPA requests behind Zeabur."""
+    r = client.post(
+        "/api/session/extend",
+        headers={"Origin": "https://testserver"},
+    )
+    assert r.status_code == 401  # gate passed, route rejected on auth
+    assert "CSRF" not in r.text
+
+
+def test_csrf_forwarded_proto_header_honored(client):
+    """When X-Forwarded-Proto is present (real deployment behind a proxy),
+    combining it with the request's Host header must produce a matching
+    allowed origin. Belt-and-suspenders for the both-schemes guard above."""
+    r = client.post(
+        "/api/session/extend",
+        headers={
+            "Origin": "https://ops.example.com",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "ops.example.com",
+        },
+    )
+    assert r.status_code == 401
+    assert "CSRF" not in r.text
+
+
 def test_csrf_trusted_origins_env_extends_allowlist(client, monkeypatch):
     """(8) CSRF_TRUSTED_ORIGINS is honored — an origin listed there must
     be accepted even though it is not the request's own Host. Comma-
