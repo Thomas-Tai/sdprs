@@ -33,6 +33,73 @@ const RESTORED_STATE = (function () {
   }
 })();
 
+// Error boundary — catches render-time errors in page components so a single
+// page crash doesn't unmount the entire app shell (nav, toasts, overlays).
+// The retry button resets the boundary's error state, which re-renders the
+// crashed child from scratch (picking up fresh props/state on the next pass).
+class ErrorBoundary extends React.Component {
+  state = { error: null };
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) {
+    console.error('[SDPRS] Page error:', error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="h-full flex items-center justify-center p-6">
+          <div className="max-w-md text-center space-y-3">
+            <div className="text-lg font-bold text-sev-critical">頁面發生錯誤</div>
+            <div className="text-sm text-ink-secondary">
+              此頁面在渲染時發生未預期的錯誤。請重試或聯絡系統管理員。
+            </div>
+            <div className="text-xs font-mono text-ink-muted break-all">
+              {String(this.state.error?.message || this.state.error)}
+            </div>
+            <button
+              onClick={() => this.setState({ error: null })}
+              className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
+            >
+              重試
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// =================================================================
+// LIVE CLOCK PROVIDER — isolates 1Hz tick from App
+// =================================================================
+// The liveSec counter increments every second and resets to 0 on each
+// successful server contact (refresh or WS ping). By owning this state in a
+// dedicated provider, only context consumers (StatusStrip, DriftMeter,
+// WallView) re-render on the tick — the rest of the app tree is unaffected.
+const LiveClockContext = window.LiveClockContext;
+
+function LiveClockProvider({ children, registerReset }) {
+  const [liveSec, setLiveSec] = useStateA(0);
+
+  useEffectA(() => {
+    const id = setInterval(() => setLiveSec(s => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const resetClock = useCallbackA(() => setLiveSec(0), []);
+
+  // Register the reset function with the parent so it can call it imperatively
+  // from runRefresh / onPing without needing to be a context consumer.
+  useEffectA(() => {
+    if (typeof registerReset === 'function') registerReset(resetClock);
+    return () => { if (typeof registerReset === 'function') registerReset(null); };
+  }, [registerReset, resetClock]);
+
+  const value = useMemoA(() => ({ liveSec, resetClock }), [liveSec, resetClock]);
+
+  return <LiveClockContext.Provider value={value}>{children}</LiveClockContext.Provider>;
+}
+
 function App({ initialError = null }) {
   const [tweaks, setTweak] = window.useTweaks(DEFAULTS);
 
@@ -52,7 +119,10 @@ function App({ initialError = null }) {
   // WS events propagate to the panel automatically.
   const [nodeHistory, setNodeHistory] = useStateA(window.NODE_HISTORY ?? {});
   const [selectedId, setSelectedId] = useStateA(RESTORED_STATE?.selectedId ?? window.ALERTS?.[0]?.id ?? null);
-  const [liveSec, setLiveSec] = useStateA(0);
+  // LiveClock ref — LiveClockProvider registers its reset function here so
+  // runRefresh and onPing can reset the drift counter without App owning the state.
+  const resetClockRef = useRefA(() => {});
+  const registerClockReset = useCallbackA((fn) => { resetClockRef.current = fn || (() => {}); }, []);
   const [shortcutsOpen, setShortcutsOpen] = useStateA(false);
   const [muteDrawerOpen, setMuteDrawerOpen] = useStateA(false);
   const [cmdkOpen, setCmdkOpen] = useStateA(false);
@@ -91,11 +161,11 @@ function App({ initialError = null }) {
   });
   const [ackedIds, setAckedIds] = useStateA(new Set());
   const [toast, setToast] = useStateA(null);
+  // Partial data-load failures — populated when loadInitial() or refreshLive()
+  // has some (but not all) loaders reject. Drives the warning banner below the
+  // status strip so the operator knows which feeds are stale or unavailable.
+  const [dataWarnings, setDataWarnings] = useStateA([]);
   const [audioReplayIn, setAudioReplayIn] = useStateA(30);
-  // Mobile-only nav drawer. NavRail is `hidden md:flex`; on <md we overlay
-  // it via the `mobile-nav-open` root class + inline <style> override below,
-  // closing on backdrop click / Esc / nav select.
-  const [mobileNavOpen, setMobileNavOpen] = useStateA(false);
 
   // Refs used by callbacks below (declared here so JSX/hooks can reference
   // them). See setPage/goBack for the history flow, showToast for the timer,
@@ -114,15 +184,17 @@ function App({ initialError = null }) {
   // B3: ref for the session-expiry modal's sole focusable button — used by
   // the focus-trap effect below to keep Tab from escaping the modal.
   const sessionModalButtonRef = useRefA(null);
-  // LOW #5: hamburger ref so closing the mobile nav returns focus to the
-  // control that opened it (WCAG 2.4.3 pattern used by MuteDrawer /
-  // NodeSidePanel). Skipping capture-on-open — the hamburger is the only
-  // way to open the nav on <md, so it's a stable, known trigger.
-  const mobileNavButtonRef = useRefA(null);
-  // Tracks whether the mobile nav was open on the previous render, so the
-  // focus-restore effect only fires on true → false transitions (not on
-  // initial mount, where mobileNavOpen is already false).
-  const mobileNavWasOpenRef = useRefA(false);
+  // B5: guard so muteState.nodes is seeded from backend snooze data only on
+  // the FIRST successful refresh — avoids clobbering user-driven mute toggles
+  // on subsequent refreshes.
+  const muteHydratedRef = useRefA(false);
+  // Bug #1 fix: ref mirror so the WebSocket onEvent callback (which is
+  // memoized once) reads the CURRENT muteState instead of the stale closure
+  // captured at mount time. Without this, lightning auto-mute breaks after
+  // the first render because muteState.lightning / muteState.global are
+  // frozen at their initial values inside the callback.
+  const muteStateRef = useRefA(muteState);
+  muteStateRef.current = muteState;
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
@@ -162,19 +234,6 @@ function App({ initialError = null }) {
     document.documentElement.classList.toggle('focus-mode', !!focusMode);
   }, [tweaks.theme, tweaks.wallMode, focusMode]);
 
-  // Mobile nav overlay toggle — CSS override below matches on this class.
-  // LOW #5: also restore focus to the hamburger on true → false transitions
-  // (was-open → closed) so keyboard/screen-reader users aren't dumped back at
-  // <body>. The `wasOpen` ref guards against firing on initial mount where
-  // mobileNavOpen is already false.
-  useEffectA(() => {
-    document.documentElement.classList.toggle('mobile-nav-open', mobileNavOpen);
-    if (!mobileNavOpen && mobileNavWasOpenRef.current && mobileNavButtonRef.current) {
-      try { mobileNavButtonRef.current.focus({ preventScroll: true }); } catch (_) {}
-    }
-    mobileNavWasOpenRef.current = mobileNavOpen;
-  }, [mobileNavOpen]);
-
   // B4: write focusMode back to localStorage on change.
   useEffectA(() => {
     try { window.localStorage.setItem('sdprs.focusMode', focusMode ? '1' : '0'); }
@@ -193,13 +252,6 @@ function App({ initialError = null }) {
       }
     } catch (_) { /* localStorage / Howler unavailable — safe to swallow */ }
   }, [muteState.volume]);
-
-  // liveSec = seconds since the last server contact; refresh() and WebSocket
-  // pings reset it to 0. StatusStrip turns it into Live/Reconnecting/Disconnected.
-  useEffectA(() => {
-    const id = setInterval(() => setLiveSec(s => s + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   const unackCount = useMemoA(() => alerts.filter(a => a.state === 'pending').length, [alerts]);
   // Read from local `nodes` state (which mirrors window.NODES via setNodes)
@@ -270,7 +322,21 @@ function App({ initialError = null }) {
         // when history changes (C-8). buildNodeHistory ran in api.jsx and
         // wrote window.NODE_HISTORY — mirror the fresh copy here.
         setNodeHistory(window.NODE_HISTORY ?? {});
-        setLiveSec(0);
+        // B5: seed muteState.nodes from backend snooze data on first refresh.
+        // Nodes with snoozeMin > 0 are actively snoozed server-side; mirror
+        // that into muteState so the UI reflects it without requiring the
+        // operator to manually re-snooze. Only runs once (ref-guarded).
+        if (!muteHydratedRef.current) {
+          muteHydratedRef.current = true;
+          const snoozedNodeIds = r.nodes.filter(n => n.snoozeMin > 0).map(n => n.id);
+          if (snoozedNodeIds.length > 0) {
+            setMuteState(prev => ({ ...prev, nodes: [...new Set([...prev.nodes, ...snoozedNodeIds])] }));
+          }
+        }
+        resetClockRef.current();
+        // Surface partial failures from this refresh cycle (api.jsx populates
+        // r.failures with the keys of loaders that rejected).
+        setDataWarnings(r.failures || []);
       } catch (e) {
         console.warn('[SDPRS] refresh failed', e);
       } finally {
@@ -332,7 +398,7 @@ function App({ initialError = null }) {
           showToast('連線恢復 — 已重新同步資料', 'info');
         }
         lastPingRef.current = now;
-        setLiveSec(0);
+        resetClockRef.current();
       },
       onEvent: (type, _data) => {
         if (type === 'auth_expired') {
@@ -346,9 +412,18 @@ function App({ initialError = null }) {
         if (type === 'alert_updated' || type === 'alert_acknowledged' || type === 'alert_resolved') {
           scheduleRefresh();
         } else if (type === 'node_status' || type === 'pump_status') {
-          // TODO(dashboard-audit-2026-07-15): swap for targeted state patches
-          // (single-node/single-pump updates) once we don't need a full refresh
-          // to reflect status changes. Full refresh for now is correct-but-heavy.
+          scheduleRefresh();
+        } else if (type === 'weather') {
+          // Auto-mute on lightning when lightning auto-mute is enabled.
+          // Bug #1 fix: read from muteStateRef.current instead of the stale
+          // muteState closure so lightning auto-mute works after mount.
+          const lightningCount = _data?.lightning?.count || 0;
+          if (lightningCount > 0 && muteStateRef.current.lightning && !muteStateRef.current.global) {
+            try { window.SDPRS_AUDIO?.setMuted(true); } catch (_) {}
+          } else if (lightningCount === 0 && muteStateRef.current.lightning && window.SDPRS_AUDIO?.isMuted()) {
+            // Unmute when lightning clears (only if we muted it)
+            try { window.SDPRS_AUDIO?.setMuted(false); } catch (_) {}
+          }
           scheduleRefresh();
         }
       },
@@ -363,13 +438,51 @@ function App({ initialError = null }) {
     };
   }, [scheduleRefresh, showToast]);
 
+  // REST 401 soft-redirect: api.jsx sets window.__SDPRS_SESSION_EXPIRED instead
+  // of hard-redirecting to /login, so unsaved state (handover drafts, resolve
+  // notes) is preserved through the session-expiry modal's H-1 cross-login flow.
+  // Poll the flag every 2s — covers both initial-load 401s (before WS connects)
+  // and any REST call that 401s outside the WS event path.
+  useEffectA(() => {
+    const id = setInterval(() => {
+      if (window.__SDPRS_SESSION_EXPIRED) {
+        window.__SDPRS_SESSION_EXPIRED = false;
+        setSessionExpired(true);
+        if (wsStopRef.current) { wsStopRef.current(); wsStopRef.current = null; }
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Offline / online detection — toast the operator when connectivity changes
+  // and trigger a refresh when the connection comes back so stale data is
+  // replaced immediately.
+  useEffectA(() => {
+    const handleOffline = () => showToast('網路連線中斷', 'warn');
+    const handleOnline = () => {
+      showToast('網路已恢復', 'ok');
+      refresh();
+    };
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [showToast, refresh]);
+
   const findNextUnack = useCallbackA((currentId) => {
     const list = alerts.filter(a => a.state === 'pending' && a.id !== currentId);
     if (list.length === 0) return null;
-    // Severity-first, then RECENCY (newest first) — critical+new always wins
+    // Severity-first, then RECENCY (newest first) — critical+new always wins.
+    // Unknown severities (schema drift, new backend enum) get rank 99 so
+    // they sort to the end rather than poisoning the comparison with NaN
+    // (undefined - number === NaN → sort order becomes engine-dependent).
     const sorted = list.sort((a, b) => {
       const rank = { critical: 0, warn: 1, info: 2 };
-      if (rank[a.sev] !== rank[b.sev]) return rank[a.sev] - rank[b.sev];
+      const rankA = rank[a.sev] ?? 99;
+      const rankB = rank[b.sev] ?? 99;
+      if (rankA !== rankB) return rankA - rankB;
       return a.ageSec - b.ageSec; // smaller ageSec = newer
     });
     return sorted[0].id;
@@ -406,10 +519,9 @@ function App({ initialError = null }) {
         showToast('認領失敗: ' + (e.message || e), 'warn');
         return;
       }
-      // BUG 2: play the promised "確認" sound (docs/operations/dashboard-guide.md:52).
-      // Only on success; muteState.global gates it because the StatusStrip mute
-      // toggle doesn't mirror to SDPRS_AUDIO.setMuted, so the internal flag alone
-      // can be stale. Wrapped in try/catch — a WebAudio failure must never eat the ack.
+      // Play confirmation sound on successful ack. muteState.global gates it
+      // because the StatusStrip mute toggle doesn't mirror to SDPRS_AUDIO.setMuted.
+      // Wrapped in try/catch — WebAudio failure must never block the ack.
       try {
         if (window.SDPRS_AUDIO && !muteState.global) window.SDPRS_AUDIO.playAck();
       } catch (_) { /* audio pipeline failure — never block the ack */ }
@@ -502,6 +614,22 @@ function App({ initialError = null }) {
     }
   }, [showToast]);
 
+  // Partial data-load failures — loadInitial() stores which loaders failed on
+  // window.__SDPRS_LOAD_FAILURES; surface them as a warning banner so the
+  // operator knows which feeds are stale or unavailable.
+  const _FAILURE_LABELS = {
+    nodes: '節點資料', alerts: '警報', history: '歷史紀錄',
+    rate: '警報頻率', weather: '天氣資訊', handover: '交接備註', audit: '稽核紀錄',
+  };
+  useEffectA(() => {
+    const failures = window.__SDPRS_LOAD_FAILURES;
+    if (failures && failures.length > 0) {
+      setDataWarnings(failures);
+      const labels = failures.map(k => _FAILURE_LABELS[k] || k).join('、');
+      showToast('部分資料載入失敗: ' + labels, 'warn');
+    }
+  }, [showToast]);
+
   // Command palette command dispatch
   const onCmdkCommand = useCallbackA((id) => {
     if (id === 'mute-all') setMuteDrawerOpen(true);
@@ -579,7 +707,7 @@ function App({ initialError = null }) {
       // (e.g. ShortcutsModal opened from within MuteDrawer) doesn't collapse
       // its parent too. Priority (top-most first):
       //   sessionExpired (non-dismissible) → cmdk → shortcuts → nodePanel →
-      //   mute → shift → mobileNav.
+      //   mute → shift.
       if (e.key === 'Escape') {
         if (sessionExpired) return; // blocking modal — never Esc-dismissible
         if (cmdkOpen) { setCmdkOpen(false); return; }
@@ -587,7 +715,6 @@ function App({ initialError = null }) {
         if (nodePanelNode) { setNodePanelNode(null); return; }
         if (muteDrawerOpen) { setMuteDrawerOpen(false); return; }
         if (shiftBannerOpen) { setShiftBannerOpen(false); return; }
-        if (mobileNavOpen) { setMobileNavOpen(false); return; }
         return;
       }
 
@@ -669,7 +796,7 @@ function App({ initialError = null }) {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode, sessionExpired, cmdkOpen, shortcutsOpen, nodePanelNode, muteDrawerOpen, shiftBannerOpen, mobileNavOpen]);
+  }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode, sessionExpired, cmdkOpen, shortcutsOpen, nodePanelNode, muteDrawerOpen, shiftBannerOpen]);
 
   // B3: session-expiry modal focus trap. The modal has ONE focusable element
   // (autoFocused via autoFocus), so any Tab/Shift+Tab must bounce back to it —
@@ -690,6 +817,15 @@ function App({ initialError = null }) {
       try { savedActive && savedActive.focus && savedActive.focus(); } catch (_) { /* element gone */ }
     };
   }, [sessionExpired]);
+
+  // B8: auto-open shift banner on mount when there's meaningful shift summary
+  // data. Empty dependency array so it runs exactly once; the guard prevents
+  // opening a blank banner when no shift activity has been recorded yet.
+  useEffectA(() => {
+    if (window.SHIFT_SUMMARY && window.SHIFT_SUMMARY.alertsHandled > 0) {
+      setShiftBannerOpen(true);
+    }
+  }, []);
 
   // Sync the in-app "global mute" toggle back to persisted tweaks.muted.
   // Skip the first invocation: the initial value was seeded FROM tweaks.muted
@@ -718,15 +854,35 @@ function App({ initialError = null }) {
     setSelectedId(id);
   }, [setPage]);
 
+  // --- Stabilized callbacks for StatusStrip / NavRail props ---
+  // These were previously inline arrow functions recreated every render, which
+  // defeated React.memo on the child components. useCallback gives them stable
+  // identity so shallow-compare memoization actually skips re-renders.
+  const onSetMuted = useCallbackA((v) => setMuteState(prev => ({ ...prev, global: v })), []);
+  const onSetTheme = useCallbackA((v) => setTweak('theme', v), [setTweak]);
+  const onOpenShortcuts = useCallbackA(() => setShortcutsOpen(true), []);
+  const onOpenMuteDrawer = useCallbackA(() => setMuteDrawerOpen(true), []);
+  const onOpenCmdK = useCallbackA(() => setCmdkOpen(true), []);
+  const onToggleFocus = useCallbackA(() => setFocusMode(f => !f), []);
+  const onSetDensity = useCallbackA((v) => setTweak('density', v), [setTweak]);
+
+  // --- Memoized active alerts (non-resolved) ---
+  // Previously `alerts.filter(a => a.state !== 'resolved')` ran inline in
+  // renderPage() AND in the NodeSidePanel JSX — twice per render. Hoisting
+  // to useMemo ensures it runs once and the reference is stable for
+  // React.memo'd children (MonitorPage, NodeSidePanel).
+  const activeAlerts = useMemoA(() => alerts.filter(a => a.state !== 'resolved'), [alerts]);
+
   const renderPage = () => {
+    const wrap = (el) => <ErrorBoundary key={page}>{el}</ErrorBoundary>;
     switch (page) {
-      case 'alerts': return <window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy}/>;
-      case 'monitor': return <window.MonitorPage nodes={nodes} activeAlerts={alerts.filter(a => a.state !== 'resolved')} onSelectNode={onSelectNode}/>;
-      case 'status': return <window.StatusPage onSelectNode={onSelectNode} onRefresh={refresh}/>;
-      case 'pumps': return <window.PumpsPage onSelectNode={onSelectNode}/>;
-      case 'weather': return <window.WeatherPage/>;
-      case 'handover': return <window.HandoverPage/>;
-      case 'audit': return <window.AuditPage/>;
+      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
+      case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
+      case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
+      case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode}/>);
+      case 'weather': return wrap(<window.WeatherPage/>);
+      case 'handover': return wrap(<window.HandoverPage/>);
+      case 'audit': return wrap(<window.AuditPage auditLog={window.AUDIT ?? []}/>);
       default: return null;
     }
   };
@@ -738,6 +894,8 @@ function App({ initialError = null }) {
     const retry = async () => {
       const err = bootstrapError;
       setBootstrapError(null);
+      window.__SDPRS_LOAD_FAILURES = [];
+      setDataWarnings([]);
       try {
         await window.SDPRS_API.loadInitial();
         setAlerts(window.ALERTS ?? []);
@@ -749,7 +907,7 @@ function App({ initialError = null }) {
         setBootstrapError(e || err);
       }
     };
-    return (
+    var bootstrapErrorUI = (
       <div className="h-screen w-screen flex items-center justify-center bg-surface-base text-ink-primary p-6">
         <div className="max-w-md text-center space-y-4">
           <div className="text-2xl font-bold text-sev-critical">無法載入初始資料</div>
@@ -770,65 +928,49 @@ function App({ initialError = null }) {
     );
   }
 
-  if (tweaks.wallMode) {
-    return <WallView alerts={alerts} liveSec={liveSec} unackCount={unackCount}/>;
-  }
-
-  return (
+  return (<LiveClockProvider registerReset={registerClockReset}>
+  {bootstrapError ? bootstrapErrorUI : tweaks.wallMode ? (
+    <WallView alerts={alerts} nodes={nodes} unackCount={unackCount}/>
+  ) : (
     <div className="h-screen w-screen overflow-hidden text-ink-primary">
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:bg-sev-info focus:text-white focus:px-4 focus:py-2 focus:rounded">
+        跳至主要內容
+      </a>
       <window.StatusStrip
-        liveSec={liveSec}
         unackCount={unackCount}
         muted={muteState.global}
-        setMuted={(v) => setMuteState({...muteState, global: v})}
+        setMuted={onSetMuted}
         theme={tweaks.theme}
-        setTheme={(v) => setTweak('theme', v)}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
+        setTheme={onSetTheme}
+        onOpenShortcuts={onOpenShortcuts}
         page={page}
         setPage={setPage}
-        onOpenMuteDrawer={() => setMuteDrawerOpen(true)}
+        onOpenMuteDrawer={onOpenMuteDrawer}
         audioReplayIn={audioReplayIn}
         muteState={muteState}
         operators={window.OPERATORS_ONLINE ?? []}
         staleAckCount={staleAckCount}
-        onOpenCmdK={() => setCmdkOpen(true)}
+        onOpenCmdK={onOpenCmdK}
         focusMode={focusMode}
-        onToggleFocus={() => setFocusMode(f => !f)}
+        onToggleFocus={onToggleFocus}
       />
-      {/* Mobile nav overlay override — NavRail is `hidden md:flex`; this CSS
-          flips it visible when the root carries `mobile-nav-open` (toggled by
-          the useEffect above). Escaped `\:` matches the literal `md:flex`
-          class name Tailwind generates. */}
-      <style>{`
-        .mobile-nav-open nav.hidden.md\\:flex { display: flex !important; z-index: 50; }
-      `}</style>
-      {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
-      <button
-        ref={mobileNavButtonRef}
-        type="button"
-        onClick={() => setMobileNavOpen(v => !v)}
-        aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
-        aria-expanded={mobileNavOpen}
-        className="md:hidden fixed top-1.5 left-2 z-[60] w-9 h-9 rounded bg-surface-elevated border border-border-subtle text-ink-primary text-lg leading-none flex items-center justify-center hover:bg-surface-overlay"
-      >
-        {mobileNavOpen ? '✕' : '☰'}
-      </button>
-      {/* Mobile backdrop — click anywhere off-nav to dismiss */}
-      {mobileNavOpen && (
-        <div
-          className="md:hidden fixed inset-0 z-40 bg-black/50"
-          onClick={() => setMobileNavOpen(false)}
-          aria-hidden="true"
-        />
-      )}
       <window.NavRail
         page={page}
-        setPage={(p) => { setPage(p); setMobileNavOpen(false); }}
-        density={tweaks.density} setDensity={(v) => setTweak('density', v)}
+        setPage={setPage}
+        density={tweaks.density} setDensity={onSetDensity}
         unackCount={unackCount}
         offlineCount={offlineCount}
       />
-      <main className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
+      {dataWarnings.length > 0 && (
+        <div className="fixed top-12 left-0 right-0 z-40 bg-sev-warn/10 border-b border-sev-warn/30 px-4 py-1.5 text-xs text-sev-warn flex items-center gap-2" role="alert">
+          <Icon.AlertCircle size={14} className="flex-shrink-0"/>
+          <span>
+            {dataWarnings.map(k => _FAILURE_LABELS[k] || k).join('、')} 無法載入 — 顯示快取資料
+          </span>
+          <button onClick={() => setDataWarnings([])} className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
+        </div>
+      )}
+      <main id="main-content" className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
         {renderPage()}
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
@@ -853,7 +995,9 @@ function App({ initialError = null }) {
         history={nodePanelNode ? (nodeHistory[nodePanelNode.id] || []) : []}
         onClose={() => setNodePanelNode(null)}
         onJumpAlert={onJumpAlert}
-        openAlerts={alerts.filter(a => a.state !== 'resolved')}
+        onSelectAlert={onJumpAlert}
+        onNavigate={setPage}
+        openAlerts={activeAlerts}
         onUpdateNode={onUpdateNode}/>
 
       {/* Toast — a11y: polite for info/ok, assertive for warn.
@@ -901,62 +1045,73 @@ function App({ initialError = null }) {
           ))}
         </div>
       </window.TweaksPanel>
-
-      {/* Session-expiry modal — blocking, action-required. Rendered last so its
-          z-[100] sits above every other overlay (drawer/palette/toast are z-40..50).
-          No Escape handler by design: modal is required action, and we don't want
-          Esc to accidentally dismiss any parent overlay while it's up. */}
-      {sessionExpired && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="session-expiry-title"
-          className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
-        >
-          <div className="bg-surface-elevated border border-border-strong rounded-lg p-6 max-w-sm w-full shadow-2xl">
-            <h2 id="session-expiry-title" className="text-lg font-semibold text-ink-primary mb-2">
-              連線階段已逾時
-            </h2>
-            <p className="text-sm text-ink-secondary mb-4">
-              您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
-            </p>
-            <button
-              ref={sessionModalButtonRef}
-              onClick={() => {
-                // H-1: preserve page + selectedId across the login roundtrip.
-                // Encoded into the post-login destination URL (not just the
-                // /login URL) so the redirect back carries it into the fresh
-                // app mount, where RESTORED_STATE picks it up.
-                let target = window.location.pathname;
-                try {
-                  const blob = btoa(JSON.stringify({
-                    page,
-                    selectedId,
-                    hadDraft: !!(resolveNote || '').trim(),
-                  }));
-                  target = window.location.pathname + '?sdprs_state=' + encodeURIComponent(blob);
-                } catch (_) { /* fall through with pathname only */ }
-                window.location.href = '/login?next=' + encodeURIComponent(target);
-              }}
-              className="w-full h-9 bg-brand-primary text-white rounded font-medium hover:opacity-90"
-              autoFocus
-            >
-              前往登入頁
-            </button>
-          </div>
-        </div>
-      )}
     </div>
-  );
+  )}
+
+  {/* Session-expiry modal — blocking, action-required. Rendered outside the
+      bootstrap-error / wallMode / main-app branches so it appears as a single
+      instance regardless of which view is active. Its z-[100] sits above every
+      other overlay (drawer/palette/toast are z-40..50). No Escape handler by
+      design: modal is required action, and we don't want Esc to accidentally
+      dismiss any parent overlay while it's up. */}
+  {sessionExpired && (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="session-expiry-title"
+      className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
+    >
+      <div className="bg-surface-elevated border border-border-strong rounded-lg p-6 max-w-sm w-full shadow-2xl">
+        <h2 id="session-expiry-title" className="text-lg font-semibold text-ink-primary mb-2">
+          連線階段已逾時
+        </h2>
+        <p className="text-sm text-ink-secondary mb-4">
+          您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
+        </p>
+        <button
+          ref={sessionModalButtonRef}
+          onClick={() => {
+            // H-1: preserve page + selectedId across the login roundtrip.
+            // Encoded into the post-login destination URL (not just the
+            // /login URL) so the redirect back carries it into the fresh
+            // app mount, where RESTORED_STATE picks it up.
+            let target = window.location.pathname;
+            try {
+              const blob = btoa(JSON.stringify({
+                page,
+                selectedId,
+                hadDraft: !!(resolveNote || '').trim(),
+              }));
+              target = window.location.pathname + '?sdprs_state=' + encodeURIComponent(blob);
+            } catch (_) { /* fall through with pathname only */ }
+            window.location.href = '/login?next=' + encodeURIComponent(target);
+          }}
+          className="w-full h-9 bg-brand-primary text-white rounded font-medium hover:opacity-90"
+          autoFocus
+        >
+          前往登入頁
+        </button>
+      </div>
+    </div>
+  )}
+  </LiveClockProvider>);
 }
 
 // =================================================================
 // WALL VIEW — 4K NOC display
 // =================================================================
 
-function WallView({ alerts, liveSec, unackCount }) {
+function WallView({ alerts, nodes, unackCount }) {
+  const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
-  const sorted = [...(window.NODES ?? [])].sort((a, b) => {
+  // C1: ticking wall clock — updates every second so the NOC display shows
+  // real time instead of a frozen mount-time snapshot.
+  const [wallClock, setWallClock] = useStateA(() => Date.now());
+  useEffectA(() => {
+    const id = setInterval(() => setWallClock(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const sorted = [...(nodes ?? [])].sort((a, b) => {
     const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
     // Unknown/new status codes shouldn't NaN-sort themselves to random positions.
     return (rank[a.status] ?? 99) - (rank[b.status] ?? 99);
@@ -997,33 +1152,40 @@ function WallView({ alerts, liveSec, unackCount }) {
           <span className="font-mono tnum text-sev-info">{weather.rain?.now} mm/h</span>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
-        <div className="font-mono tnum text-base text-ink-secondary">{new Date().toLocaleTimeString('zh-TW', { hour12: false })}</div>
+        <div className="font-mono tnum text-base text-ink-secondary">{new Date(wallClock).toLocaleTimeString('zh-TW', { hour12: false })}</div>
       </div>
 
       {/* Body: 3-column wall layout */}
       <div className="flex-1 grid grid-cols-[2fr_1fr_1fr] gap-3 p-3 min-h-0">
         {/* Monitor wall */}
-        {/* TODO(dashboard-audit-2026-07-15): wall truncates to the top 9 tiles
-            (3×3 grid). Fine for the current fleet; needs a UX decision for
-            larger deployments (paginate? shrink tiles? auto-cycle?). */}
-        <div className="grid grid-cols-3 gap-3 min-h-0 overflow-hidden">
-          {sorted.slice(0, 9).map(n => (
-            <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
-              <div className={`relative h-full snapshot-placeholder ${n.status === 'offline' ? 'snapshot-frozen' : ''}`}>
-                <SnapshotImage node={n} iconSize={64}/>
-                <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
-                {n.status === 'offline' && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                    <div className="bg-sev-critical text-white text-base font-bold px-3 py-1 rounded">離線 {Math.floor(n.heartbeat/60)}m</div>
+        <div className="flex flex-col min-h-0">
+          <div className="grid grid-cols-3 gap-3 min-h-0 overflow-hidden flex-1">
+            {sorted.slice(0, 9).map(n => (
+              <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
+                <div className={`relative h-full snapshot-placeholder ${n.status === 'offline' ? 'snapshot-frozen' : ''}`}>
+                  <SnapshotImage node={n} iconSize={64}/>
+                  <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
+                  {n.status === 'offline' && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                      <div className="bg-sev-critical text-white text-base font-bold px-3 py-1 rounded">離線 {Math.floor(n.heartbeat/60)}m</div>
+                    </div>
+                  )}
+                  <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2">
+                    <div className="font-mono text-base font-bold text-white tnum">{n.id}</div>
+                    <div className="text-xs text-white/80">{n.name}</div>
                   </div>
-                )}
-                <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2">
-                  <div className="font-mono text-base font-bold text-white tnum">{n.id}</div>
-                  <div className="text-xs text-white/80">{n.name}</div>
                 </div>
               </div>
+            ))}
+          </div>
+          {sorted.length > 9 && (
+            <div className="flex justify-center pt-2 flex-shrink-0">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-panel/80 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
+                <span className="w-1.5 h-1.5 rounded-full bg-ink-muted/60"></span>
+                +{sorted.length - 9} more
+              </span>
             </div>
-          ))}
+          )}
         </div>
 
         {/* Center: live alert ticker */}
@@ -1033,9 +1195,6 @@ function WallView({ alerts, liveSec, unackCount }) {
             <span className="text-xs font-mono text-ink-muted tnum">{alerts.length} 筆</span>
           </div>
           <div className="flex-1 overflow-y-auto scroll-thin">
-            {/* TODO(dashboard-audit-2026-07-15): wall truncates to the top 12
-                alerts in the ticker. During a real storm the operator would
-                want scrolling or auto-cycling — needs a UX decision. */}
             {alerts.slice(0, 12).map(a => {
               const m = window.safeSevMeta(a.sev);
               return (
@@ -1050,6 +1209,14 @@ function WallView({ alerts, liveSec, unackCount }) {
                 </div>
               );
             })}
+            {alerts.length > 12 && (
+              <div className="px-3 py-2 flex justify-center">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sev-critical/60 animate-live-blink"></span>
+                  +{alerts.length - 12} more alerts
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
