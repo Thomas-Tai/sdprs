@@ -651,6 +651,9 @@ const ShortcutsModal = ({ open, onClose }) => {
 const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const drawerRef = useRef(null);
   const headingRef = useRef(null);
+  // Element that had focus before the drawer opened; restored on close so
+  // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
+  const lastFocusedRef = useRef(null);
   // Inline error for the "解除" unsnooze API call; keyed by node id.
   const [unsnoozeErr, setUnsnoozeErr] = useState(null);
   // No local countdown ticker: n.snoozeMin is already a whole-minute value
@@ -659,16 +662,27 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // making the "剩餘 X 分鐘" text appear to jump on the poll edge instead of
   // ticking smoothly. Live smooth countdown would need snoozeUntil (ms epoch)
   // exposed on the node — deferred to api.jsx.
-  // Focus + Escape trap. On open, focus lands on the panel's heading (not the
-  // ✕ close button) so screen readers announce the panel's purpose. See H-9.
+  // Focus + Escape trap. On open, capture the currently-focused element then
+  // focus lands on the panel's heading (not the ✕ close button) so screen
+  // readers announce the panel's purpose. On close, focus is restored to the
+  // element that opened the drawer. See H-9.
   useEffect(() => {
     if (!open) return;
+    lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
     if (headingRef.current) {
       try { headingRef.current.focus(); } catch (_) {}
     }
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      const el = lastFocusedRef.current;
+      lastFocusedRef.current = null;
+      if (el && typeof el.focus === 'function') {
+        // Trigger may have unmounted (e.g. row removed by a refresh) — swallow.
+        try { el.focus(); } catch (_) {}
+      }
+    };
   }, [open, onClose]);
   if (!open) return null;
   // Prefer prop-supplied nodes (React state from caller — always fresh); fall
@@ -914,14 +928,46 @@ const EmptyState = ({ icon: IconComp = Icon.ShieldCheck, title, hint }) => (
   </div>
 );
 
-const FilterChip = ({ active, onClick, children, count }) => (
-  <button onClick={onClick}
-    aria-pressed={!!active}
-    className={`inline-flex items-center gap-1 px-2 h-6 rounded text-xs border transition-colors ${active ? 'bg-sev-info/15 text-sev-info border-sev-info/40' : 'bg-surface-elevated text-ink-secondary border-border-subtle hover:border-border-strong'}`}>
-    {children}
-    {count != null && <span className="font-mono tnum text-[10px] text-ink-muted">{count}</span>}
-  </button>
-);
+// Optional `onClear` renders a × affordance inside the chip and enables
+// Delete/Backspace when the chip has keyboard focus. When `onClear` is not
+// provided, the chip is byte-for-byte the original toggle button — existing
+// callers keep working unchanged.
+const FilterChip = ({ active, onClick, children, count, onClear }) => {
+  const handleKeyDown = (e) => {
+    if (onClear && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      onClear();
+    }
+  };
+  // The × sits inside the outer <button>; we avoid a nested real <button>
+  // (invalid HTML content model) by using a plain <span> whose click stops
+  // propagation so the chip toggle doesn't also fire. Keyboard users clear
+  // via Delete/Backspace on the focused chip (handled above), so the span
+  // doesn't need its own tab stop.
+  const handleClearClick = (e) => {
+    e.stopPropagation();
+    onClear && onClear();
+  };
+  return (
+    <button onClick={onClick}
+      onKeyDown={onClear ? handleKeyDown : undefined}
+      aria-pressed={!!active}
+      className={`inline-flex items-center gap-1 px-2 h-6 rounded text-xs border transition-colors ${active ? 'bg-sev-info/15 text-sev-info border-sev-info/40' : 'bg-surface-elevated text-ink-secondary border-border-subtle hover:border-border-strong'}`}>
+      {children}
+      {count != null && <span className="font-mono tnum text-[10px] text-ink-muted">{count}</span>}
+      {onClear && (
+        <span
+          onClick={handleClearClick}
+          title="清除 (Delete)"
+          aria-label="清除此篩選"
+          className="ml-0.5 inline-flex items-center justify-center w-3.5 h-3.5 rounded hover:bg-ink-muted/20 text-ink-muted hover:text-ink-primary leading-none cursor-pointer"
+        >
+          ×
+        </span>
+      )}
+    </button>
+  );
+};
 
 Object.assign(window, {
   Kbd, SeverityBadge, StateBadge, AgeCell, Pill, DetectorHealth, DriftMeter,
@@ -1121,20 +1167,34 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
             onKeyDown={onKey}
             placeholder="輸入頁面、警報 ID、節點、指令... (↑↓ 選擇 · Enter 開啟)"
             className="flex-1 h-11 px-3 bg-transparent text-sm placeholder-ink-muted focus:outline-none"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="cmdk-listbox"
+            aria-autocomplete="list"
+            aria-activedescendant={matches.length > 0 ? `cmd-item-${hi}` : undefined}
           />
           <Kbd>Esc</Kbd>
         </div>
-        <div className="max-h-[60vh] overflow-y-auto scroll-thin py-1">
+        <div
+          id="cmdk-listbox"
+          role="listbox"
+          aria-label="命令搜尋結果"
+          className="max-h-[60vh] overflow-y-auto scroll-thin py-1"
+        >
           {matches.length === 0 ? (
             <div className="text-center text-sm text-ink-muted py-8">找不到符合的項目</div>
           ) : (
             matches.map((it, i) => {
               const Ico = it.icon;
+              const selected = hi === i;
               return (
                 <button key={`${it.kind}-${it.id}-${i}`}
+                  id={`cmd-item-${i}`}
+                  role="option"
+                  aria-selected={selected}
                   onClick={() => fire(it)}
                   onMouseEnter={() => setHi(i)}
-                  className={`w-full px-4 py-2 flex items-center gap-3 text-left ${hi === i ? 'bg-sev-info/10' : ''}`}
+                  className={`w-full px-4 py-2 flex items-center gap-3 text-left ${selected ? 'bg-sev-info/10' : ''}`}
                 >
                   <div className="w-6 h-6 rounded bg-surface-elevated flex items-center justify-center text-ink-muted flex-shrink-0">
                     {Ico ? <Ico size={14}/> : it.kind === 'alert' ? <Icon.AlertTriangle size={14}/> : <Icon.Server size={14}/>}
@@ -1175,6 +1235,9 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   const [saving, setSaving] = useState(false);
   const panelRef = useRef(null);
   const headingRef = useRef(null);
+  // Element that had focus before the panel opened; restored on close so
+  // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
+  const lastFocusedRef = useRef(null);
   React.useEffect(() => {
     if (node) {
       setDraft({ location: node.location || '' });
@@ -1184,16 +1247,27 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
     }
   }, [node?.id]);
 
-  // A11y: Escape closes; focus lands on the panel heading (not the ✕ close
-  // button) so screen readers announce the node id/name first. See H-9.
+  // A11y: Escape closes; on open, capture the previously-focused element then
+  // focus lands on the panel heading (not the ✕ close button) so screen
+  // readers announce the node id/name first. On close, focus is restored to
+  // the element that opened the panel. See H-9.
   React.useEffect(() => {
     if (!node) return;
+    lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
     if (headingRef.current) {
       try { headingRef.current.focus(); } catch (_) {}
     }
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      const el = lastFocusedRef.current;
+      lastFocusedRef.current = null;
+      if (el && typeof el.focus === 'function') {
+        // Trigger (e.g. NodeCard tile) may have unmounted between opens — swallow.
+        try { el.focus(); } catch (_) {}
+      }
+    };
   }, [node?.id, onClose]);
 
   if (!node) return null;
