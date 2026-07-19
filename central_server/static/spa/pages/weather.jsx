@@ -1,8 +1,19 @@
 // SDPRS — Weather Page
 
-const { useState: useState_p } = React;
-
 const WeatherPage = () => {
+  // D2 (audit 2026-07-16): distinguish loading vs unavailable. api.jsx
+  // loadInitial()/refreshLive() only assign window.WEATHER once the fetch
+  // settles, so `undefined` = still loading (show spinner-style hint); an
+  // assigned object with available:false = fetch completed but the backend
+  // refused or has no data yet (show explicit "unavailable").
+  if (typeof window.WEATHER === 'undefined') {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <EmptyState icon={Icon.CloudRain} title="載入中…"
+          hint="正在取得天氣資料"/>
+      </div>
+    );
+  }
   // Guard: window.WEATHER may be null before the first weather event arrives.
   // All property accesses below must default so we don't throw pre-hydration.
   const w = window.WEATHER || {};
@@ -15,13 +26,15 @@ const WeatherPage = () => {
   // whole axis and every bar height becomes `NaNpx` → blank chart.
   const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind).filter(v => Number.isFinite(v))) : 1;
   const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain).filter(v => Number.isFinite(v))) : 1;
-  // TODO(dashboard-audit-2026-07-15): backend action for auto-mute on lightning.
-  // Local state only until the pipeline (weather WS event -> snooze fan-out) ships.
-  const [autoMuteLightning, setAutoMuteLightning] = useState_p(true);
+  // D1 (audit 2026-07-16): the "雷擊期間自動靜音" checkbox previously lived
+  // here (useState_p toggle) but had no backend plumbing — no
+  // SDPRS_MUTE.setLightningAuto() exists (grep confirmed) and no weather-WS →
+  // snooze fan-out ever shipped. Removed rather than leave a placebo. Re-add
+  // both the toggle and its state alongside the real backend action.
   if (!w.available) {
     return (
       <div className="h-full flex items-center justify-center">
-        <EmptyState icon={Icon.CloudRain} title="天氣資料未就緒"
+        <EmptyState icon={Icon.CloudRain} title="天氣資料暫時不可用"
           hint="後端天氣服務尚未啟用,或暫時無法取得資料"/>
       </div>
     );
@@ -70,8 +83,13 @@ const WeatherPage = () => {
               <span className="text-4xl font-mono font-bold tnum text-sev-info">
                 {rain.now != null ? rain.now : '—'}
               </span>
-              {/* api.jsx is splitting rain into 10min / 1h / 24h. `now` is 10-min accumulation once that lands. */}
-              <span className="text-ink-muted text-sm">mm (10min)</span>
+              {/* D3 (audit 2026-07-16): unify units with the forecast legend
+                  below. Backend rain is per-hour (Open-Meteo forecast
+                  `precipitation` is hourly; SMG current `rainfall_24h_mm` is
+                  stored from `rainfall_hourly` — see weather_service.py). No
+                  10-min bucket exists yet, so the previous "mm (10min)" label
+                  was a lie. */}
+              <span className="text-ink-muted text-sm">mm/h</span>
             </div>
             <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
               24h 累計 {rain.day != null ? rain.day : '—'} mm
@@ -110,13 +128,9 @@ const WeatherPage = () => {
       <div className="p-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold">36 小時預報</h2>
-          <label className="flex items-center gap-2 text-xs text-ink-secondary" title="偏好僅存於本次 session — 後端行動尚未接線">
-            <input type="checkbox"
-              checked={autoMuteLightning}
-              onChange={e => setAutoMuteLightning(e.target.checked)}
-              className="rounded border-border-strong bg-surface-base text-sev-info"/>
-            雷擊期間自動靜音
-          </label>
+          {/* D1 (audit 2026-07-16): "雷擊期間自動靜音" checkbox removed —
+              placebo UI with no backend plumbing. See top-of-component
+              comment for restoration guidance. */}
         </div>
         <div className="bg-surface-panel border border-border-subtle rounded p-4 overflow-x-auto">
           <div className="flex gap-1 items-end" style={{ minWidth: '720px' }}>
