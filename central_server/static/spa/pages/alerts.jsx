@@ -19,9 +19,9 @@ const FilteredEmptyState = ({ hiddenCount, onClearFilters }) => (
   </div>
 );
 
-const SystemOKState = () => {
-  const onlineCount = window.NODES.filter(n => n.status === 'online').length;
-  const total = window.NODES.length;
+const SystemOKState = ({ nodes = [] }) => {
+  const onlineCount = nodes.filter(n => n.status === 'online').length;
+  const total = nodes.length;
   const lastCheck = new Date().toLocaleTimeString('zh-TW', { hour12: false });
   return (
     <div className="flex flex-col items-center justify-center text-center py-12 px-6">
@@ -39,9 +39,9 @@ const SystemOKState = () => {
   );
 };
 
-const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount }) => {
+const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount, nodes = [] }) => {
   const m = window.safeSevMeta(alert.sev);
-  const node = window.NODES.find(n => n.id === alert.node);
+  const node = nodes.find(n => n.id === alert.node);
   const rowH = density === 'compact' ? 'h-9' : 'h-12';
   const isUrgent = alert.state === 'pending' && alert.sev === 'critical' && alert.ageSec < 60;
   // PENDING_VIDEO heuristic — api.jsx collapses PENDING_VIDEO → 'pending', so
@@ -106,9 +106,18 @@ const AlertRow = ({ alert, selected, onSelect, density, checked, onCheck, flash,
       </div>
     </div>
   );
-};
+}, (prev, next) => {
+  const pa = prev.alert, na = next.alert;
+  return pa.id === na.id && pa.sev === na.sev && pa.state === na.state &&
+    pa.ageSec === na.ageSec && pa.seen === na.seen && pa.node === na.node &&
+    pa.type === na.type && pa.viewer === na.viewer && pa.prevShift === na.prevShift &&
+    pa.ackBy === na.ackBy && (pa.timeline?.length || 0) === (na.timeline?.length || 0) &&
+    prev.selected === next.selected && prev.density === next.density &&
+    prev.checked === next.checked && prev.flash === next.flash &&
+    prev.siblingCount === next.siblingCount && prev.nodes === next.nodes;
+});
 
-const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote, busy }) => {
+const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote, busy, nodes = [], nodeHistory = {} }) => {
   const [tab, setTab] = useState_p('active');
   const [filterSev, setFilterSev] = useState_p('all');
   const [checked, setChecked] = useState_p(new Set());
@@ -280,6 +289,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 
   return (
     <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr] relative">
+      <h1 className="sr-only">警報</h1>
       {pageToast && (
         <div role="status" aria-live="polite"
           className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-3 py-2 rounded shadow-lg text-xs border ${
@@ -308,6 +318,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               <Icon.Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-muted"/>
               <input id="global-search" type="text" value={search} onChange={e => setSearch(e.target.value)}
                 placeholder="搜尋..."
+                aria-label="搜尋警報"
                 className={`h-7 pl-7 ${search.length > 0 ? 'pr-7' : 'pr-2'} w-48 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none`}/>
               {search.length > 0 ? (
                 <button
@@ -347,6 +358,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed">批次解決</button>
             <input type="text" value={bulkNote} onChange={e => setBulkNote(e.target.value)}
               placeholder="批次備註 (解決時必填)..."
+              aria-label="批次操作備註"
               className="flex-1 h-7 px-2 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
             <button onClick={() => { setChecked(new Set()); setBulkNote(''); }} className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
           </div>
@@ -368,7 +380,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         <div className="flex-1 overflow-y-auto scroll-thin">
           {filtered.length === 0 ? (
             activeList.length === 0 ? (
-              <SystemOKState/>
+              <SystemOKState nodes={nodes}/>
             ) : (
               <FilteredEmptyState hiddenCount={activeList.length}
                 onClearFilters={() => { setFilterSev('all'); setSearch(''); setTab('active'); }}/>
@@ -385,6 +397,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
                   onCheck={toggleCheck}
                   flash={ackedIds.has(a.id)}
                   siblingCount={sib}
+                  nodes={nodes}
                 />
               );
             })
@@ -394,7 +407,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 
       {/* RIGHT: Detail */}
       <div className="flex flex-col min-h-0 bg-surface-base">
-        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy}/> : (
+        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy} nodes={nodes} nodeHistory={nodeHistory}/> : (
           <EmptyState icon={Icon.AlertCircle} title="選擇警報以查看詳情" hint="使用 ↑/↓ 鍵或滑鼠點選"/>
         )}
       </div>
@@ -514,8 +527,8 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
   );
 };
 
-const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert, busy }) => {
-  const node = window.NODES.find(n => n.id === alert.node);
+const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert, busy, nodes = [], nodeHistory = {} }) => {
+  const node = nodes.find(n => n.id === alert.node);
   const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
   const [detailTab, setDetailTab] = useState_p('timeline');
@@ -541,7 +554,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
       setResolveNote(t);
     }
   };
-  const history = window.NODE_HISTORY[alert.node] || [];
+  const history = (nodeHistory[alert.node]) || [];
   const siblings = (allAlerts || []).filter(a => a.node === alert.node && a.id !== alert.id && a.state !== 'resolved');
   return (
     <>
@@ -628,7 +641,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </div>
         </div>
         {/* Mini map / floorplan */}
-        <Floorplan highlightNode={alert.node}/>
+        <Floorplan highlightNode={alert.node} nodes={nodes}/>
 
         {/* Previous events at this node — carousel */}
         {history.length > 0 && (
@@ -887,7 +900,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
 
 // ---------- Floorplan placeholder ----------
 
-const Floorplan = ({ highlightNode }) => {
+const Floorplan = ({ highlightNode, nodes = [] }) => {
   // Simple SVG floorplan with pin positions
   const PINS = {
     'G-01': { x: 80, y: 60 },  'G-02': { x: 200, y: 30 }, 'G-03': { x: 280, y: 80 },
@@ -896,12 +909,23 @@ const Floorplan = ({ highlightNode }) => {
     'P-01': { x: 130, y: 100 }, 'P-02': { x: 170, y: 100 },
     'P-03': { x: 240, y: 110 }, 'P-04': { x: 90, y: 110 },
   };
+  // When the selected alert's node isn't in the PINS mapping (new node,
+  // different floor, or renamed ID), render a plain-text notice rather than
+  // an empty floorplan that silently highlights nothing (operator thinks
+  // the map is broken).
+  const highlightMissing = highlightNode && !(highlightNode in PINS);
   return (
     <div className="mt-2 bg-surface-panel border border-border-subtle rounded p-2">
       <div className="flex items-center justify-between mb-1">
         <span className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">場域配置</span>
         <span className="text-[10px] text-ink-dim font-mono">B1F · 平面圖 [placeholder]</span>
       </div>
+      {highlightMissing ? (
+        <div className="flex items-center justify-center h-24 text-xs text-ink-muted font-mono tnum">
+          <Icon.MapPin size={14} className="mr-1.5 opacity-50"/>
+          此節點位置未在平面圖中標示
+        </div>
+      ) : (
       <svg viewBox="0 0 320 170" className="w-full h-24" preserveAspectRatio="xMidYMid meet">
         {/* Rooms */}
         <rect x="10" y="10" width="140" height="70" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
@@ -917,7 +941,7 @@ const Floorplan = ({ highlightNode }) => {
         <text x="230" y="95" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">東側大廳</text>
         {/* Pins */}
         {Object.entries(PINS).map(([id, p]) => {
-          const node = window.NODES.find(n => n.id === id);
+          const node = nodes.find(n => n.id === id);
           if (!node) return null;
           const isHi = id === highlightNode;
           const color = node.status === 'offline' || node.status === 'critical' ? '#DC2626' : node.status === 'warn' ? '#F59E0B' : '#10B981';
@@ -930,6 +954,7 @@ const Floorplan = ({ highlightNode }) => {
           );
         })}
       </svg>
+      )}
     </div>
   );
 };
