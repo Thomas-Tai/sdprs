@@ -8,7 +8,7 @@ const { useState: useState_p, useMemo: useMemo_p } = React;
 // fall through and are included — same tolerance as inDateRange below.
 const SHIFT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
-const AuditPage = () => {
+const AuditPage = ({ auditLog = [] }) => {
   const [meOnly, setMeOnly] = useState_p(false);
   const [operatorFilter, setOperatorFilter] = useState_p('all');
   const [actionFilter, setActionFilter] = useState_p('all');
@@ -33,14 +33,14 @@ const AuditPage = () => {
   };
   const operators = useMemo_p(() => {
     const set = new Set();
-    (window.AUDIT || []).forEach(a => { if (a.by) set.add(a.by); });
+    (auditLog || []).forEach(a => { if (a.by) set.add(a.by); });
     return ['all', ...Array.from(set)];
-  }, [window.AUDIT]);
+  }, [auditLog]);
   const actions = useMemo_p(() => {
     const set = new Set();
-    (window.AUDIT || []).forEach(a => { if (a.action) set.add(a.action); });
+    (auditLog || []).forEach(a => { if (a.action) set.add(a.action); });
     return ['all', ...Array.from(set)];
-  }, [window.AUDIT]);
+  }, [auditLog]);
   const cycleOperator = () => {
     const i = operators.indexOf(operatorFilter);
     setOperatorFilter(operators[(i + 1) % operators.length]);
@@ -74,7 +74,7 @@ const AuditPage = () => {
   };
   const _sessionUser = (window.SDPRS_USER && String(window.SDPRS_USER).trim()) || '';
   const _shiftFloor = Date.now() - SHIFT_WINDOW_MS;
-  const records = (window.AUDIT || []).filter(a => {
+  const records = (auditLog || []).filter(a => {
     // meOnly requires a known session user — if SDPRS_USER is unset, meOnly
     // returns nothing (safer than matching a hardcoded default). meOnly also
     // enforces the rolling 12h shift window (C3 fix) so 本班·我的動作 no
@@ -245,7 +245,7 @@ const AuditPage = () => {
                         fall back to the generic empty message (respects the
                         active filters). Entries are checked first (records.length
                         === 0 here) so a stale forbidden flag can never hide data. */}
-                    {window.AUDIT?.forbidden === true ? (
+                    {auditLog?.forbidden === true ? (
                       <EmptyState icon={Icon.ShieldAlert}
                         title="無權限查看稽核紀錄,請聯絡管理員"
                         hint="需具備管理員權限才能檢視稽核紀錄"/>
