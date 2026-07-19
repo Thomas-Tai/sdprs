@@ -10,7 +10,13 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
   const [busy, setBusy] = React.useState(false);
   const trigger = () => {
     if (busy) return;
-    if (!(window.SDPRS_API && window.SDPRS_API.snoozeNode)) return;
+    // G1: don't silently no-op when the API bundle hasn't loaded / backend is
+    // unreachable — route through onError so the parent's toast surfaces the
+    // outage instead of the operator wondering why nothing happened.
+    if (!(window.SDPRS_API && window.SDPRS_API.snoozeNode)) {
+      onError && onError(new Error('暫時無法連線後端，請稍後再試'));
+      return;
+    }
     setBusy(true);
     Promise.resolve(window.SDPRS_API.snoozeNode(node.id, 30, '從節點狀態列表靜音'))
       .then(() => onDone && onDone(node, 30))
@@ -124,31 +130,61 @@ const StatusPage = ({ onSelectNode, onRefresh }) => {
           <FilterChip active={typeFilter !== 'all'} onClick={cycleType}>
             類型: {typeLabel} <Icon.ChevronDown size={10}/>
             {typeFilter !== 'all' && (
-              <button
+              // G2: FilterChip renders a <button>; a nested real <button> is
+              // invalid HTML (browsers unwrap or split). Use span+role so the
+              // clear × stays keyboard-operable without breaking the DOM.
+              <span
+                role="button"
+                tabIndex={0}
                 aria-label="清除類型篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
                 onClick={(e) => { e.stopPropagation(); setTypeFilter('all'); }}
-              >×</button>
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setTypeFilter('all');
+                  }
+                }}
+              >×</span>
             )}
           </FilterChip>
           <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}>
             狀態: {statusLabel} <Icon.ChevronDown size={10}/>
             {statusFilter !== 'all' && (
-              <button
+              <span
+                role="button"
+                tabIndex={0}
                 aria-label="清除狀態篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
                 onClick={(e) => { e.stopPropagation(); setStatusFilter('all'); }}
-              >×</button>
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setStatusFilter('all');
+                  }
+                }}
+              >×</span>
             )}
           </FilterChip>
           <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}>
             位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span> <Icon.ChevronDown size={10}/>
             {locationFilter !== 'all' && (
-              <button
+              <span
+                role="button"
+                tabIndex={0}
                 aria-label="清除位置篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
                 onClick={(e) => { e.stopPropagation(); setLocationFilter('all'); }}
-              >×</button>
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setLocationFilter('all');
+                  }
+                }}
+              >×</span>
             )}
           </FilterChip>
         </div>
