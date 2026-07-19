@@ -41,13 +41,37 @@ def build_sensor_config():
     }
 
 
+def synthesize_display_level(readings):
+    """Publish-only water level for the dashboard % bar.
+
+    When an analog probe is wired (LEVEL_ENABLED=True) returns its reading
+    unchanged. When no analog probe is present, derives a coarse 3-step value
+    from the digital sensors so the dashboard % bar still responds:
+      100.0 if high_water is asserted
+       50.0 if the float reports safe (water above the dry-run float)
+        0.0 otherwise
+    Never used by control_logic — that path handles level_pct=None natively
+    (digital-only mode with high_water as the sole ON trigger). This is the
+    publish-side display fallback only.
+    """
+    level = readings.get("level_pct")
+    if level is not None:
+        return level
+    if readings.get("high_water") is True:
+        return 100.0
+    if readings.get("float_dry") is False:
+        return 50.0
+    return 0.0
+
+
 def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb):
     """One control-loop body. Pure of hardware except via injected objects."""
     readings = sensor_set.read_all()
     timing = pump.snapshot_timing(readings)
     decision = control_logic.decide(readings, timing, pump.ctrl_state, cfg)
     pump.apply(decision)
-    publish_cb(pump_state=pump.state, water_level=readings.get("level_pct") or 0.0,
+    publish_cb(pump_state=pump.state,
+               water_level=synthesize_display_level(readings),
                flags=decision["flags"], reason=decision["reason"])
     return decision
 

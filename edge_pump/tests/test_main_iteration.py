@@ -38,3 +38,26 @@ def test_build_config_matches_control_logic_defaults():
     # same keys today — if either side changes without the other, the logic
     # tests would silently validate values the device never runs with.
     assert main.build_config() == control_logic.DEFAULT_CONFIG
+
+
+def test_synthesize_display_level_passes_through_analog_when_wired():
+    assert main.synthesize_display_level({"level_pct": 42.5, "high_water": True}) == 42.5
+    assert main.synthesize_display_level({"level_pct": 0.0, "high_water": False}) == 0.0
+
+
+def test_synthesize_display_level_digital_only_high_water():
+    assert main.synthesize_display_level(
+        {"level_pct": None, "high_water": True, "float_dry": True}) == 100.0
+
+
+def test_synthesize_display_level_digital_only_float_safe():
+    assert main.synthesize_display_level(
+        {"level_pct": None, "high_water": False, "float_dry": False}) == 50.0
+
+
+def test_synthesize_display_level_digital_only_all_dry():
+    assert main.synthesize_display_level(
+        {"level_pct": None, "high_water": False, "float_dry": True}) == 0.0
+    # sensors disabled entirely (None everywhere)
+    assert main.synthesize_display_level(
+        {"level_pct": None, "high_water": None, "float_dry": None}) == 0.0

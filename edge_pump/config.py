@@ -33,10 +33,13 @@ LOW_THRESHOLD = 20     # 水位 <= 20% → 關閉水泵
 # 在 20%~80% 之間維持當前狀態，防止頻繁開關
 
 # ============ GPIO 引腳定義（ESP32 DevKit） ============
-RELAY_PIN = 26         # 繼電器控制（高電位 = ON）
+# Pinout aligned with bench build 2026-07-19 (student sketch authoritative):
+#   RAIN=25  HIGH_WATER=26  FLOAT=32  RELAY=33
+# LED pins moved off 25 (now RAIN) to avoid conflict.
+RELAY_PIN = 33         # 繼電器控制（高電位 = ON）
 LED_RED_PIN = 27       # 紅色 LED（水泵運行中）
-LED_GREEN_PIN = 25     # 綠色 LED（待機）
-ADC_PIN = 34           # 水位感測器 ADC 輸入（ADC1_CH6, 只讀引腳）
+LED_GREEN_PIN = 14     # 綠色 LED（待機） — was 25, moved for RAIN
+ADC_PIN = 34           # 水位感測器 ADC 輸入（ADC1_CH6, 只讀引腳）— unwired; LEVEL_ENABLED=False
 
 # Item 12: 電池監測引腳（選用）— 未接線時懸空引腳會發布雜訊電壓/來源跳動，
 # 故出廠預設 None（跳過建構、payload 省略欄位）。接線後改為 35 / 21（§6 台架驗證）。
@@ -54,24 +57,26 @@ WDT_ENABLED = True       # 生產預設為 True；開發除錯時可暫時改為
 WDT_TIMEOUT = 30000       # WDT 逾時（毫秒）
 
 # ============ 新增數位感測器（學生示範合併） ============
-FLOAT_PIN = 32          # 底部防干燒浮球開關（dry = LOW，內部上拉）
-RAIN_PIN = 33           # 雨水模組 DO（下雨 = LOW；模組供電 3.3V）
-HIGH_WATER_PIN = 13     # 選用數位高水位感測器
+# Pin map aligned with bench build 2026-07-19 (see RELAY_PIN comment above).
+FLOAT_PIN = 32          # 底部防干燒浮球開關（機械雙線）
+RAIN_PIN = 25           # MHRD 雨水模組 DO — was 33 (which is now RELAY)
+HIGH_WATER_PIN = 26     # XKC-Y25-V 高水位感測器 OUT（黃色線）— was 13
 
-# Digital sensors ship OFF until bench-commissioned (spec §6). The student
-# sketch, wiring doc, and toolkit pinout disagree on pin assignment / polarity,
-# so an un-commissioned node runs ANALOG-ONLY (LEVEL): float/rain are ignored
-# until each is polarity-verified on the bench, then flipped True here for field
-# use. sensors.py degrades a disabled sensor to None and control_logic ignores
-# it — so this is the safe default that reproduces the original analog behavior.
-LEVEL_ENABLED = True          # analog water-level sensor — primary, always on
-FLOAT_ENABLED = False         # enable ONLY after §6 bench commissioning
-RAIN_ENABLED = False          # enable ONLY after §6 bench commissioning
-HIGH_WATER_ENABLED = False
+# Bench build 2026-07-19: no analog probe wired to GPIO 34 — LEVEL disabled so
+# the phantom "100%" from an unwired input-only pin stops driving the pump ON.
+# The 3 digital sensors ARE wired, so enable them; control_logic supports
+# digital-only mode (HIGH_WATER as sole ON trigger, HYSTERESIS_ON gated on
+# level_pct is not None). Polarity (ACTIVE_LOW flags) still needs Section A
+# bench polarity check per pump-bench-commissioning.md before trusting the
+# pump-ON decision — the values below are best-guess defaults.
+LEVEL_ENABLED = False         # no analog probe wired
+FLOAT_ENABLED = True          # verify polarity per §A before deploying
+RAIN_ENABLED = True           # verify polarity per §A before deploying
+HIGH_WATER_ENABLED = True     # verify polarity per §A before deploying
 
-FLOAT_ACTIVE_LOW = True
-RAIN_ACTIVE_LOW = True
-HIGH_WATER_ACTIVE_LOW = False
+FLOAT_ACTIVE_LOW = True       # bottom float, contacts close when dry (pull-up idle HIGH)
+RAIN_ACTIVE_LOW = True        # MHRD DO: LOW when raining (module active-low)
+HIGH_WATER_ACTIVE_LOW = False # XKC-Y25-V: HIGH when water detected (typical)
 
 # ============ 控制參數 ============
 RAIN_ON_THRESHOLD = 60      # 確認下雨後降低開泵門檻（80 -> 60）
