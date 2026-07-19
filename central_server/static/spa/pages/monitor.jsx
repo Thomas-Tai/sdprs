@@ -1,11 +1,26 @@
 // SDPRS — Monitor Wall Page
 
-const { useState: useState_p } = React;
+const { useState: useState_p, useMemo: useMemo_p } = React;
 
-const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
+// ---------- ClockDisplay — isolated 1Hz leaf ----------
+// Extracted from MonitorPage so the 1-second tick only re-renders this tiny
+// component, not every NodeCard in the grid. Each NodeCard renders its own
+// ClockDisplay instance; the setInterval is per-instance but lightweight
+// (one DOM text node update per second).
+const ClockDisplay = React.memo(() => {
+  const [now, setNow] = useState_p(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span>{new Date(now).toLocaleTimeString('zh-TW', { hour12: false })}</span>
+  );
+});
+
+const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
   const frozen = node.status === 'offline' || node.upload > 60;
-  const nodeAlerts = activeAlerts.filter(a => a.node === node.id);
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   return (
     <div
@@ -66,7 +81,7 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
             <div className="text-[10px] text-white/70">{node.name}</div>
           </div>
           <div className="font-mono text-[10px] text-white/60 tnum">
-            {new Date(now || Date.now()).toLocaleTimeString('zh-TW', { hour12: false })}
+            <ClockDisplay />
           </div>
         </div>
       </div>
@@ -106,7 +121,16 @@ const NodeCard = ({ node, onSelect, activeAlerts = [], now }) => {
       )}
     </div>
   );
-};
+}, (prev, next) => {
+  const pn = prev.node, nn = next.node;
+  return pn === nn &&
+    prev.nodeAlerts === next.nodeAlerts &&
+    prev.onSelect === next.onSelect;
+});
+
+// Stable empty array — avoids creating a new [] on every render when a node
+// has no alerts, which would break React.memo's reference-equality check.
+const EMPTY_ALERTS = Object.freeze([]);
 
 const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
   // Tab state persisted to sessionStorage so navigating away and back preserves
@@ -127,22 +151,23 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
     const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
-  // Single page-level 1 Hz tick, passed down as `now` so every NodeCard's
-  // header timestamp re-renders alongside the SnapshotImage underneath
-  // (whose own ticker lives module-private in components.jsx). Without this
-  // the "last updated" label freezes for minutes.
-  const [now, setNow] = useState_p(() => Date.now());
-  React.useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  // Pre-compute Map<nodeId, alert[]> so each NodeCard/PumpCard does O(1) lookup
+  // instead of O(n) filter on every render. Recomputes only when activeAlerts
+  // reference changes (i.e. on refresh, not on tick).
+  const alertMap = useMemo_p(() => {
+    const m = new Map();
+    for (const a of (activeAlerts || [])) {
+      const list = m.get(a.node);
+      if (list) list.push(a); else m.set(a.node, [a]);
+    }
+    return m;
+  }, [activeAlerts]);
   // Audit fix: read from React `nodes` prop (fed by app.jsx setNodes on every
   // refreshLive tick), NOT `window.NODES` directly. The window mirror is
   // updated in the same tick but consuming it bypasses the load-bearing
   // React state contract — any future refactor that updates NODES without
   // triggering a re-render would silently freeze this page.
-  // Fallback to window.NODES + [] preserves the pre-hydration cold-start path.
-  const allNodes = nodes ?? window.NODES ?? [];
+  const allNodes = nodes ?? [];
   const cameraNodes = allNodes.filter(n => n.type === 'camera');
   const pumpNodes = allNodes.filter(n => n.type === 'pump');
   const visibleNodes = tab === 'cameras' ? cameraNodes : tab === 'pumps' ? pumpNodes : allNodes;
@@ -201,7 +226,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
         </div>
       </div>
       {toast && (
-        <div className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
+        <div role="status" aria-live="polite" className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
           toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
             : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
             : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
@@ -216,11 +241,11 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
           </div>
         ) : tab === 'pumps' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {sorted.map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts}/>)}
+            {sorted.map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS}/>)}
           </div>
         ) : tab === 'cameras' ? (
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-            {sorted.map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} now={now}/>)}
+            {sorted.map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS}/>)}
           </div>
         ) : (
           // 全部 — split per type, native cards per sensor
@@ -235,7 +260,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                   {[...pumpNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
-                    .map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} compact/>)}
+                    .map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS} compact/>)}
                 </div>
               </div>
             )}
@@ -249,7 +274,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
                   {[...cameraNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
-                    .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} activeAlerts={activeAlerts} now={now}/>)}
+                    .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS}/>)}
                 </div>
               </div>
             )}
@@ -262,8 +287,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
 
 // ---------- Pump Card (gauge-first, sensor-native) ----------
 
-const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
-  const nodeAlerts = activeAlerts.filter(a => a.node === node.id);
+const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false }) => {
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   const stateTone = node.status === 'offline' || node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
   const levelTone = node.level > 85 ? 'critical' : node.level > 70 ? 'warn' : 'info';
@@ -405,6 +429,11 @@ const PumpCard = ({ node, onSelect, activeAlerts = [], compact = false }) => {
       )}
     </div>
   );
-};
+}, (prev, next) => {
+  return prev.node === next.node &&
+    prev.nodeAlerts === next.nodeAlerts &&
+    prev.onSelect === next.onSelect &&
+    prev.compact === next.compact;
+});
 
 Object.assign(window, { MonitorPage });
