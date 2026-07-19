@@ -58,7 +58,11 @@ function App({ initialError = null }) {
   const [cmdkOpen, setCmdkOpen] = useStateA(false);
   const [shiftBannerOpen, setShiftBannerOpen] = useStateA(false);
   const [nodePanelNode, setNodePanelNode] = useStateA(null);
-  const [focusMode, setFocusMode] = useStateA(false);
+  // B4: persist focus mode across reloads (try/catch for Safari private mode).
+  const [focusMode, setFocusMode] = useStateA(() => {
+    try { return window.localStorage.getItem('sdprs.focusMode') === '1'; }
+    catch (_) { return false; }
+  });
   const [newAlertBannerCount, setNewAlertBannerCount] = useStateA(0);
   // Backend-signalled session expiry. Flips true when the /ws handler sends
   // {type: 'auth_expired'} immediately before its 1008 close (see
@@ -103,6 +107,13 @@ function App({ initialError = null }) {
   // Holds openSocket's teardown thunk so the auth_expired branch (below) can
   // cancel the reconnect loop from OUTSIDE the useEffect cleanup path.
   const wsStopRef = useRefA(null);
+  // B5: last-ping wall-clock. A >30s gap between onPing calls means the
+  // socket was down and just came back (pings are ~10s); we then trigger a
+  // refresh + toast so the operator knows they may have missed events.
+  const lastPingRef = useRefA(Date.now());
+  // B3: ref for the session-expiry modal's sole focusable button — used by
+  // the focus-trap effect below to keep Tab from escaping the modal.
+  const sessionModalButtonRef = useRefA(null);
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
@@ -146,6 +157,12 @@ function App({ initialError = null }) {
   useEffectA(() => {
     document.documentElement.classList.toggle('mobile-nav-open', mobileNavOpen);
   }, [mobileNavOpen]);
+
+  // B4: write focusMode back to localStorage on change.
+  useEffectA(() => {
+    try { window.localStorage.setItem('sdprs.focusMode', focusMode ? '1' : '0'); }
+    catch (_) { /* localStorage unavailable (private mode) */ }
+  }, [focusMode]);
 
   // Persist volume + push to Howler whenever muteState.volume changes.
   // VolumeSlider (in components.jsx) already calls Howler internally for the
@@ -288,7 +305,18 @@ function App({ initialError = null }) {
       // the 10s "Reconnecting…" range between 20s poll edges (audit P1 #2).
       // api.jsx surfaces ping via onPing so we don't leak the keepalive into
       // the general onEvent whitelist.
-      onPing: () => setLiveSec(0),
+      // B5: a >30s gap between pings unambiguously means the socket dropped
+      // and reconnected (pings are ~10s apart on a healthy WS), so we sync
+      // any events missed while offline and notify the operator.
+      onPing: () => {
+        const now = Date.now();
+        if (now - lastPingRef.current > 30000) {
+          scheduleRefresh();
+          showToast('連線恢復 — 已重新同步資料', 'info');
+        }
+        lastPingRef.current = now;
+        setLiveSec(0);
+      },
       onEvent: (type, _data) => {
         if (type === 'auth_expired') {
           // Server sent {type:'auth_expired'} right before its 1008 close.
@@ -316,7 +344,7 @@ function App({ initialError = null }) {
       clearInterval(poll);
       if (refreshDebounce.current) { clearTimeout(refreshDebounce.current); refreshDebounce.current = null; }
     };
-  }, [scheduleRefresh]);
+  }, [scheduleRefresh, showToast]);
 
   const findNextUnack = useCallbackA((currentId) => {
     const list = alerts.filter(a => a.state === 'pending' && a.id !== currentId);
@@ -498,7 +526,8 @@ function App({ initialError = null }) {
         // would fire 401s against the dead session, and the palette would
         // paint on top of the login modal, producing a confusing UI state.
         if (sessionExpired) return;
-        setCmdkOpen(true);
+        // B2: idempotent toggle — a second Cmd+K closes the palette.
+        setCmdkOpen(v => !v);
         return;
       }
       // H-4: inside inputs, no shortcuts fire — Escape just blurs so typing
@@ -518,9 +547,14 @@ function App({ initialError = null }) {
         return;
       }
       // Alt+← back navigation
+      // B1: only consume the event when we have app-internal history to pop;
+      // otherwise let the browser handle its native back so a first-load user
+      // can still leave the page.
       if (e.altKey && e.key === 'ArrowLeft') {
-        e.preventDefault();
-        goBack();
+        if (pageHistoryRef.current.length > 0) {
+          e.preventDefault();
+          goBack();
+        }
         return;
       }
 
@@ -619,6 +653,26 @@ function App({ initialError = null }) {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [page, selectedId, alerts, tweaks.theme, tweaks.density, tweaks.wallMode, setTweak, setPage, goBack, onAck, onResolve, findNextUnack, resolveNote, showToast, focusMode, sessionExpired, cmdkOpen, shortcutsOpen, nodePanelNode, muteDrawerOpen, shiftBannerOpen, mobileNavOpen]);
+
+  // B3: session-expiry modal focus trap. The modal has ONE focusable element
+  // (autoFocused via autoFocus), so any Tab/Shift+Tab must bounce back to it —
+  // otherwise focus can escape to controls behind the backdrop. We also save
+  // and restore document.activeElement, though in practice the modal is
+  // dismissed by navigation, so the restore branch usually never runs.
+  useEffectA(() => {
+    if (!sessionExpired) return;
+    const savedActive = document.activeElement;
+    const trap = (e) => {
+      if (e.key !== 'Tab') return;
+      e.preventDefault();
+      sessionModalButtonRef.current?.focus();
+    };
+    window.addEventListener('keydown', trap);
+    return () => {
+      window.removeEventListener('keydown', trap);
+      try { savedActive && savedActive.focus && savedActive.focus(); } catch (_) { /* element gone */ }
+    };
+  }, [sessionExpired]);
 
   // Sync the in-app "global mute" toggle back to persisted tweaks.muted.
   // Skip the first invocation: the initial value was seeded FROM tweaks.muted
@@ -849,6 +903,7 @@ function App({ initialError = null }) {
               您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
             </p>
             <button
+              ref={sessionModalButtonRef}
               onClick={() => {
                 // H-1: preserve page + selectedId across the login roundtrip.
                 // Encoded into the post-login destination URL (not just the
