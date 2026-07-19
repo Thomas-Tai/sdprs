@@ -806,6 +806,11 @@
   const setWeatherConfig = (cfg) => apiFetch('/api/weather/config', jsonBody('PUT', cfg));
   const listSmgStations = () => apiFetch('/api/weather/smg/stations');
   const listHkoStations = () => apiFetch('/api/weather/hko/stations');
+  // Force an immediate weather re-tick — server's cache is otherwise
+  // only refreshed every WEATHER_REFRESH_SECONDS (600s / 10 min default).
+  // Called after setWeatherConfig so the operator sees the new source
+  // selection reflected on the tiles within seconds, not minutes.
+  const refreshWeather = () => apiFetch('/api/weather/refresh', { method: 'POST' });
 
   const deleteNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId),
     { method: 'DELETE' });
@@ -918,7 +923,7 @@
     loadInitial, refreshLive, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
-    getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations,
+    getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
     startStream, stopStream,
     openSocket,

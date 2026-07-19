@@ -56,9 +56,28 @@ const WeatherSettings = ({ onSaved, showToast }) => {
         hko_station: config.hko_station || null,
         fallback_provider: config.fallback_provider || null,
       };
+      // Save config first (fast, DB write).
       await window.SDPRS_API.setWeatherConfig(payload);
-      showToast && showToast('天氣設定已儲存 · 下一次更新（~10 秒）生效', 'info');
+      // Force an immediate server-side re-tick so the cache reflects the
+      // new config choice BEFORE we refetch it from the SPA. Without this,
+      // the tiles wouldn't visibly change until the next scheduled tick
+      // (WEATHER_REFRESH_SECONDS = 600s / 10 min default) — that's what
+      // made the earlier "settings appear to do nothing" complaint valid.
+      // The refresh call may take 2-5s (fans out to SMG + HKO + Open-Meteo).
+      // If it fails (503 / network), we still call onRefresh so the SPA
+      // reflects whatever the server currently has cached — degrades to
+      // "changes visible on next tick" rather than blocking the save.
+      try {
+        await window.SDPRS_API.refreshWeather();
+      } catch (refreshErr) {
+        // Non-fatal — the config IS saved and will apply on next tick.
+        // Log so operators can grep browser console if they suspect a
+        // stale-cache issue after a save.
+        console.warn('[weather] refresh-after-save failed:', refreshErr);
+      }
+      // Now fetch the freshly-cached data.
       onSaved && onSaved();
+      showToast && showToast('天氣設定已儲存並套用', 'info');
     } catch (e) {
       showToast && showToast('儲存失敗：' + (e && e.message ? e.message : '未知錯誤'), 'warn');
     } finally {
