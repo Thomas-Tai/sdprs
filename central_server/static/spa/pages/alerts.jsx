@@ -198,7 +198,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         // Preserve selection + note on total failure so operator can see which
         // weren't accepted and retry after the video uploads.
         setPageToast({ tone: 'warn', msg: '批次認領失敗：所選警報都不可認領（等待影像上傳中或已認領）' });
-        await runRefreshAfterBulk().catch(() => {});
+        await runRefreshAfterBulk().catch(e => console.warn('[SDPRS] bulk-ack post-refresh failed:', e));
       } else {
         if (acked < ids.length) {
           setPageToast({ tone: 'warn', msg: '批次認領：' + acked + ' / ' + ids.length + ' 成功；其餘無法認領' });
@@ -232,7 +232,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
       const resolved = (resp && typeof resp.resolved === 'number') ? resp.resolved : ids.length;
       if (resolved === 0) {
         setPageToast({ tone: 'warn', msg: '批次解決失敗：所選警報都不可解決' });
-        await runRefreshAfterBulk().catch(() => {});
+        await runRefreshAfterBulk().catch(e => console.warn('[SDPRS] bulk-resolve post-refresh failed:', e));
       } else {
         if (resolved < ids.length) {
           setPageToast({ tone: 'warn', msg: '批次解決：' + resolved + ' / ' + ids.length + ' 成功；其餘無法解決' });
