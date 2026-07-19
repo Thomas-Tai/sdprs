@@ -217,9 +217,20 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             site_lat  REAL DEFAULT NULL,
             site_lon  REAL DEFAULT NULL,
             station_name TEXT DEFAULT NULL,
+            smg_station TEXT DEFAULT NULL,
+            hko_station TEXT DEFAULT NULL,
+            fallback_provider TEXT DEFAULT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # Option C migration (2026-07-19): add the 3 multi-source selectors
+    # to an existing (pre-Option-C) weather_config row. ALTER TABLE ADD
+    # COLUMN is safe on SQLite for a NULL-default column — no data loss.
+    for new_col in ('smg_station', 'hko_station', 'fallback_provider'):
+        try:
+            cursor.execute(f"ALTER TABLE weather_config ADD COLUMN {new_col} TEXT DEFAULT NULL;")
+        except sqlite3.OperationalError:
+            pass  # already exists
     # Migration: if table exists with old NOT NULL columns, recreate it
     try:
         cursor.execute("PRAGMA table_info(weather_config);")
@@ -345,9 +356,19 @@ def _create_tables_postgresql(conn):
             site_lat  REAL DEFAULT NULL,
             site_lon  REAL DEFAULT NULL,
             station_name TEXT DEFAULT NULL,
+            smg_station TEXT DEFAULT NULL,
+            hko_station TEXT DEFAULT NULL,
+            fallback_provider TEXT DEFAULT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
+    # Option C migration (2026-07-19): idempotent ALTER TABLE ADD COLUMN
+    # for existing installations upgrading to multi-source selectors.
+    # Postgres ADD COLUMN IF NOT EXISTS is safe repeat-run.
+    for new_col in ('smg_station', 'hko_station', 'fallback_provider'):
+        conn.execute(sqlalchemy.text(
+            f"ALTER TABLE weather_config ADD COLUMN IF NOT EXISTS {new_col} TEXT DEFAULT NULL;"
+        ))
     # Don't insert default row - empty means SMG Macau only.
     # NOTE: do NOT clear site_lat/site_lon/station_name here — this runs on
     # every startup, so an unconditional UPDATE ... = NULL would wipe the
@@ -775,30 +796,52 @@ def set_node_snooze(node_id: str, snoozed_until: Optional[str], reason: Optional
 def get_weather_config() -> Dict[str, Any]:
     """Item 9: get weather location config (singleton row).
 
-    Returns None for lat/lon if not configured (SMG Macau only mode).
+    Returns None for lat/lon and the 3 Option-C selectors when unset —
+    services/weather_service._tick falls back to hardcoded defaults
+    (SMG=外港, HKO=Hong Kong Observatory, fallback_provider=both).
     """
+    empty = {"site_lat": None, "site_lon": None, "station_name": None,
+             "smg_station": None, "hko_station": None, "fallback_provider": None}
+    cols = "site_lat, site_lon, station_name, smg_station, hko_station, fallback_provider"
     if _backend == "postgresql":
         import sqlalchemy
         database_url = os.environ.get("DATABASE_URL", "")
         engine = sqlalchemy.create_engine(database_url)
         with engine.connect() as conn:
-            result = conn.execute(sqlalchemy.text("SELECT site_lat, site_lon, station_name FROM weather_config WHERE id = 1;"))
+            result = conn.execute(sqlalchemy.text(f"SELECT {cols} FROM weather_config WHERE id = 1;"))
             row = result.fetchone()
             if row:
-                return {"site_lat": row[0], "site_lon": row[1], "station_name": row[2]}
-        return {"site_lat": None, "site_lon": None, "station_name": None}
+                return {"site_lat": row[0], "site_lon": row[1], "station_name": row[2],
+                        "smg_station": row[3], "hko_station": row[4], "fallback_provider": row[5]}
+        return empty
     with get_db_cursor() as cursor:
-        cursor.execute("SELECT site_lat, site_lon, station_name FROM weather_config WHERE id = 1;")
+        cursor.execute(f"SELECT {cols} FROM weather_config WHERE id = 1;")
         row = cursor.fetchone()
         if row:
-            return {"site_lat": row["site_lat"], "site_lon": row["site_lon"], "station_name": row["station_name"]}
-    return {"site_lat": None, "site_lon": None, "station_name": None}
+            return {"site_lat": row["site_lat"], "site_lon": row["site_lon"],
+                    "station_name": row["station_name"], "smg_station": row["smg_station"],
+                    "hko_station": row["hko_station"], "fallback_provider": row["fallback_provider"]}
+    return empty
 
 
-def set_weather_config(site_lat: Optional[float], site_lon: Optional[float], station_name: Optional[str] = None) -> bool:
-    """Item 9: update weather location config.
+def set_weather_config(
+    site_lat: Optional[float],
+    site_lon: Optional[float],
+    station_name: Optional[str] = None,
+    smg_station: Optional[str] = None,
+    hko_station: Optional[str] = None,
+    fallback_provider: Optional[str] = None,
+) -> bool:
+    """Item 9 + Option C (2026-07-19): update weather location config.
 
-    If lat/lon is None, disables Open-Meteo (SMG Macau only mode).
+    Kwargs are the Option-C multi-source selectors (SMG station, HKO
+    station, fallback provider). Any None passed here clears that field
+    — the caller (api/weather.py PUT handler) merges with the existing
+    row when a partial update is intended, so we don't ambiguously
+    interpret None as "leave unchanged" here.
+
+    If lat/lon is None, disables Open-Meteo forecast (falls back to
+    settings.SITE_LAT/SITE_LON).
     """
     if _backend == "postgresql":
         import sqlalchemy
@@ -806,15 +849,25 @@ def set_weather_config(site_lat: Optional[float], site_lon: Optional[float], sta
         engine = sqlalchemy.create_engine(database_url)
         with engine.connect() as conn:
             conn.execute(
-                sqlalchemy.text("INSERT INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, :lat, :lon, :name) ON CONFLICT (id) DO UPDATE SET site_lat = :lat, site_lon = :lon, station_name = :name, updated_at = CURRENT_TIMESTAMP;"),
-                {"lat": site_lat, "lon": site_lon, "name": station_name},
+                sqlalchemy.text(
+                    "INSERT INTO weather_config (id, site_lat, site_lon, station_name, "
+                    "smg_station, hko_station, fallback_provider) "
+                    "VALUES (1, :lat, :lon, :name, :smg, :hko, :fb) "
+                    "ON CONFLICT (id) DO UPDATE SET site_lat = :lat, site_lon = :lon, "
+                    "station_name = :name, smg_station = :smg, hko_station = :hko, "
+                    "fallback_provider = :fb, updated_at = CURRENT_TIMESTAMP;"
+                ),
+                {"lat": site_lat, "lon": site_lon, "name": station_name,
+                 "smg": smg_station, "hko": hko_station, "fb": fallback_provider},
             )
             conn.commit()
         return True
     with get_db_cursor() as cursor:
         cursor.execute(
-            "INSERT OR REPLACE INTO weather_config (id, site_lat, site_lon, station_name) VALUES (1, ?, ?, ?);",
-            (site_lat, site_lon, station_name),
+            "INSERT OR REPLACE INTO weather_config "
+            "(id, site_lat, site_lon, station_name, smg_station, hko_station, fallback_provider) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?);",
+            (site_lat, site_lon, station_name, smg_station, hko_station, fallback_provider),
         )
         return cursor.rowcount > 0
 

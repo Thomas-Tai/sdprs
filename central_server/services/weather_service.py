@@ -884,14 +884,22 @@ class WeatherService:
         hko_c = _as_cur(hko_current)
         om_c = _as_cur(om_current)
 
-        # Merge with per-field priority: SMG > HKO > Open-Meteo
-        # (matches docs/weather-multi-source-decision.md matrix). Phase 2
-        # will wire this priority to user config (fallback_provider setting).
-        merged = merge_currents([
-            (smg_c, "SMG"),
-            (hko_c, "HKO"),
-            (om_c, "Open-Meteo"),
-        ])
+        # Merge with per-field priority. SMG is always primary (澳門 is
+        # this deployment's default region); the ordering of the two
+        # fallbacks is set by the user's `fallback_provider` selection.
+        #  - "openmeteo" (default): SMG > Open-Meteo > HKO  — geographic
+        #    reasoning: Open-Meteo interpolates at the exact site lat/lon,
+        #    HKO is HK-only so it's the "last resort" for pressure gaps.
+        #  - "hko": SMG > HKO > Open-Meteo — prefers government-station
+        #    HKO readings when SMG lacks a field.
+        #  - "both" / None: SMG > HKO > Open-Meteo (same as "hko"; kept
+        #    as an alias for the "run all 3 sources" configuration).
+        fb = (weather_cfg.get("fallback_provider") or "").lower()
+        if fb == "openmeteo":
+            merge_order = [(smg_c, "SMG"), (om_c, "Open-Meteo"), (hko_c, "HKO")]
+        else:  # "hko", "both", or unset
+            merge_order = [(smg_c, "SMG"), (hko_c, "HKO"), (om_c, "Open-Meteo")]
+        merged = merge_currents(merge_order)
 
         any_ok = False
         if merged is not None:
