@@ -44,8 +44,8 @@
 | `CWA_API_KEY`               | `""`                          | 中央氣象署 Open Data 金鑰；**空 = 天氣服務完全停用**（`/api/weather/*` 回 503） |
 | `CWA_STATION_ID`            | `C0Z100`                      | CWA 自動氣象站代碼                                                   |
 | `CWA_TOWNSHIP`              | `新北市新店區`                | CWA 鄉鎮預報用地區名                                                 |
-| `SITE_LAT`                  | `24.967`                      | 站台緯度（Open-Meteo 回退）                                          |
-| `SITE_LON`                  | `121.541`                     | 站台經度                                                             |
+| `SITE_LAT`                  | `22.19`                       | 站台緯度（Open-Meteo forecast fallback；預設對齊 SMG 澳門主源）      |
+| `SITE_LON`                  | `113.55`                      | 站台經度                                                             |
 | `WEATHER_REFRESH_SECONDS`   | `600`                         | 天氣資料重抓間隔                                                     |
 | `WEATHER_CACHE_STALE_SECONDS` | `3600`                      | 快取失效判定閾值                                                     |
 | `MEDIAMTX_METRICS_URL`      | `http://localhost:9998/metrics` | mediamtx Prometheus scrape；設為 `""` 則 `/api/stream/health` 停用   |

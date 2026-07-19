@@ -106,8 +106,12 @@ if PYDANTIC_AVAILABLE:
         CWA_API_KEY: str = ""
         CWA_STATION_ID: str = "C0Z100"
         CWA_TOWNSHIP: str = "新北市新店區"
-        SITE_LAT: float = 24.967
-        SITE_LON: float = 121.541
+        # Default coordinates match SMG Macau primary source (Outer Harbour).
+        # Set SITE_LAT/SITE_LON env vars on Zeabur for deployments elsewhere.
+        # These are used by Open-Meteo forecast when weather_config table has
+        # no user-set location (see WeatherService._tick fallback path).
+        SITE_LAT: float = 22.19
+        SITE_LON: float = 113.55
         WEATHER_REFRESH_SECONDS: int = 600
         WEATHER_CACHE_STALE_SECONDS: int = 3600
 
@@ -209,8 +213,8 @@ else:
             self.CWA_API_KEY = _get_env_str("CWA_API_KEY", "")
             self.CWA_STATION_ID = _get_env_str("CWA_STATION_ID", "C0Z100")
             self.CWA_TOWNSHIP = _get_env_str("CWA_TOWNSHIP", "新北市新店區")
-            self.SITE_LAT = _get_env_float("SITE_LAT", 24.967)
-            self.SITE_LON = _get_env_float("SITE_LON", 121.541)
+            self.SITE_LAT = _get_env_float("SITE_LAT", 22.19)   # Macau default (SMG-aligned)
+            self.SITE_LON = _get_env_float("SITE_LON", 113.55)
             self.WEATHER_REFRESH_SECONDS = _get_env_int("WEATHER_REFRESH_SECONDS", 600)
             self.WEATHER_CACHE_STALE_SECONDS = _get_env_int("WEATHER_CACHE_STALE_SECONDS", 3600)
             self.MEDIAMTX_METRICS_URL = _get_env_str("MEDIAMTX_METRICS_URL", "http://localhost:9998/metrics")
