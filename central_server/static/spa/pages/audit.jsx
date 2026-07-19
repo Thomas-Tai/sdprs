@@ -119,7 +119,9 @@ const AuditPage = () => {
     }
     try {
       await window.SDPRS_API.exportAuditCsv({
-        limit: 1000,
+        // G4: was 1000 — docs advertise 10000 as the ceiling; the previous
+        // silent cap made "matched but truncated" invisible to compliance.
+        limit: 10000,
         type: actionFilter !== 'all' ? actionFilter : undefined,
         operator: operatorParam,
         sinceMs,
@@ -212,10 +214,13 @@ const AuditPage = () => {
             onClick={exportAuditCsv}
             disabled={exportState?.tone === 'info'}
             aria-busy={exportState?.tone === 'info'}
-            title="下載目前條件的稽核紀錄 (CSV)"
+            title="下載目前條件的稽核紀錄 (CSV,最多 10000 筆)"
             className="ml-2 h-7 px-2 bg-surface-elevated border border-border-strong rounded text-xs flex items-center gap-1.5 hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-surface-elevated">
             <Icon.Download size={12}/> 匯出 CSV
           </button>
+          {/* G4: expose the server-side row ceiling so operators know when
+              they're at risk of a silent truncation and should narrow filters. */}
+          <span className="text-[10px] text-ink-muted tnum ml-1">最多 10000 筆</span>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto scroll-thin">
