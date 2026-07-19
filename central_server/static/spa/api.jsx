@@ -785,7 +785,7 @@
   // internal — pure keepalive, never surfaced.
   const _WS_EVENT_TYPES = new Set([
     'alert_updated', 'alert_acknowledged', 'alert_resolved',
-    'node_status', 'pump_status',
+    'node_status', 'pump_status', 'node_deleted',
     'auth_expired',
   ]);
   // A server that accepts the socket then closes it (auth-drop, upstream

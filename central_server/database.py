@@ -672,6 +672,34 @@ def upsert_node(
         return True
 
 
+def delete_node(node_id: str) -> bool:
+    """Remove a node and its time-series rows (pump_readings, events).
+
+    Preserves `operator_actions` — that table is append-only audit history
+    where `target_id` is a soft reference that intentionally survives retention
+    and deletion of the target row (see table comment at CREATE TABLE
+    operator_actions above). Returns True if the node row was removed."""
+    if _backend == "postgresql":
+        import sqlalchemy
+        database_url = os.environ.get("DATABASE_URL", "")
+        engine = sqlalchemy.create_engine(database_url)
+        with engine.connect() as conn:
+            conn.execute(sqlalchemy.text("DELETE FROM pump_readings WHERE node_id = :id"),
+                         {"id": node_id})
+            conn.execute(sqlalchemy.text("DELETE FROM events WHERE node_id = :id"),
+                         {"id": node_id})
+            result = conn.execute(sqlalchemy.text("DELETE FROM nodes WHERE node_id = :id"),
+                                  {"id": node_id})
+            conn.commit()
+            return result.rowcount > 0
+
+    with get_db_cursor() as cursor:
+        cursor.execute("DELETE FROM pump_readings WHERE node_id = ?", (node_id,))
+        cursor.execute("DELETE FROM events WHERE node_id = ?", (node_id,))
+        cursor.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
+        return cursor.rowcount > 0
+
+
 def set_node_location(node_id: str, location: Optional[str]) -> bool:
     """Set the user-defined deployment location for a node. Pass None or '' to clear."""
     loc = (location or "").strip() or None

@@ -388,5 +388,68 @@ def test_unsnooze_nonexistent_node_idempotent(client, monkeypatch):
     assert response.json() == {"node_id": "does-not-exist", "snoozed_until": None}
 
 
+# =============================================================================
+# DELETE /api/nodes/{node_id} — one-off node cleanup for smoke-test residue
+# (docs/deployment/zeabur-cloud.md's `smoke_test_node` and similar).
+# =============================================================================
+
+def test_delete_node_success_removes_and_broadcasts(client, monkeypatch):
+    """DELETE returns 200 with {node_id, deleted: True}, calls delete_node
+    on the DB layer, writes an audit entry, and best-effort broadcasts a
+    `node_deleted` WS event."""
+    calls = {"delete": [], "log": [], "broadcast": []}
+
+    monkeypatch.setattr(nodes_api, "db_delete_node",
+                        lambda nid: (calls["delete"].append(nid), True)[1])
+
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action",
+                        lambda user, action, target_id=None, **kw: calls["log"].append(
+                            {"user": user, "action": action, "target_id": target_id}))
+
+    # WS broadcast: patch the module-level import site inside websocket_service.
+    import central_server.services.websocket_service as ws_mod
+    monkeypatch.setattr(ws_mod, "broadcast_from_sync",
+                        lambda loop, evt: calls["broadcast"].append(evt))
+    # Every get_mqtt_service() call must return the SAME fake instance so the
+    # `_loop` we set below is visible when the route resolves the service.
+    persistent_svc = FakeMqttService(node_states)
+    persistent_svc._loop = object()
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: persistent_svc)
+
+    response = client.delete("/api/nodes/smoke_test_node")
+    assert response.status_code == 200
+    assert response.json() == {"node_id": "smoke_test_node", "deleted": True}
+    assert calls["delete"] == ["smoke_test_node"]
+    assert len(calls["log"]) == 1
+    assert calls["log"][0]["action"] == "DELETE_NODE"
+    assert calls["log"][0]["target_id"] == "smoke_test_node"
+    assert len(calls["broadcast"]) == 1
+    assert calls["broadcast"][0]["type"] == "node_deleted"
+    assert calls["broadcast"][0]["data"] == {"node_id": "smoke_test_node"}
+
+
+def test_delete_node_404_when_missing(client, monkeypatch):
+    """DELETE returns 404 when db_delete_node reports the node didn't exist.
+    Prevents silent no-op on typos + gives the SPA a distinct signal from
+    'deleted successfully'. Also ensures no audit entry / no WS broadcast
+    when the delete didn't happen."""
+    calls = {"log": [], "broadcast": []}
+
+    monkeypatch.setattr(nodes_api, "db_delete_node", lambda nid: False)
+
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action",
+                        lambda *a, **kw: calls["log"].append(a))
+    import central_server.services.websocket_service as ws_mod
+    monkeypatch.setattr(ws_mod, "broadcast_from_sync",
+                        lambda *a, **kw: calls["broadcast"].append(a))
+
+    response = client.delete("/api/nodes/does-not-exist")
+    assert response.status_code == 404
+    assert calls["log"] == []
+    assert calls["broadcast"] == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

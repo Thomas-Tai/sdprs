@@ -24,6 +24,7 @@ from ..database import (
     set_node_location,
     get_pump_readings,
     get_pump_readings_multi,
+    delete_node as db_delete_node,
 )
 from ..services.mqtt_service import get_mqtt_service
 from ..timeutil import utcnow
@@ -503,6 +504,44 @@ async def snooze_node(
     from ..services.audit_service import log_action, ACTION_SNOOZE
     log_action(user, ACTION_SNOOZE, target_id=node_id, details={"minutes": body.minutes, "reason": body.reason})
     return {"node_id": node_id, "snoozed_until": until, "snooze_reason": body.reason}
+
+
+@router.delete("/nodes/{node_id}")
+async def delete_node(
+    node_id: str,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Remove a node and its time-series data (pump_readings, events).
+    Audit trail (operator_actions) is preserved — those rows are append-only
+    by design. Broadcasts `node_deleted` over WebSocket so open dashboards
+    remove the card without waiting for the next poll.
+
+    Typical use: clean up test-only nodes that got registered by ingest
+    smoke tests (e.g. docs/deployment/zeabur-cloud.md's `smoke_test_node`)
+    and never disappear on their own because there's no auto-expiry for
+    the nodes table."""
+    from ..services.audit_service import log_action, ACTION_DELETE_NODE
+
+    existed = db_delete_node(node_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+
+    log_action(user, ACTION_DELETE_NODE, target_id=node_id)
+
+    # Fire-and-forget WS broadcast so live sessions drop the card immediately
+    # instead of showing a phantom until the next 20s poll.
+    try:
+        mqtt_svc = get_mqtt_service()
+        if mqtt_svc and getattr(mqtt_svc, "_loop", None) is not None:
+            from ..services.websocket_service import broadcast_from_sync
+            broadcast_from_sync(mqtt_svc._loop, {
+                "type": "node_deleted",
+                "data": {"node_id": node_id},
+            })
+    except Exception as e:
+        logger.debug(f"WS broadcast for node_deleted({node_id}) failed: {e}")
+
+    return {"node_id": node_id, "deleted": True}
 
 
 @router.delete("/nodes/{node_id}/snooze")

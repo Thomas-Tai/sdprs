@@ -530,7 +530,7 @@ function App({ initialError = null }) {
         }
         if (type === 'alert_updated' || type === 'alert_acknowledged' || type === 'alert_resolved') {
           scheduleRefresh();
-        } else if (type === 'node_status' || type === 'pump_status') {
+        } else if (type === 'node_status' || type === 'pump_status' || type === 'node_deleted') {
           scheduleRefresh();
         } else if (type === 'weather') {
           // Auto-mute on lightning when lightning auto-mute is enabled.
