@@ -61,7 +61,8 @@ class PumpMQTTClient:
 
     def __init__(self, ssid, password, broker, port, node_id, topic,
                  retry_interval=60, username="", mqtt_password="",
-                 wifi_connect_timeout=15, socket_timeout_s=3):
+                 wifi_connect_timeout=15, socket_timeout_s=3,
+                 keepalive=60):
         self._ssid = ssid
         self._password = password
         self._broker = broker
@@ -71,6 +72,11 @@ class PumpMQTTClient:
         self._retry_interval = retry_interval
         self._mqtt_user = username
         self._mqtt_pass = mqtt_password
+        # keepalive must be non-zero: Mosquitto 2.x rejects CONNECT with
+        # keepalive=0 as CONNACK code 2 ("Identifier Rejected") even though
+        # MQTT 3.1.1 permits it. umqtt.simple defaults to 0, so we must pass
+        # an explicit value here — 60s matches paho-mqtt's default.
+        self._keepalive = keepalive
 
         self._wifi_connected = False
         self._mqtt_connected = False
@@ -139,7 +145,8 @@ class PumpMQTTClient:
                 self._client = MQTTClient(
                     client_id=self._node_id, server=self._broker, port=self._port,
                     user=self._mqtt_user if self._mqtt_user else None,
-                    password=self._mqtt_pass if self._mqtt_pass else None)
+                    password=self._mqtt_pass if self._mqtt_pass else None,
+                    keepalive=self._keepalive)
                 # LWT: broker publishes this if we drop ungracefully
                 self._client.set_last_will(
                     self._topic,
