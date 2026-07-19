@@ -101,13 +101,20 @@ const HandoverPage = () => {
   const [saving, setSaving] = useState_p(false);
   const [dirty, setDirty] = useState_p(() => readDraft() != null);
   const [confirm, setConfirm] = useState_p(null);
+  const [pageToast, setPageToast] = useState_p(null);
+  // Brief post-save grace period: after performSave succeeds, the app-level
+  // 20s poll may round-trip the just-saved text back through window.HANDOVER
+  // before React has reconciled baseline/dirty. Without this guard the
+  // peer-changed banner flashes from the operator's OWN save — confusing
+  // and prompting them to "adopt" a phantom peer version.
+  const [saveGracePeriod, setSaveGracePeriod] = useState_p(false);
   const openConfirm = (options) => {
     setConfirm({ ...options, returnFocus: document.activeElement });
   };
   // Ticks so we re-poll window.HANDOVER whenever the app-level refresh fires
   // (app.jsx bumps its own tick and re-renders — this re-runs on every render).
   const remoteCurrent = (window.HANDOVER && window.HANDOVER.current) || '';
-  const peerChanged = dirty && remoteCurrent !== baseline;
+  const peerChanged = !saveGracePeriod && dirty && remoteCurrent !== baseline;
 
   // On every render, if the remote has changed AND the user hasn't started
   // editing yet, silently adopt the new value. Once they've edited we leave
@@ -136,6 +143,12 @@ const HandoverPage = () => {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
+
+  useEffect_p(() => {
+    if (!pageToast) return undefined;
+    const t = setTimeout(() => setPageToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [pageToast]);
 
   const setTextTracked = (v) => { setText(v); setDirty(true); };
   const replaceWithPeerCopy = () => {
@@ -220,8 +233,12 @@ const HandoverPage = () => {
       setSavedAt(p(now.getHours()) + ':' + p(now.getMinutes()) + ':' + p(now.getSeconds()));
       setBaseline(text);
       setDirty(false);
+      // Activate the post-save grace period so a poll round-trip of the
+      // just-saved text doesn't trigger the peer-changed banner.
+      setSaveGracePeriod(true);
+      setTimeout(() => setSaveGracePeriod(false), 2000);
     } catch (e) {
-      alert('儲存失敗: ' + (e.message || e));
+      setPageToast({ tone: 'error', msg: '儲存失敗: ' + (e.message || e) });
     }
     setSaving(false);
   };
@@ -246,6 +263,16 @@ const HandoverPage = () => {
   };
   return (
     <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
+      {pageToast && (
+        <div role="status" aria-live="polite"
+          className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-3 py-2 rounded shadow-lg text-xs border ${
+            pageToast.tone === 'error' ? 'bg-sev-critical/20 border-sev-critical text-sev-critical'
+            : pageToast.tone === 'warn' ? 'bg-sev-warn/20 border-sev-warn text-sev-warn'
+            : 'bg-surface-elevated border-border-strong text-ink-primary'
+          }`}>
+          {pageToast.msg}
+        </div>
+      )}
       <div>
         <div className="flex items-center gap-2 mb-3">
           <h1 className="text-base font-semibold">班次交接備註</h1>
