@@ -160,3 +160,18 @@ config.local.py
 # Backup files
 *.backup
 *.old
+
+# ------------------------------------------------------------
+# Local hardware register (MAC/IP/CPU-serial per node)
+# ------------------------------------------------------------
+# Physical inventory of commissioned edge nodes lives here so
+# operators can look up which board a MAC belongs to. Never
+# committed — LAN-internal info + hardware identifiers.
+docs/inventory/
+
+# ------------------------------------------------------------
+# UI Redesign v2 prototype tree (never commit — internal-only)
+# ------------------------------------------------------------
+docs/sdpr_UI_V2.zip
+docs/sdpr_UI_V2/
+docs/ui_redesign_v2_prompt.md
