@@ -114,6 +114,15 @@ function App({ initialError = null }) {
   // B3: ref for the session-expiry modal's sole focusable button — used by
   // the focus-trap effect below to keep Tab from escaping the modal.
   const sessionModalButtonRef = useRefA(null);
+  // LOW #5: hamburger ref so closing the mobile nav returns focus to the
+  // control that opened it (WCAG 2.4.3 pattern used by MuteDrawer /
+  // NodeSidePanel). Skipping capture-on-open — the hamburger is the only
+  // way to open the nav on <md, so it's a stable, known trigger.
+  const mobileNavButtonRef = useRefA(null);
+  // Tracks whether the mobile nav was open on the previous render, so the
+  // focus-restore effect only fires on true → false transitions (not on
+  // initial mount, where mobileNavOpen is already false).
+  const mobileNavWasOpenRef = useRefA(false);
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
@@ -154,8 +163,16 @@ function App({ initialError = null }) {
   }, [tweaks.theme, tweaks.wallMode, focusMode]);
 
   // Mobile nav overlay toggle — CSS override below matches on this class.
+  // LOW #5: also restore focus to the hamburger on true → false transitions
+  // (was-open → closed) so keyboard/screen-reader users aren't dumped back at
+  // <body>. The `wasOpen` ref guards against firing on initial mount where
+  // mobileNavOpen is already false.
   useEffectA(() => {
     document.documentElement.classList.toggle('mobile-nav-open', mobileNavOpen);
+    if (!mobileNavOpen && mobileNavWasOpenRef.current && mobileNavButtonRef.current) {
+      try { mobileNavButtonRef.current.focus({ preventScroll: true }); } catch (_) {}
+    }
+    mobileNavWasOpenRef.current = mobileNavOpen;
   }, [mobileNavOpen]);
 
   // B4: write focusMode back to localStorage on change.
@@ -787,6 +804,7 @@ function App({ initialError = null }) {
       `}</style>
       {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
       <button
+        ref={mobileNavButtonRef}
         type="button"
         onClick={() => setMobileNavOpen(v => !v)}
         aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
