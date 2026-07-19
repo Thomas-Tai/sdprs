@@ -205,13 +205,15 @@ fi
 echo -e "${BLUE}[Step 6/6] 上傳水泵控制程式...${NC}"
 
 # config.py 先上傳（其他模組 import 它），boot.py 最後（避免半成品開機）
-mpremote connect "$SERIAL_PORT" cp "$(to_native "$TMP_CONFIG")" :config.py
+# 用 'resume' 跳過 mpremote 預設的 DTR/RTS 重置——某些 CH340 板（如 pump_node_02）
+# 沒有 auto-reset 電路，DTR 觸發會讓連線半掛住；resume 直接掛到現有 REPL。
+mpremote connect "$SERIAL_PORT" resume cp "$(to_native "$TMP_CONFIG")" :config.py
 echo "  ✓ config.py"
 
 for file in main.py control_logic.py sensors.py pump_controller.py mqtt_client.py boot.py; do
     src="$PUMP_DIR/$file"
     if [[ -f "$src" ]]; then
-        mpremote connect "$SERIAL_PORT" cp "$(to_native "$src")" :"$file"
+        mpremote connect "$SERIAL_PORT" resume cp "$(to_native "$src")" :"$file"
         echo "  ✓ $file"
     else
         echo -e "${YELLOW}  ! 檔案不存在: $src${NC}"
@@ -223,12 +225,12 @@ echo -e "${GREEN}✓ 程式已上傳${NC}"
 # ===== 驗證 =====
 echo ""
 echo "ESP32 檔案系統:"
-mpremote connect "$SERIAL_PORT" ls
+mpremote connect "$SERIAL_PORT" resume ls
 
-# 軟重啟
+# 軟重啟——用 machine.soft_reset() 觸發，比 'mpremote reset' 更可靠（後者依賴 DTR）
 echo ""
 echo "軟重啟 ESP32..."
-mpremote connect "$SERIAL_PORT" reset || true
+mpremote connect "$SERIAL_PORT" resume exec "import machine; machine.soft_reset()" || true
 
 echo ""
 echo -e "${GREEN}======================================${NC}"
