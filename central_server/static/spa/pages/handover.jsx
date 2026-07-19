@@ -108,6 +108,11 @@ const HandoverPage = () => {
   // peer-changed banner flashes from the operator's OWN save — confusing
   // and prompting them to "adopt" a phantom peer version.
   const [saveGracePeriod, setSaveGracePeriod] = useState_p(false);
+  // Track the in-flight grace-period timer so a rapid double-save clears the
+  // previous timer before scheduling the new one. Without this the first
+  // timer fires between saves, drops grace back to false, and the second
+  // save's poll round-trip re-triggers the peer-changed banner.
+  const graceTimerRef = React.useRef(null);
   const openConfirm = (options) => {
     setConfirm({ ...options, returnFocus: document.activeElement });
   };
@@ -236,7 +241,11 @@ const HandoverPage = () => {
       // Activate the post-save grace period so a poll round-trip of the
       // just-saved text doesn't trigger the peer-changed banner.
       setSaveGracePeriod(true);
-      setTimeout(() => setSaveGracePeriod(false), 2000);
+      if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
+      graceTimerRef.current = setTimeout(() => {
+        graceTimerRef.current = null;
+        setSaveGracePeriod(false);
+      }, 2000);
     } catch (e) {
       setPageToast({ tone: 'error', msg: '儲存失敗: ' + (e.message || e) });
     }
