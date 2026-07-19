@@ -545,9 +545,19 @@
   // In-flight guard: if a WS event and the poll timer both call refreshLive
   // in the same tick (or a slow request outlasts the interval), we return
   // the pending promise instead of stacking a second identical fan-out.
+  //
+  // Trailing debounce: without it, a burst of 10 node_status events arriving
+  // during one in-flight refresh would settle → then trigger 10 back-to-back
+  // refetches from any callers that had queued between settle and event drain.
+  // The pending flag collapses the entire tail into ONE follow-up refresh
+  // scheduled 300ms after settle (bounded — never unbounded delay).
   let refreshLiveInFlight = null;
+  let refreshLivePending = false;
   async function refreshLive() {
-    if (refreshLiveInFlight) return refreshLiveInFlight;
+    if (refreshLiveInFlight) {
+      refreshLivePending = true;
+      return refreshLiveInFlight;
+    }
     refreshLiveInFlight = (async () => {
       // weather + handover + audit added 2026-07-16: previously initial-load
       // only, so post-503 weather recovery, peer-operator handover edits, and
@@ -593,7 +603,17 @@
           audit: window.AUDIT,
         };
       })
-      .finally(() => { refreshLiveInFlight = null; });
+      .finally(() => {
+        refreshLiveInFlight = null;
+        // Trailing debounce — if anyone queued while we were in-flight,
+        // schedule ONE follow-up refresh 300ms after settle. Reset the flag
+        // FIRST so the follow-up's own callers can flip it again if a new
+        // burst arrives while the follow-up runs.
+        if (refreshLivePending) {
+          refreshLivePending = false;
+          setTimeout(() => { refreshLive().catch(() => {}); }, 300);
+        }
+      });
     return refreshLiveInFlight;
   }
 
@@ -729,12 +749,19 @@
 
     let ws = null, closed = false, retry = 1000;
     let stableTimer = null;
+    // Track the pending reconnect setTimeout id so teardown (auth_expired)
+    // can cancel it — otherwise a scheduled connect() would still fire and,
+    // while it early-returns on `closed`, leaks the timer and lets any
+    // future teardown-then-refire miss the cancel window (MED F2).
+    let reconnectTimer = null;
     const clearStable = () => { if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; } };
+    const clearReconnect = () => { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } };
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const connect = () => {
       if (closed) return;
+      reconnectTimer = null;
       try { ws = new WebSocket(proto + '//' + location.host + '/ws'); }
-      catch (e) { setTimeout(connect, retry); return; }
+      catch (e) { reconnectTimer = setTimeout(connect, retry); return; }
       ws.onopen = () => {
         // Delay backoff reset — see _WS_STABLE_MS comment.
         clearStable();
@@ -769,13 +796,13 @@
       ws.onclose = () => {
         clearStable();
         if (closed) return;
-        setTimeout(connect, retry);
+        reconnectTimer = setTimeout(connect, retry);
         retry = Math.min(retry * 2, 15000);
       };
       ws.onerror = () => { if (ws) ws.close(); };
     };
     connect();
-    return () => { closed = true; clearStable(); if (ws) ws.close(); };
+    return () => { closed = true; clearStable(); clearReconnect(); if (ws) ws.close(); };
   }
 
   window.SDPRS_API = {
