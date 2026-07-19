@@ -116,6 +116,15 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   const [snoozeOpen, setSnoozeOpen] = useState_p(false);
   const [bulkNote, setBulkNote] = useState_p('');
   const [bulkBusy, setBulkBusy] = useState_p(false);
+  // Page-level toast for bulk-action feedback — replaces window.alert() so
+  // the NOC operator doesn't get a modal dialog that drops keyboard focus
+  // mid-triage (audit MED A1). Mirrors the `toast` pattern in status.jsx.
+  const [pageToast, setPageToast] = useState_p(null);
+  useEffect_p(() => {
+    if (!pageToast) return undefined;
+    const t = setTimeout(() => setPageToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [pageToast]);
 
   const activeList = tab === 'active'
     ? alerts.filter(a => a.state !== 'resolved')
@@ -152,12 +161,20 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   // SDPRS_API.refreshLive() alone only updates window.ALERTS and leaves the
   // visible list stale until the next 20s poll (audit finding MED #5).
   const runRefreshAfterBulk = async () => {
+    // Rethrow when EVERY attempted refresh path failed, so bulk handlers
+    // can keep the selection intact for retry (audit MED A2). A missing
+    // path is not a failure — silently succeeds as before.
+    let lastErr = null;
+    let attempted = false;
     if (typeof onRefresh === 'function') {
-      try { await onRefresh(); return; } catch (_) { /* fall through */ }
+      attempted = true;
+      try { await onRefresh(); return; } catch (e) { lastErr = e; }
     }
     if (window.SDPRS_API && typeof window.SDPRS_API.refreshLive === 'function') {
-      try { await window.SDPRS_API.refreshLive(); } catch (_) {}
+      attempted = true;
+      try { await window.SDPRS_API.refreshLive(); return; } catch (e) { lastErr = e; }
     }
+    if (attempted && lastErr) throw lastErr;
   };
   const handleBulkAck = async () => {
     if (checked.size === 0 || bulkBusy) return;
@@ -171,24 +188,33 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
       if (acked === 0) {
         // Preserve selection + note on total failure so operator can see which
         // weren't accepted and retry after the video uploads.
-        alert('批次認領失敗：所選警報都不可認領（等待影像上傳中或已認領）');
+        setPageToast({ tone: 'warn', msg: '批次認領失敗：所選警報都不可認領（等待影像上傳中或已認領）' });
+        await runRefreshAfterBulk().catch(() => {});
       } else {
         if (acked < ids.length) {
-          alert('批次認領：' + acked + ' / ' + ids.length + ' 成功；其餘無法認領');
+          setPageToast({ tone: 'warn', msg: '批次認領：' + acked + ' / ' + ids.length + ' 成功；其餘無法認領' });
         }
-        setChecked(new Set());
-        setBulkNote('');
+        // Clear ONLY after refresh confirms — if refresh throws, keep the
+        // selection so the operator can retry without re-selecting (A2).
+        try {
+          await runRefreshAfterBulk();
+          setChecked(new Set()); setBulkNote('');
+        } catch (e) {
+          setPageToast({ tone: 'warn', msg: '批次已提交但刷新失敗，請手動刷新' });
+        }
       }
-      await runRefreshAfterBulk();
     } catch (e) {
-      alert('批次操作失敗');
+      setPageToast({ tone: 'error', msg: '批次操作失敗' });
     } finally {
       setBulkBusy(false);
     }
   };
   const handleBulkResolve = async () => {
     if (checked.size === 0 || bulkBusy) return;
-    if (!bulkNote.trim()) { alert('批次解決需填寫備註'); return; }
+    if (!bulkNote.trim()) {
+      setPageToast({ tone: 'warn', msg: '批次解決需填寫備註' });
+      return;
+    }
     setBulkBusy(true);
     const ids = [...checked];
     try {
@@ -196,17 +222,23 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
       const resp = await window.SDPRS_API.bulkResolveAlerts(ids, bulkNote);
       const resolved = (resp && typeof resp.resolved === 'number') ? resp.resolved : ids.length;
       if (resolved === 0) {
-        alert('批次解決失敗：所選警報都不可解決');
+        setPageToast({ tone: 'warn', msg: '批次解決失敗：所選警報都不可解決' });
+        await runRefreshAfterBulk().catch(() => {});
       } else {
         if (resolved < ids.length) {
-          alert('批次解決：' + resolved + ' / ' + ids.length + ' 成功；其餘無法解決');
+          setPageToast({ tone: 'warn', msg: '批次解決：' + resolved + ' / ' + ids.length + ' 成功；其餘無法解決' });
         }
-        setChecked(new Set());
-        setBulkNote('');
+        // A2 mirror: only clear selection/note after refresh succeeds — a
+        // network hiccup mid-refresh shouldn't cost the operator a re-select.
+        try {
+          await runRefreshAfterBulk();
+          setChecked(new Set()); setBulkNote('');
+        } catch (e) {
+          setPageToast({ tone: 'warn', msg: '批次已提交但刷新失敗，請手動刷新' });
+        }
       }
-      await runRefreshAfterBulk();
     } catch (e) {
-      alert('批次操作失敗');
+      setPageToast({ tone: 'error', msg: '批次操作失敗' });
     } finally {
       setBulkBusy(false);
     }
@@ -247,7 +279,17 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   }, [filtered, selectedId, setSelectedId]);
 
   return (
-    <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr]">
+    <div className="h-full grid grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr] relative">
+      {pageToast && (
+        <div role="status" aria-live="polite"
+          className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-3 py-2 rounded shadow-lg text-xs border ${
+            pageToast.tone === 'error' ? 'bg-sev-critical/20 border-sev-critical text-sev-critical'
+            : pageToast.tone === 'warn' ? 'bg-sev-warn/20 border-sev-warn text-sev-warn'
+            : 'bg-surface-elevated border-border-strong text-ink-primary'
+          }`}>
+          {pageToast.msg}
+        </div>
+      )}
       {/* LEFT: List */}
       <div className="border-r border-border-subtle flex flex-col min-h-0">
         {/* Tabs + filters */}
