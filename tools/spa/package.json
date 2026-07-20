@@ -1,0 +1,17 @@
+{
+  "name": "sdprs-spa-checks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline static gates + jsdom render tests for the no-build SDPRS dashboard SPA. Developer tooling only — the SPA itself still has NO build step.",
+  "scripts": {
+    "check": "node run_all.js",
+    "syntax": "node check_spa_syntax.js",
+    "refs": "node check_spa_refs.js",
+    "classes": "node check_spa_classes.js",
+    "render": "node render_tests.js",
+    "scope": "node scope_probe.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}
