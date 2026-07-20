@@ -13,10 +13,17 @@ sends), this test fails with a clear diff.
 Frozen contract:
 - Types visible to the SPA (dispatched to onEvent):
       alert_updated, alert_acknowledged, alert_resolved,
-      node_status, pump_status, auth_expired
+      node_status, pump_status, node_deleted, auth_expired
 - Types handled inside the SPA WS layer, NOT surfaced through onEvent:
       new_alert  -> routed to onNewAlert(alertObj)
       ping       -> pure keepalive, absorbed silently
+
+`node_deleted` was emitted by the server (nodes.py, DELETE /api/nodes/{id}),
+whitelisted in api.jsx and handled in app.jsx, but was never added to
+EXPECTED_ALL_TYPES below — so this test sat red for a reason unrelated to any
+real drift. A permanently-red drift detector is worse than none: it trains
+readers to ignore the one signal it exists to raise. If this test fails,
+confirm which side actually moved before editing the frozen set.
 """
 import re
 from pathlib import Path
@@ -34,6 +41,7 @@ EXPECTED_ALL_TYPES = frozenset({
     "alert_updated",
     "auth_expired",
     "new_alert",
+    "node_deleted",
     "node_status",
     "ping",
     "pump_status",
@@ -66,7 +74,7 @@ def _read_spa_whitelist() -> frozenset[str]:
 
         const _WS_EVENT_TYPES = new Set([
           'alert_updated', 'alert_acknowledged', 'alert_resolved',
-          'node_status', 'pump_status',
+          'node_status', 'pump_status', 'node_deleted',
           'auth_expired',
         ]);
     """
