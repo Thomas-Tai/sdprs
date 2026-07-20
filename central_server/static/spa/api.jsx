@@ -3,7 +3,9 @@
 // Fetches from the central-server REST API (FastAPI) and maps responses into
 // the shapes the UI components consume. The browser sends the session cookie
 // automatically (same-origin), so every /api/* call is authenticated as the
-// logged-in dashboard user. On 401 we bounce to /login.
+// logged-in dashboard user. On 401 we do NOT hard-redirect — apiFetch sets
+// window.__SDPRS_SESSION_EXPIRED so app.jsx can show a re-login modal that
+// preserves in-progress operator state (see apiFetch below).
 //
 // Exposed as window.SDPRS_API. app.jsx calls loadInitial() once before mount,
 // then refreshLive() on a timer and on every relevant WebSocket event.
@@ -12,6 +14,30 @@
   // ---- low-level fetch ---------------------------------------------------
 
   const FETCH_TIMEOUT_MS = 10_000;
+
+  // Normalizes FastAPI's error `detail` into a human-readable string.
+  // Two shapes reach us:
+  //   - a plain string (HTTPException(detail="...")) — the common case.
+  //   - a list of {loc, msg, type} objects — FastAPI's automatic 422
+  //     request-validation error. Previously dropped entirely (returned
+  //     null), so the operator saw a bare "HTTP 422 on /api/…" with no
+  //     indication of which field/why (API-F10 / SHL-11).
+  function _extractDetail(body) {
+    if (!body || typeof body !== 'object') return null;
+    const d = body.detail;
+    if (typeof d === 'string') return d;
+    if (Array.isArray(d)) {
+      const msgs = d.map((item) => {
+        if (item && typeof item === 'object' && typeof item.msg === 'string') {
+          const loc = Array.isArray(item.loc) ? item.loc.filter((p) => p !== 'body').join('.') : '';
+          return loc ? loc + ': ' + item.msg : item.msg;
+        }
+        return typeof item === 'string' ? item : null;
+      }).filter((s) => s != null);
+      return msgs.length ? msgs.join('; ') : null;
+    }
+    return null;
+  }
 
   async function apiFetch(path, opts = {}) {
     // Fetch has no built-in timeout — a stuck TCP handshake would hang a request
@@ -48,7 +74,14 @@
       // session-expiry modal (which preserves handover drafts, resolve notes,
       // and page state through the H-1 cross-login flow).
       window.__SDPRS_SESSION_EXPIRED = true;
-      throw new Error('unauthorized');
+      // .status/.detail carried like every other thrown error (contract:
+      // callers must be able to branch on `.status === 401` instead of
+      // string-matching `.message`, which is the English word "unauthorized"
+      // and must never reach a zh-TW toast directly).
+      const err = new Error('unauthorized');
+      err.status = 401;
+      err.detail = null;
+      throw err;
     }
     if (!res.ok) {
       // Read the response body so FastAPI's structured `{ detail: '...' }`
@@ -62,8 +95,7 @@
       } else {
         body = await res.text().catch(() => null);
       }
-      const detail = (body && typeof body === 'object' && typeof body.detail === 'string')
-        ? body.detail : null;
+      const detail = _extractDetail(body);
       const err = new Error('HTTP ' + res.status + ' on ' + path + (detail ? ': ' + detail : ''));
       err.status = res.status;
       err.detail = detail;
@@ -83,9 +115,24 @@
 
   // ---- time / formatting helpers ----------------------------------------
 
-  // DB timestamps are UTC. SQLite CURRENT_TIMESTAMP and Python isoformat()
-  // both omit the zone, which JS would otherwise read as local time — so we
-  // append 'Z' unless an explicit zone is already present.
+  // THE ONE RULE (API-F12): every timestamp this file receives over the wire
+  // is naive-UTC (no zone marker) — SQLite CURRENT_TIMESTAMP and Python
+  // isoformat() both omit the zone, which JS would otherwise misread as
+  // local time. parseTs() is the single place that repairs this by
+  // appending 'Z' when no zone is present. Every field derived from a wire
+  // timestamp MUST go through parseTs (or secsSince/parseTsMs, which wrap
+  // it) — never `new Date(rawString)` directly, and never assume a raw
+  // string is already safe to hand to a consumer.
+  //
+  // The weather service used to be an exception — it serialized forecast and
+  // fetched_at as naive *Asia/Macau local* time (API-F1), so parseTs's
+  // append-Z repair shifted them +8h. That is FIXED at the source: the
+  // Open-Meteo request now asks for timezone=UTC, so the naive strings are
+  // genuinely UTC and parseTs is unconditionally correct here.
+  // DO NOT add a compensating ±8h offset anywhere on this path. The
+  // correction exists in exactly ONE place (the backend request parameter);
+  // a second one here would silently put every forecast timestamp 8 hours
+  // out during a typhoon.
   function parseTs(s) {
     if (!s) return null;
     let str = String(s).trim().replace(' ', 'T');
@@ -99,6 +146,13 @@
   const secsSince = (s) => {
     const d = parseTs(s);
     return d ? Math.max(0, (Date.now() - d.getTime()) / 1000) : null;
+  };
+  // Epoch-ms variant of parseTs, for fields consumers compare against
+  // Date.now() (e.g. a "shown as of N seconds ago" ticker) without needing
+  // a Date object. null when unparseable/absent — never NaN or 0.
+  const parseTsMs = (s) => {
+    const d = parseTs(s);
+    return d ? d.getTime() : null;
   };
   const fmtClock = (d) => {
     if (!d) return '—';
@@ -238,8 +292,16 @@
     }
 
     const hb = secsSince(n.last_heartbeat);
+    // MSP-F9 fix: a camera with no snapshot_timestamp has never uploaded —
+    // that is a distinct, more serious fact than "heartbeat is N seconds
+    // old" (heartbeat-only means the pipeline is up but produced nothing;
+    // substituting hb here silently hid a dead upload pipeline behind a
+    // healthy-looking heartbeat number). null means "no snapshot ever" and
+    // must render as 「—」, not be papered over with the heartbeat age.
+    // Pumps have no snapshot concept at all, so their "upload" age is
+    // simply their heartbeat age (unchanged).
     const up = type === 'camera'
-      ? (n.snapshot_timestamp ? secsSince(n.snapshot_timestamp) : hb)
+      ? (n.snapshot_timestamp ? secsSince(n.snapshot_timestamp) : null)
       : hb;
     const ss = n.stream_status || {};
 
@@ -250,8 +312,12 @@
       location: loc || '—',
       floor, area,
       status,
-      heartbeat: hb != null ? Math.round(hb) : 999,
-      upload: up != null ? Math.round(up) : 999,
+      // MSP-F8 fix: null means "device has never reported a heartbeat /
+      // upload" — was previously coerced to the sentinel 999, which
+      // rendered as a fabricated "心跳 999s" / "16m" for a node the server
+      // has literally never heard from. Consumers must render null as 「—」.
+      heartbeat: hb != null ? Math.round(hb) : null,
+      upload: up != null ? Math.round(up) : null,
       temp: roundOrNull(n.cpu_temp),
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
@@ -260,7 +326,47 @@
            : ss.dropped != null ? ss.dropped
            : ss.drops != null ? ss.drops : 0,
       level, // null = sensor down / no reading (was previously coerced to 0 → misleading)
-      cycles: n._cycles != null ? n._cycles : 0,
+      // MSP-F1 fix: the actual reported pump state, distinct from `status`
+      // (which is derived from water level / online-ness, not the relay).
+      // 'on' | 'off' from the device's last pump_status publish; null means
+      // the device has never reported (brand-new node, or — the critical
+      // case per nodes.py:497-499 — the device silently DROPPED an ON
+      // command under dry-run/sensor-conflict protection and the last known
+      // state is still whatever it was before, which may itself be null on
+      // a fresh node). A stray non-ON/OFF value (e.g. mqtt_service.py's
+      // "UNKNOWN" fallback for a garbled payload) also maps to null — we
+      // only assert 'on'/'off' when the device told us so unambiguously.
+      pumpState: n.pump_state === 'ON' ? 'on' : n.pump_state === 'OFF' ? 'off' : null,
+      // MSP-F5 fix: frozen contract NodeStatus.manual_override: "ON"|"OFF"|null,
+      // added server-side in parallel with this change — may not exist on the
+      // wire yet (older server omits the field entirely). Coerce anything
+      // else (undefined, absent, a stray value) to null rather than crash or
+      // fabricate a state.
+      manualOverride: n.manual_override === 'ON' ? 'ON' : n.manual_override === 'OFF' ? 'OFF' : null,
+      // MSP-F6 fix: frozen contract NodeStatus.last_pump_command:
+      // {action, by, at} | null, `at` naive-UTC ISO — same parallel-backend
+      // caveat as manualOverride above. `at` MUST go through parseTs (never
+      // hand-rolled `new Date(...)`) per the THE ONE RULE header comment, so
+      // it gets the same 'Z'-repair every other wire timestamp in this file
+      // gets. Any shape mismatch (missing object, missing/garbled `at`)
+      // degrades to null fields rather than throwing.
+      lastPumpCommand: (n.last_pump_command && typeof n.last_pump_command === 'object') ? {
+        action: n.last_pump_command.action != null ? n.last_pump_command.action : null,
+        by: n.last_pump_command.by != null ? n.last_pump_command.by : null,
+        at: parseTs(n.last_pump_command.at),
+      } : null,
+      // API-F9 fix: n._cycles now carries the whole {count, alert} object
+      // from /api/pumps/cycles (see loadNodes below), not just the bare
+      // count — `alert` is the server's own count > PUMP_CYCLE_ALERT_THRESHOLD
+      // verdict (nodes.py:662/705). `cycles` keeps its existing external
+      // contract (a plain number — monitor.jsx/pumps.jsx/status.jsx all do
+      // arithmetic like `60/node.cycles` and `node.cycles > 20` on it).
+      // `cyclesAlert` is new: surfaces the server's threshold call so those
+      // pages CAN switch off their own hardcoded >20/>15 magic numbers
+      // (which silently drift if PUMP_CYCLE_ALERT_THRESHOLD ever changes)
+      // without recomputing anything client-side.
+      cycles: (n._cycles && n._cycles.count != null) ? n._cycles.count : 0,
+      cyclesAlert: !!(n._cycles && n._cycles.alert),
       cycleHistory: null,
       raining: n.raining,
       sensorConflict: n.sensor_conflict,
@@ -276,7 +382,12 @@
         return Math.max(0, Math.round((t - Date.now()) / 60000));
       })(),
       snoozedBy: n.snoozed_by != null ? n.snoozed_by : null,
-      snoozedAt: n.snoozed_at != null ? n.snoozed_at : null,
+      // SHL-3 fix: was the raw wire string (naive-UTC, no 'Z'), which JS
+      // would misread as local time — the provenance chip showed a time 8h
+      // off in Macau (UTC+8). Now epoch ms via parseTs, matching the
+      // snoozedAt contract (epoch ms | null); null when never snoozed or
+      // unparseable.
+      snoozedAt: parseTsMs(n.snoozed_at),
       visualHealth,
       audioHealth,
       // Used by the tile view as an <img> cache-buster — changes each time the
@@ -371,11 +482,15 @@
       stale: !!current.is_stale,
       station: current.station_name || '',
       forecast: fc,
-      // ISO string from backend CurrentWeather.fetched_at (serialized by
-      // api/weather.py _serialize). Consumed by the WeatherPage's
-      // live-updating "更新於 N 秒前" ticker so operators can see data
-      // freshness at a glance without knowing internal tick timing.
-      fetchedAt: current.fetched_at || null,
+      // SHL-20 fix: now epoch ms via parseTs (was the raw wire string,
+      // bypassing parseTs entirely). API-F1 is now fixed backend-side, so
+      // this is correct for both shapes fetched_at can arrive in: a naive
+      // string (true UTC → parseTs appends Z) or an offset-bearing string
+      // (parseTs leaves it alone). No compensating offset belongs here —
+      // see the parseTs header comment. Consumed by the WeatherPage's live-updating
+      // "更新於 N 秒前" ticker (`Date.now() - fetchedAt`); null when the
+      // backend never supplied a fetch time.
+      fetchedAt: parseTsMs(current.fetched_at),
     };
   }
 
@@ -384,12 +499,22 @@
     if (typeof detail === 'string') {
       try { detail = JSON.parse(detail); } catch (e) { detail = { value: detail }; }
     }
-    const ts = parseTs(r.timestamp || r.created_at || r.t);
+    const tsDate = parseTs(r.timestamp || r.created_at || r.t);
+    // SHL-18 fix: `ts` is documented (and consumed — audit.jsx's `now - a.ts`
+    // shift-window math, `a.ts < _shiftFloor`, and formatAuditTs's
+    // `new Date(ts)`) as ms-since-epoch, but this used to store the parseTs()
+    // Date object itself. Arithmetic on a Date auto-coerces via valueOf() so
+    // those call sites happened not to crash, but `Number.isNaN(ts)` below
+    // was dead code — Number.isNaN returns false for any non-number
+    // (including a Date), so a malformed timestamp could never trip the
+    // guard. Convert to a real ms number here so the guard is meaningful and
+    // the field matches its documented/consumed type.
+    const tsMs = tsDate ? tsDate.getTime() : null;
     return {
-      t: ts ? fmtClock(ts) : (r.timestamp || r.t || '—'),
+      t: tsDate ? fmtClock(tsDate) : (r.timestamp || r.t || '—'),
       // Full timestamp (ms since epoch) used by the audit date filter.
       // Null if the row didn't carry a parseable timestamp.
-      ts: ts != null && !Number.isNaN(ts) ? ts : null,
+      ts: tsMs != null && !Number.isNaN(tsMs) ? tsMs : null,
       by: r.operator || r.by || 'system',
       action: r.action || r.action_type || '—',
       target: r.target != null ? r.target : (r.target_id != null ? r.target_id : '—'),
@@ -414,15 +539,36 @@
       } catch (e) { cycles = {}; }
       pumps.forEach((n) => {
         const c = cycles[n.node_id];
-        n._cycles = (c && c.count != null) ? c.count : 0;
+        // API-F9 fix: was `n._cycles = c.count` — kept only the raw count and
+        // threw away `c.alert` (computed server-side at nodes.py:704 against
+        // PUMP_CYCLE_ALERT_THRESHOLD), so the server's alert verdict never
+        // reached the UI at all. Carry the whole {count, alert} object
+        // through; mapNode splits it back into `cycles` (number, unchanged
+        // contract) + `cyclesAlert` (new, boolean).
+        n._cycles = c || { count: 0, alert: false };
       });
     }
     return list.map(mapNode);
   }
 
+  // ALR-M7 fix: the backend silently caps this list at LIMIT (oldest/
+  // longest-waiting alerts fall off the end with no signal). The endpoint
+  // returns a bare array with no total-count field, so we can't report a
+  // true grand-total without a backend change (out of scope here — I only
+  // own api.jsx). What we CAN prove from the response alone: if we got back
+  // exactly LIMIT rows, the true count is >= LIMIT (truncated); otherwise
+  // we got everything that matched. Consumers must render `totalAvailable`
+  // as a floor ("至少 N 筆"), never assert it is the exact total when
+  // `truncated` is true.
+  const _ACTIVE_ALERTS_LIMIT = 200;
+
   async function loadAlerts() {
-    const rows = await apiFetch('/api/alerts?status_filter=PENDING_VIDEO,PENDING,ACKNOWLEDGED&limit=200');
-    return (Array.isArray(rows) ? rows : []).map(mapAlert);
+    const rows = await apiFetch('/api/alerts?status_filter=PENDING_VIDEO,PENDING,ACKNOWLEDGED&limit=' + _ACTIVE_ALERTS_LIMIT);
+    const arr = Array.isArray(rows) ? rows : [];
+    const list = arr.map(mapAlert);
+    list.truncated = arr.length >= _ACTIVE_ALERTS_LIMIT;
+    list.totalAvailable = list.truncated ? _ACTIVE_ALERTS_LIMIT : arr.length;
+    return list;
   }
 
   async function loadHistory() {
@@ -499,6 +645,12 @@
           ageMin: upd ? Math.round((Date.now() - upd.getTime()) / 60000) : 0,
         },
         history: [],
+        // WHA-M8: opaque precondition token for saveHandover's
+        // expected_updated_at — the RAW server string, deliberately NOT
+        // routed through parseTs/reformatted. It's compared for equality
+        // against what the server holds at PUT time, never displayed
+        // (pinned.at above remains the parseTs'd, human-readable rendering).
+        updatedAt: (h && h.updated_at) || null,
       };
     } catch (e) {
       const status = e && e.status;
@@ -522,6 +674,11 @@
     }
   }
 
+  // WHA-M14 fix: same silent-cap issue as ALR-M7 above — /api/audit has no
+  // total-count field, so `totalAvailable` is a floor, not a verified exact
+  // total (see _ACTIVE_ALERTS_LIMIT comment for the full reasoning).
+  const _AUDIT_LIMIT = 200;
+
   async function loadAudit() {
     // 403 = non-admin session; page renders a "無權限" empty state driven by
     // window.AUDIT.forbidden. apiFetch throws Error('HTTP 403 on ...') with
@@ -529,10 +686,12 @@
     // case a caller re-wraps the error before it reaches here.
     window.AUDIT = window.AUDIT || [];
     try {
-      const a = await apiFetch('/api/audit?limit=200');
+      const a = await apiFetch('/api/audit?limit=' + _AUDIT_LIMIT);
       const rows = (a && a.rows) || [];
       const entries = rows.map(mapAuditRow);
       entries.forbidden = false;
+      entries.truncated = rows.length >= _AUDIT_LIMIT;
+      entries.totalAvailable = entries.truncated ? _AUDIT_LIMIT : rows.length;
       window.AUDIT = entries;
       return entries;
     } catch (e) {
@@ -550,6 +709,8 @@
       if (is403) {
         const entries = [];
         entries.forbidden = true;
+        entries.truncated = false;
+        entries.totalAvailable = 0;
         window.AUDIT = entries;
         return entries;
       }
@@ -641,6 +802,9 @@
   // scheduled 300ms after settle (bounded — never unbounded delay).
   let refreshLiveInFlight = null;
   let refreshLivePending = false;
+  // Loader keys, in the same order as the Promise.allSettled below. Hoisted
+  // out of the IIFE so the outer .catch can report a total failure honestly.
+  const _RL_KEYS = ['nodes', 'alerts', 'history', 'rate', 'weather', 'handover', 'audit'];
   async function refreshLive() {
     if (refreshLiveInFlight) {
       refreshLivePending = true;
@@ -669,9 +833,8 @@
       window.SHIFT_SUMMARY = buildShiftSummary(window.HISTORY_ALERTS, window.ALERTS);
       // Track which loaders failed so app.jsx can surface partial-failure
       // warnings (mirrors loadInitial's __SDPRS_LOAD_FAILURES contract).
-      const _rlKeys = ['nodes', 'alerts', 'history', 'rate', 'weather', 'handover', 'audit'];
       const rlFailed = [];
-      results.forEach((r, i) => { if (r.status === 'rejected') rlFailed.push(_rlKeys[i]); });
+      results.forEach((r, i) => { if (r.status === 'rejected') rlFailed.push(_RL_KEYS[i]); });
       return {
         nodes: window.NODES,
         alerts: window.ALERTS,
@@ -686,6 +849,15 @@
       .catch((err) => {
         // Symmetry with loadInitial — log but don't propagate an unhandled
         // rejection to the poll timer / WS handler.
+        //
+        // SHL-12 residual: reaching here means the IIFE itself threw, which
+        // Promise.allSettled rules out for the loaders — so the thrower is a
+        // mapper (buildNodeHistory / buildShiftSummary). Every window.* value
+        // below is therefore whatever the PREVIOUS refresh left behind, i.e.
+        // wholly stale. Reporting `failures: []` here told app.jsx everything
+        // was fine and silently cleared the stale-data banner, which on a
+        // 24/7 console means an operator reads a frozen board as live. Report
+        // all keys as failed instead — the banner must stay up.
         console.warn('[api] refreshLive failed', err);
         return {
           nodes: window.NODES,
@@ -695,7 +867,7 @@
           weather: window.WEATHER,
           handover: window.HANDOVER,
           audit: window.AUDIT,
-          failures: [],
+          failures: _RL_KEYS.slice(),
         };
       })
       .finally(() => {
@@ -742,6 +914,51 @@
   const stopStream = (nodeId) => apiFetch('/api/stream/' + encodeURIComponent(nodeId) + '/stop',
     { method: 'POST' });
 
+  // API-F3 fix: /api/stream/health (central_server/api/stream.py:222) scrapes
+  // mediamtx's Prometheus /metrics endpoint and computes real per-node
+  // bitrate/drops/viewers — but had zero callers anywhere in the SPA, so
+  // status.jsx fell back to mapNode's `bitrate`/`drops` fields, which read
+  // from `stream_status.bitrate_mbps`/`dropped_frames` keys the edge never
+  // publishes and are therefore always 0 (see mapNode's `ss.bitrate_mbps ...`
+  // fallback chain above).
+  //
+  // Response shape (no node_id query param — the endpoint scrapes ALL
+  // streams in one round-trip; we filter to the requested node client-side):
+  //   { enabled: false }                                          — MEDIAMTX_METRICS_URL unset (feature off)
+  //   { enabled: true, reachable: false, status_code, nodes: {} }  — mediamtx responded non-200
+  //   { enabled: true, reachable: false, error, nodes: {} }        — scrape threw (network/timeout)
+  //   { enabled: true, reachable: true,
+  //     nodes: { <node_id>: { viewers: int, dropped: int, bitrate_kbps: int } } }
+  // `nodes` keys are the mediamtx stream path, which IS the node_id (server
+  // comment: "mediamtx labels the path with the stream name ... that becomes
+  // our node_id"). A node with no entry in `nodes` is NOT an error — it just
+  // means mediamtx hasn't scraped a byte-counter sample for that path yet
+  // (stream never started since server boot), so its fields come back null
+  // rather than a fabricated 0 (roundOrNull convention, same reasoning as
+  // elsewhere in this file: "no data" must never look like "reading is zero").
+  //
+  // Math done here that the endpoint doesn't do: bitrate_kbps -> Mbps, to
+  // match the existing `node.bitrate` convention (Mbps) that status.jsx's
+  // thresholds and "…Mbps" label already assume — the endpoint itself only
+  // computes kbps (first derivative of the mediamtx byte counter).
+  //
+  // NOT wrapped in try/catch here (unlike the loadXxx() functions) — this is
+  // an on-demand per-node query, not a Promise.allSettled fan-out member, so
+  // errors propagate to the caller exactly like startStream/stopStream do.
+  async function getStreamHealth(nodeId) {
+    const r = await apiFetch('/api/stream/health');
+    const enabled = !!(r && r.enabled);
+    const reachable = !!(r && r.reachable);
+    const entry = (r && r.nodes && r.nodes[nodeId]) || null;
+    return {
+      enabled,
+      reachable,
+      bitrateMbps: (entry && entry.bitrate_kbps != null) ? entry.bitrate_kbps / 1000 : null,
+      drops: (entry && entry.dropped != null) ? entry.dropped : null,
+      viewers: (entry && entry.viewers != null) ? entry.viewers : null,
+    };
+  }
+
   // Audit CSV export — preflight against the sibling GET /api/audit endpoint
   // (same admin-only gate as export.csv, see api/audit.py) to detect 401/403
   // BEFORE the anchor-click download, otherwise the browser would silently
@@ -765,7 +982,8 @@
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
 
-    // apiFetch handles 401 (redirects to /login) and re-throws non-2xx with
+    // apiFetch handles 401 (sets window.__SDPRS_SESSION_EXPIRED for the
+    // soft-401 modal flow — no hard redirect) and re-throws non-2xx with
     // `.status` attached, so a 403 non-admin surfaces to the caller's toast.
     try {
       await apiFetch('/api/audit?limit=1');
@@ -776,8 +994,17 @@
       throw err;
     }
 
-    // YYYYMMDD from the ISO string (naive-UTC safe — no Date locale drift).
-    const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    // SHL-16: this used to be `new Date().toISOString().slice(0,10)`, i.e. the
+    // UTC date. Macau is UTC+8, so for the whole 00:00–08:00 local night shift
+    // the UTC date is still YESTERDAY — an operator exporting at 02:00 on the
+    // 21st got a file named `audit_20260720.csv`, which is exactly the kind of
+    // off-by-one-day that makes an incident export get filed against the wrong
+    // date. Use LOCAL date parts: every other timestamp the operator sees on
+    // this dashboard is browser-local (see fmtClock), so the filename now
+    // agrees with the console rather than with the wire format.
+    const _now = new Date();
+    const _p = (n) => String(n).padStart(2, '0');
+    const ymd = String(_now.getFullYear()) + _p(_now.getMonth() + 1) + _p(_now.getDate());
     const a = document.createElement('a');
     a.href = url;
     a.download = 'audit_' + ymd + '.csv';
@@ -816,15 +1043,92 @@
   // only refreshed every WEATHER_REFRESH_SECONDS (600s / 10 min default).
   // Called after setWeatherConfig so the operator sees the new source
   // selection reflected on the tiles within seconds, not minutes.
-  const refreshWeather = () => apiFetch('/api/weather/refresh', { method: 'POST' });
+  //
+  // API-F4 / WHA-H1 fix: the endpoint always answers HTTP 200 — even when
+  // every upstream provider failed — and signals that failure only via a
+  // body flag (`{ok: false, message: '...'}`, see weather.py:189-193).
+  // apiFetch has no way to know this is semantically an error (it only
+  // looks at the HTTP status), so it resolved successfully and every
+  // caller's toast claimed success while the tiles stayed stale mid-typhoon.
+  // We now inspect the body here and reject so callers' existing try/catch
+  // (written for the old "network error" case) also catches "upstream
+  // refresh failed" — same .status/.detail shape as every other thrown
+  // error in this file.
+  async function refreshWeather() {
+    const r = await apiFetch('/api/weather/refresh', { method: 'POST' });
+    if (!r || r.ok !== true) {
+      const msg = (r && typeof r.message === 'string') ? r.message : null;
+      const err = new Error('weather refresh failed' + (msg ? ': ' + msg : ''));
+      err.status = 200; // HTTP succeeded; the failure is in the response body
+      err.detail = msg;
+      throw err;
+    }
+    return r;
+  }
 
   const deleteNode = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId),
     { method: 'DELETE' });
 
-  const saveHandover = (note) => apiFetch('/api/handover/note', jsonBody('PUT', { note: note || '' }));
+  // WHA-M8: `expectedUpdatedAt` is the opaque token loadHandover() returned
+  // as `updatedAt` (raw server `updated_at` string, unparsed). Sending it
+  // lets the server detect a lost-update race (see handover.py's
+  // expected_updated_at precondition) instead of silent last-write-wins.
+  // Omitted/null caller → `expected_updated_at: null`, which the backend
+  // treats the same as the field being absent (old, pre-precondition
+  // behaviour) — so callers that haven't been updated yet still work.
+  //
+  // On a 409 the server means "your expected_updated_at didn't match — someone
+  // else saved first" and its JSON body carries the server's CURRENT note
+  // text + updated_at (roughly {detail, current, updated_at}). apiFetch
+  // already parses that body onto the thrown Error as `.body` (see apiFetch's
+  // `!res.ok` branch above) — we just lift it onto first-class `.conflict` /
+  // `.current` / `.updatedAt` properties so handover.jsx can render a
+  // compare-and-choose UI instead of the generic error toast every other
+  // saveHandover failure gets. Non-409 errors are rethrown untouched.
+  async function saveHandover(note, expectedUpdatedAt) {
+    try {
+      return await apiFetch('/api/handover/note', jsonBody('PUT', {
+        note: note || '',
+        expected_updated_at: expectedUpdatedAt != null ? expectedUpdatedAt : null,
+      }));
+    } catch (e) {
+      if (e && e.status === 409) {
+        const body = e.body;
+        e.conflict = true;
+        e.current = (body && typeof body.current === 'string') ? body.current : '';
+        e.updatedAt = (body && body.updated_at) || null;
+      }
+      throw e;
+    }
+  }
 
   const updateNodeLocation = (id, location) => apiFetch('/api/nodes/' + encodeURIComponent(id),
     jsonBody('PATCH', { location }));
+
+  // API-F7 fix: /api/session/extend (main.py:447-458) re-stamps the
+  // server-side session's `login_at`, which is what the session lifetime is
+  // measured against — but had zero callers, so an operator active for a
+  // full 24h typhoon shift got hard-logged-out mid-shift regardless of how
+  // recently they clicked anything. This wrapper only issues the call;
+  // deciding WHEN to call it is deliberately left to app.jsx (which owns the
+  // session-expiry modal / polling timers already), not implemented here.
+  //
+  // Suggested wiring (for the app.jsx owner): call on a safety-net interval
+  // — e.g. every 30 min via setInterval — while the tab is visible/focused
+  // (skip when document.hidden to avoid extending a shift nobody is actually
+  // working), OR piggyback on top of any successful mutating call the
+  // operator already makes (ack/resolve/snooze/pump command/handover save)
+  // so real activity resets the clock immediately and the timer is purely a
+  // backstop for a quiet "just watching" shift. Either way this should be a
+  // fire-and-forget call: on failure (401 = already expired, network blip)
+  // there is nothing useful to do beyond letting the existing soft-401 modal
+  // flow (window.__SDPRS_SESSION_EXPIRED, set by apiFetch above) take over.
+  //
+  // Response body is `{ ok: true, login_at: <naive-UTC ISO> }` — returned
+  // as-is; callers don't need `login_at` today but it's there if a future
+  // "session extended, N hours remaining" toast wants it (would need
+  // parseTs, per THE ONE RULE, not a raw new Date()).
+  const extendSession = () => apiFetch('/api/session/extend', { method: 'POST' });
 
   // ---- websocket ---------------------------------------------------------
 
@@ -931,7 +1235,8 @@
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
-    startStream, stopStream,
+    startStream, stopStream, getStreamHealth,
+    extendSession,
     openSocket,
   };
 })();

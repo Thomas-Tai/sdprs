@@ -101,6 +101,15 @@ const WeatherSettings = ({ onSaved, showToast }) => {
   const [smgList, setSmgList] = useState_w([]);
   const [hkoList, setHkoList] = useState_w([]);
   const [loadError, setLoadError] = useState_w(null);
+  // WHA-M3 fix (2026-07-20): getWeatherConfig().catch(() => ({})) below used
+  // to swallow a GET failure entirely — the pane would silently populate the
+  // form with DEFAULT values (empty station, 'both' fallback) with no signal
+  // that the REAL stored config just failed to load. An operator who then
+  // hit Save would overwrite the actual stored config with those defaults.
+  // Track the failure so the pane can warn instead of pretending the
+  // defaults it's showing are the saved config, and so Save can be disabled
+  // until the load is retried successfully.
+  const [configLoadFailed, setConfigLoadFailed] = useState_w(false);
   // Snapshot of the last-saved config so 取消 can revert unsaved
   // changes (audit S3) — without this, closing and re-opening the pane
   // showed stale edits as if they had been saved.
@@ -115,7 +124,10 @@ const WeatherSettings = ({ onSaved, showToast }) => {
   const latLonError = latEntered !== lonEntered
     ? '緯度和經度必須同時設定或同時留空'
     : null;
-  const canSave = !saving && !loading && !latLonError;
+  // WHA-M3 fix (2026-07-20): Save is now blocked while the config GET is
+  // known to have failed — defaults showing on screen must not be saveable
+  // as if they were a deliberate edit of the real stored config.
+  const canSave = !saving && !loading && !latLonError && !configLoadFailed;
 
   useEffect_w(() => {
     if (!open) return;
@@ -123,11 +135,16 @@ const WeatherSettings = ({ onSaved, showToast }) => {
     if (smgList.length > 0 || hkoList.length > 0) return;
     setLoading(true);
     setLoadError(null);
+    // WHA-M3 fix (2026-07-20): getWeatherConfig's own .catch used to eat the
+    // failure and hand back `{}` indistinguishably from "config genuinely
+    // empty". Capture whether it actually failed so the pane can say so.
+    let cfgLoadFailed = false;
     Promise.all([
-      window.SDPRS_API.getWeatherConfig().catch(() => ({})),
+      window.SDPRS_API.getWeatherConfig().catch(() => { cfgLoadFailed = true; return {}; }),
       window.SDPRS_API.listSmgStations().catch(() => ({ stations: [] })),
       window.SDPRS_API.listHkoStations().catch(() => ({ stations: [] })),
     ]).then(([cfg, smgResp, hkoResp]) => {
+      setConfigLoadFailed(cfgLoadFailed);
       const loaded = {
         site_lat: cfg.site_lat != null ? cfg.site_lat : null,
         site_lon: cfg.site_lon != null ? cfg.site_lon : null,
@@ -228,6 +245,17 @@ const WeatherSettings = ({ onSaved, showToast }) => {
         <div className="px-6 pb-4 space-y-3">
           {loading && <div className="text-xs text-ink-muted">載入中…</div>}
           {loadError && <div className="text-xs text-sev-warn">{loadError}</div>}
+          {/* WHA-M3 fix (2026-07-20): visible warning when the saved config
+              GET failed — without this the operator has no way to know the
+              values below are DEFAULTS, not the real stored config, and
+              Save (disabled via canSave above) would otherwise silently
+              clobber the actual saved settings with those defaults. */}
+          {!loading && configLoadFailed && (
+            <div className="text-xs text-sev-warn flex items-center gap-1">
+              <Icon.AlertTriangle size={12}/>
+              無法載入已儲存的天氣設定，以下顯示的是預設值 · 儲存功能已停用，以免覆蓋現有設定，請重新整理頁面或稍後再試
+            </div>
+          )}
           {!loading && (
             <>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -335,7 +363,7 @@ const WeatherSettings = ({ onSaved, showToast }) => {
                   type="button"
                   onClick={handleSave}
                   disabled={!canSave}
-                  title={latLonError || (saving ? '儲存中' : '儲存設定')}
+                  title={configLoadFailed ? '無法載入已儲存設定，暫時停用以免覆蓋' : (latLonError || (saving ? '儲存中' : '儲存設定'))}
                   className="text-xs px-3 py-1 rounded border border-sev-info/40 bg-sev-info/10 text-sev-info hover:bg-sev-info/20 disabled:opacity-40 disabled:cursor-not-allowed"
                 >{saving ? '儲存中…' : '儲存設定'}</button>
               </div>
@@ -399,10 +427,22 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
     try {
       // Force server-side re-tick so cached data is fresh, then let
       // app-level refresh pick up the new state.
+      // API-F4/WHA-H1 fix (2026-07-20): refreshWeather() now REJECTS when
+      // the backend returns 200 { ok: false } (upstream SMG/HKO/Open-Meteo
+      // down mid-typhoon). Previously this catch swallowed that rejection
+      // and the code below unconditionally showed the "reloaded" success
+      // toast — an operator would believe tiles were fresh while they were
+      // actually stale. Track the failure and show an honest error instead.
+      let refreshErr = null;
       try { await window.SDPRS_API.refreshWeather(); }
-      catch (e) { /* Non-fatal — onRefresh still shows latest cache. */ }
+      catch (e) { refreshErr = e; }
       if (onRefresh) await onRefresh();
-      showToast && showToast('天氣資料已重新載入', 'info');
+      if (refreshErr) {
+        const detail = (refreshErr && (refreshErr.detail || refreshErr.message)) || '未知錯誤';
+        showToast && showToast(`天氣資料重新抓取失敗：${detail}`, 'warn');
+      } else {
+        showToast && showToast('天氣資料已重新載入', 'info');
+      }
     } finally {
       setRefreshing(false);
     }
@@ -435,18 +475,51 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
   // Filter nulls before Math.max — api.jsx C5 fix emits `null` for future
   // hours whose data hasn't landed yet; a single NaN in Math.max poisons the
   // whole axis and every bar height becomes `NaNpx` → blank chart.
-  const maxWind = fc.length ? Math.max(1, ...fc.map(f => f.wind).filter(v => Number.isFinite(v))) : 1;
-  const maxRain = fc.length ? Math.max(1, ...fc.map(f => f.rain).filter(v => Number.isFinite(v))) : 1;
+  const rainValues = fc.map(f => f.rain).filter(v => Number.isFinite(v));
+  const windValues = fc.map(f => f.wind).filter(v => Number.isFinite(v));
+  const maxWind = windValues.length ? Math.max(1, ...windValues) : 1;
+  const maxRain = rainValues.length ? Math.max(1, ...rainValues) : 1;
+  // WHA-L2 fix (2026-07-20): maxRain/maxWind fold in a `1` axis-scaling floor
+  // to avoid divide-by-zero when every hour is genuinely 0. The peak badges
+  // below used to reuse that same floor as a "no data" sentinel
+  // (`maxRain > 1 ? maxRain : '—'`), which meant a real forecast peak of
+  // exactly 1 mm/h or 1 km/h rendered as "—" (looked like no data). Track
+  // data-presence separately from the axis floor.
+  const hasRainData = rainValues.length > 0;
+  const hasWindData = windValues.length > 0;
   // D1 (audit 2026-07-16): the "雷擊期間自動靜音" checkbox previously lived
   // here (useState_p toggle) but had no backend plumbing — no
   // SDPRS_MUTE.setLightningAuto() exists (grep confirmed) and no weather-WS →
   // snooze fan-out ever shipped. Removed rather than leave a placebo. Re-add
   // both the toggle and its state alongside the real backend action.
   if (!w.available) {
+    // WHA-M7 fix (2026-07-20): this used to be a bare full-page EmptyState
+    // that replaced the ENTIRE page — hiding the settings pane (where an
+    // operator could fix a bad station/coordinate config) and the manual
+    // refresh button (the one action that might recover it) at exactly the
+    // moment they're needed. Now render the same settings + refresh chrome
+    // as the normal page, with the empty state only replacing the hero/
+    // forecast content area.
     return (
-      <div className="h-full flex items-center justify-center">
-        <EmptyState icon={Icon.CloudRain} title="天氣資料暫時不可用"
-          hint="後端天氣服務尚未啟用,或暫時無法取得資料"/>
+      <div className="h-full overflow-y-auto scroll-thin">
+        <WeatherSettings onSaved={onRefresh} showToast={showToast}/>
+        <div className="px-6 py-3 flex items-center justify-end border-b border-border-subtle">
+          <button
+            type="button"
+            onClick={handleManualRefresh}
+            disabled={refreshing}
+            title="立即向 SMG / HKO / Open-Meteo 重新抓取"
+            aria-label="重新抓取天氣資料"
+            className="text-xs px-2 py-1 rounded border border-border-subtle hover:border-sev-info/40 hover:bg-sev-info/10 hover:text-sev-info disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1 transition-colors"
+          >
+            <Icon.RefreshCw size={12} className={refreshing ? 'animate-spin' : ''}/>
+            {refreshing ? '抓取中…' : '重新抓取'}
+          </button>
+        </div>
+        <div className="flex items-center justify-center" style={{ minHeight: '40vh' }}>
+          <EmptyState icon={Icon.CloudRain} title="天氣資料暫時不可用"
+            hint="後端天氣服務尚未啟用,或暫時無法取得資料 · 可展開上方設定確認測站設定，或點擊「重新抓取」"/>
+        </div>
       </div>
     );
   }
@@ -469,7 +542,12 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
                   <Icon.Typhoon size={14}/> {w.typhoon.level} · {w.typhoon.name}
                 </div>
                 <div className="text-xs text-ink-muted mt-0.5 font-mono tnum">
-                  距離 {w.typhoon.distance}km · 方位 {w.typhoon.direction} {w.typhoon.bearing}° · 來源 {w.source}
+                  {/* WHA-L7 fix (2026-07-20): the "資料較舊" staleness marker
+                      previously only appeared in the no-typhoon branch below —
+                      dropped silently in the typhoon-active branch, which is
+                      the highest-stakes moment for an operator to know the
+                      typhoon track/distance reading might be old. */}
+                  距離 {w.typhoon.distance}km · 方位 {w.typhoon.direction} {w.typhoon.bearing}° · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}
                 </div>
               </>
             ) : (
@@ -532,22 +610,32 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
+            {/* WHA-M6 fix (2026-07-20, known-unfixable-as-scoped): the
+                backend's CurrentWeather only ever exposes rainfall_24h_mm —
+                no 10-min or 1-hour live rainfall field exists (rain.now/hour
+                are hardcoded null in api.jsx, see API contract notes), so
+                this hero used to permanently show "—" for a metric that can
+                never populate. Promoted the field that DOES populate (24h
+                cumulative) into the hero position instead of fabricating or
+                forever displaying a dead placeholder; the live-rate line
+                below now honestly states no source exists rather than
+                silently showing blank "mm/h" forever. */}
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
-              {/* D2: rain color band — Amber signal ≈ 30 mm/h in HK/Macau,
-                  Yellow ≈ 10 mm/h. Falls back to plain sev-info at 0. */}
-              <span className={`text-4xl font-mono font-bold tnum ${rainColorClass(rain.now)}`}>
-                {rain.now != null ? rain.now : '—'}
+              <span className="text-4xl font-mono font-bold tnum text-ink-primary">
+                {rain.day != null ? rain.day : '—'}
               </span>
-              {/* D3 (audit 2026-07-16): unify units with the forecast legend
-                  below. Backend rain is per-hour (Open-Meteo forecast
-                  `precipitation` is hourly; SMG current `rainfall_24h_mm` is
-                  stored from `rainfall_hourly` — see weather_service.py). No
-                  10-min bucket exists yet, so the previous "mm (10min)" label
-                  was a lie. */}
-              <span className="text-ink-muted text-sm">mm/h</span>
+              <span className="text-ink-muted text-sm">mm/24h</span>
             </div>
-            <div className="text-xs text-ink-muted mt-1 font-mono tnum whitespace-nowrap">
-              24h 累計 {rain.day != null ? rain.day : '—'} mm
+            {/* rainColorClass's thresholds (30 / 10) are rainstorm-signal
+                INTENSITY bands in mm/h, so they belong on this live-rate line
+                — not on the 24h cumulative above, where 30mm is unremarkable
+                and would paint a calm day critical-red. Promoting the 24h
+                total into the hero orphaned this helper entirely, leaving the
+                rain tile the only uncoloured hero next to a tempColorClass'd
+                temperature. Muted (not the helper's null branch) when there is
+                no source, so "no data" never reads as a severity. */}
+            <div className={`text-xs mt-1 font-mono tnum whitespace-nowrap ${rain.now != null ? rainColorClass(rain.now) : 'text-ink-muted'}`}>
+              {rain.now != null ? `即時 ${rain.now} mm/h` : '無即時雨量資料來源'}
             </div>
             <SourceChip label={sources.rainfall_24h_mm}/>
           </div>
@@ -601,13 +689,18 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
       <div className="p-6">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h2 className="text-sm font-semibold">
-            36 小時預報
+            {/* WHA-M4 fix (2026-07-20): was hardcoded "36 小時預報" while the
+                data layer actually slices to however many buckets Open-Meteo
+                returns (often 16) — the fixed label lied about coverage.
+                Title now reflects the real bucket count; the F3 subheading
+                below adds the starting hour. */}
+            {fc.length > 0 ? `${fc.length} 小時預報` : '小時預報'}
             {/* F3: dynamic time-range subheading. Reads first/last hour
                 labels straight from the fc data so it stays honest even
                 when Open-Meteo returns fewer buckets than expected. */}
             {fc.length > 0 && fc[0].h !== '--' && fc[fc.length - 1].h !== '--' && (
               <span className="ml-2 text-xs font-normal font-mono tnum text-ink-muted">
-                · {fc[0].h}:00 起 · {fc.length} 小時
+                · {fc[0].h}:00 起
               </span>
             )}
           </h2>
@@ -615,8 +708,8 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
               hunting the chart. Reuses maxRain/maxWind already computed. */}
           {fc.length > 0 && (
             <div className="flex items-center gap-3 text-[10px] text-ink-muted font-mono tnum">
-              <span>峰值雨量 <span className="text-sev-info">{maxRain > 1 ? maxRain : '—'} mm/h</span></span>
-              <span>峰值風速 <span className="text-sev-warn">{maxWind > 1 ? maxWind : '—'} km/h</span></span>
+              <span>峰值雨量 <span className="text-sev-info">{hasRainData ? maxRain : '—'} mm/h</span></span>
+              <span>峰值風速 <span className="text-sev-warn">{hasWindData ? maxWind : '—'} km/h</span></span>
             </div>
           )}
         </div>
@@ -633,24 +726,18 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
           ) : (
             <>
               <div className="relative" style={{ minWidth: '720px' }}>
-                {/* F2: horizontal reference gridlines — 25%/50%/75%/100%
-                    of maxRain span so operators can eyeball bar heights
-                    against a scale instead of guessing. Absolutely
-                    positioned behind the bars; pointer-events-none so
-                    they don't interfere with any future click-to-detail. */}
-                <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
-                  {[0.25, 0.5, 0.75, 1.0].map(frac => (
-                    <div
-                      key={frac}
-                      className="absolute left-0 right-0 border-t border-border-subtle/40"
-                      style={{ top: `${(1 - frac) * 60 + 20}px` }}
-                    >
-                      <span className="absolute -top-2 -left-1 text-[9px] font-mono text-ink-dim bg-surface-panel px-0.5">
-                        {Math.round(maxRain * frac)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                {/* WHA-M5 fix (2026-07-20): the previous "F2" gridline overlay
+                    drew 4 fixed horizontal lines at absolute pixel offsets
+                    calibrated to a single 60px bar-height scale, but
+                    positioned `absolute inset-0` over the ENTIRE column stack
+                    (現在 label + rain value text + rain bar + wind bar + wind
+                    value text + hour label) — not just the rain-bar track.
+                    The lines cut across labels and the wind-bar section with
+                    no relationship to either metric's actual scale —
+                    geometrically meaningless, and worse, implied a false
+                    precision. Removed rather than left misleading; the
+                    峰值雨量/峰值風速 badges above already give the real scale
+                    reference, and each bar still prints its own value. */}
                 <div className="flex gap-1 items-end relative">
                   {fc.map((f, i) => {
                     // Distinguish "no data yet" (null from backend) from a genuine

@@ -6,8 +6,9 @@ Smart Disaster Prevention Response System
 This module provides REST API endpoints for node status queries.
 """
 
+import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -76,6 +77,21 @@ class NodeStatus(BaseModel):
     # operator_actions table.
     snoozed_by: Optional[str] = None
     snoozed_at: Optional[str] = None
+    # MSP-F6: the pump's own view of its manual-override slot, straight from
+    # the device's status flags via mqtt_service._handle_pump_status.
+    # "ON"/"OFF" while a hold is active, None once released or expired. This
+    # is what makes an indefinite manual OFF *visible* — before it existed an
+    # operator could stop a pump for service, go off shift, and leave it
+    # commanded OFF into the next rain event with nothing on screen saying so.
+    # Pump nodes only; always None for glass.
+    manual_override: Optional[str] = None
+    # MSP-F5: {"action", "by", "at"} of the most recent PUMP_COMMAND audit row
+    # for this node, or None if it was never commanded. Read back from the
+    # append-only operator_actions table (no schema change) so Operator B can
+    # see that Operator A already commanded the pump OFF instead of silently
+    # overriding it. `at` is a naive-UTC ISO string, same as every other
+    # timestamp on the wire.
+    last_pump_command: Optional[Dict[str, Any]] = None
 
 
 class NodeListResponse(BaseModel):
@@ -87,6 +103,108 @@ class NodeListResponse(BaseModel):
 class NodePatch(BaseModel):
     """Editable node fields. All optional — only provided keys are written."""
     location: Optional[str] = Field(default=None, max_length=120)
+
+
+def _naive_utc_iso(value: Any) -> str:
+    """Coerce an audit-log timestamp to a naive-UTC ISO string.
+
+    SQLite renders CURRENT_TIMESTAMP as "YYYY-MM-DD HH:MM:SS" (UTC, space
+    delimiter, no offset); PostgreSQL/SQLAlchemy hands back a datetime that
+    may be tz-aware. Both have to reach the wire as naive UTC like every
+    other timestamp here — an offset suffix would shift the rendered time by
+    8 hours in the Macau UI.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat()
+    if not value:
+        return ""
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1]
+    elif text.endswith("+00:00"):
+        text = text[:-6]
+    # Space -> "T" only on the date/time boundary, never inside a fraction.
+    return text.replace(" ", "T", 1)
+
+
+def _last_pump_commands(node_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return {node_id: {"action", "by", "at"}} for the most recent
+    ACTION_PUMP_COMMAND audit row per node. Missing entries mean "never
+    commanded".
+
+    MSP-F5: pump commands were already audit-logged but never read back, so
+    two operators working the same event could not see each other's actions —
+    B would override A's OFF without knowing it existed. Derived from the
+    append-only operator_actions table; no schema migration.
+
+    Shape deliberately mirrors audit_service.get_snooze_provenance: ONE query
+    covering every node, never one per node. /api/nodes is polled continuously
+    by every connected operator, so an N+1 here multiplies across the whole
+    console.
+
+    Tolerant like the rest of the audit path — a lookup failure degrades to
+    "no provenance" and is logged, it never breaks the node list.
+    """
+    if not node_ids:
+        return {}
+    unique_ids = list({str(nid) for nid in node_ids if nid is not None})
+    if not unique_ids:
+        return {}
+
+    from ..database import get_backend, get_db_cursor
+    from ..services.audit_service import ACTION_PUMP_COMMAND
+
+    columns = "SELECT operator, target_id, timestamp, details_json FROM operator_actions"
+    try:
+        if get_backend() == "postgresql":
+            import os
+            import sqlalchemy
+            engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+            with engine.connect() as conn:
+                result = conn.execute(
+                    sqlalchemy.text(
+                        f"{columns} WHERE action_type = :atype "
+                        "AND target_id = ANY(:ids) ORDER BY id DESC"
+                    ),
+                    {"atype": ACTION_PUMP_COMMAND, "ids": unique_ids},
+                )
+                rows = [dict(r) for r in result.mappings().fetchall()]
+        else:
+            placeholders = ",".join("?" for _ in unique_ids)
+            with get_db_cursor() as cur:
+                cur.execute(
+                    f"{columns} WHERE action_type = ? "
+                    f"AND target_id IN ({placeholders}) ORDER BY id DESC",
+                    (ACTION_PUMP_COMMAND, *unique_ids),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.warning(f"Last pump command lookup failed: {e}")
+        return {}
+
+    # Rows are id DESC — first hit per target_id wins.
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        tid = r.get("target_id")
+        if not tid or tid in out:
+            continue
+        action = None
+        details_json = r.get("details_json")
+        if details_json:
+            try:
+                details = json.loads(details_json)
+                if isinstance(details, dict):
+                    action = details.get("action")
+            except (ValueError, TypeError):
+                action = None
+        out[tid] = {
+            "action": action or "",
+            "by": r.get("operator") or "",
+            "at": _naive_utc_iso(r.get("timestamp")),
+        }
+    return out
 
 
 def _load_node_db() -> Dict[str, Dict[str, Any]]:
@@ -142,6 +260,12 @@ async def list_nodes(
     def _snooze_at(nid: str) -> Optional[str]:
         entry = _snooze_prov.get(nid)
         return entry["at"] if entry else None
+
+    # MSP-F5: same single-query treatment for the last pump command. Keyed on
+    # the union of DB rows and live MQTT states — a node can hold live state
+    # before/without a DB row, and we'd rather cover it than silently drop its
+    # command history from the list view.
+    _last_cmds = _last_pump_commands(list(db_nodes.keys()) + list(node_states.keys()))
 
     result = []
     now = utcnow()
@@ -199,6 +323,8 @@ async def list_nodes(
             snoozed_until=_ts_to_iso(db_row.get("snoozed_until")),
             snoozed_by=_snooze_by(node_id),
             snoozed_at=_snooze_at(node_id),
+            manual_override=state.get("manual_override") if node_type == "pump" else None,
+            last_pump_command=_last_cmds.get(node_id),
         )
 
         result.append(node_status)
@@ -218,6 +344,9 @@ async def list_nodes(
             snoozed_until=_ts_to_iso(row.get("snoozed_until")),
             snoozed_by=_snooze_by(nid),
             snoozed_at=_snooze_at(nid),
+            # No live MQTT state for these — manual_override is unknowable, but
+            # the command history still applies (it is server-side).
+            last_pump_command=_last_cmds.get(nid),
         ))
 
     logger.debug(f"Returning {len(result)} nodes")
@@ -343,6 +472,29 @@ async def get_node(
             is_stale = True
     
     db_node = db_get_node(node_id) or {}
+
+    # API-F8 fix (2026-07-20): this endpoint used to omit 8 fields that
+    # GET /api/nodes (list_nodes, above) already serializes for the same
+    # node — raining/sensor_conflict/dry_run_protect (pump-health flags from
+    # MQTT telemetry), battery_voltage/power_source (DB-persisted hardware
+    # fields), and snoozed_until/snoozed_by/snoozed_at (snooze state +
+    # provenance). Any consumer that switches from the list view to the
+    # detail view silently lost them. Bring the two endpoints into
+    # agreement using the same sources list_nodes uses.
+    snoozed_until = db_node.get("snoozed_until")
+    if isinstance(snoozed_until, datetime):
+        snoozed_until = snoozed_until.isoformat()
+
+    from ..services.audit_service import get_snooze_provenance
+    _snooze_entry = get_snooze_provenance([node_id]).get(node_id)
+    snoozed_by = _snooze_entry["by"] if _snooze_entry else None
+    snoozed_at = _snooze_entry["at"] if _snooze_entry else None
+
+    # MSP-F5 / MSP-F6: keep this endpoint in lockstep with list_nodes. Every
+    # field list_nodes serializes must be serialized here from the same source
+    # — the two drifting apart is exactly what caused API-F8 above.
+    _last_cmd = _last_pump_commands([node_id]).get(node_id)
+
     return NodeStatus(
         node_id=node_id,
         node_type=node_type,
@@ -358,8 +510,18 @@ async def get_node(
         stream_status=state.get("stream_status"),
         pump_state=state.get("pump_state") if node_type == "pump" else None,
         water_level=state.get("water_level") if node_type == "pump" else None,
+        raining=state.get("raining") if node_type == "pump" else None,
+        sensor_conflict=state.get("sensor_conflict") if node_type == "pump" else None,
+        dry_run_protect=state.get("dry_run_protect") if node_type == "pump" else None,
         is_stale=is_stale,
-        snapshot_timestamp=snapshot_timestamp
+        snapshot_timestamp=snapshot_timestamp,
+        battery_voltage=db_node.get("battery_voltage"),
+        power_source=db_node.get("power_source"),
+        snoozed_until=snoozed_until,
+        snoozed_by=snoozed_by,
+        snoozed_at=snoozed_at,
+        manual_override=state.get("manual_override") if node_type == "pump" else None,
+        last_pump_command=_last_cmd,
     )
 
 
@@ -473,14 +635,24 @@ class SnoozeRequest(BaseModel):
 class PumpCommandRequest(BaseModel):
     """Body for POST /api/nodes/{node_id}/pump.
 
-    - action: "ON" or "OFF" — anything else is a 400.
+    - action: "ON", "OFF" or "AUTO" — anything else is a 422.
+      * ON  — force the pump to run for a bounded window.
+      * OFF — hold the pump stopped. Always honoured by the device (stopping
+        is the safe direction) and, with no duration_s, indefinite.
+      * AUTO — release an outstanding manual hold and hand the pump back to
+        automatic control. This is the way OUT of an indefinite OFF: without
+        it, a pump stopped for servicing stays stopped across shift changes
+        and into the next rain event, with the station flooding while the
+        console shows nothing wrong (MSP-F6).
     - duration_s: how long to hold the override, in seconds.
       * ON REQUIRES a positive integer 1..600 (upper bound = MAX_RUN_MS/1000
         on the device); this prevents a lost network/operator from leaving
         the pump running dry indefinitely.
       * OFF may omit or set 0 to hold indefinitely (safe direction).
+      * AUTO REJECTS any duration_s (400) — a release is instantaneous, so a
+        duration on it could only mean the caller misunderstood the command.
     """
-    action: str = Field(..., pattern="^(ON|OFF)$")
+    action: str = Field(..., pattern="^(ON|OFF|AUTO)$")
     duration_s: Optional[int] = Field(None, ge=0, le=600)
 
 
@@ -490,7 +662,12 @@ async def pump_command(
     body: PumpCommandRequest,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Push a manual pump ON/OFF command to a pump edge node via MQTT.
+    """Push a manual pump ON/OFF/AUTO command to a pump edge node via MQTT.
+
+    AUTO releases an outstanding manual hold (MSP-F6). Nodes running firmware
+    from before AUTO existed still release correctly — their unknown-action
+    path clears the override slot — so this is safe to send fleet-wide with no
+    reflash.
 
     Server-side we don't pre-check safety flags — the device's control_logic
     is the final arbiter and stale server-cached state would only add races.
@@ -498,7 +675,9 @@ async def pump_command(
     `sensor_conflict` are engaged; the caller learns about the actual pump
     state from the next telemetry publish (~2s cadence).
 
-    Audit-logs the action so operator commands are traceable.
+    Audit-logs the action so operator commands are traceable. Those rows are
+    read back onto NodeStatus.last_pump_command so a second operator can see
+    what the first one already did (MSP-F5).
     """
     from ..services.audit_service import log_action, ACTION_PUMP_COMMAND
 
@@ -509,6 +688,15 @@ async def pump_command(
         raise HTTPException(
             status_code=400,
             detail="pump ON requires a positive duration_s (1..600 seconds)",
+        )
+
+    # AUTO is a release, not a hold — it has nothing to time out. Reject a
+    # duration outright rather than silently dropping it: a caller that sent
+    # one is asking for something this command cannot do.
+    if body.action == "AUTO" and body.duration_s is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="pump AUTO takes no duration_s (releasing a hold is instantaneous)",
         )
 
     node = db_get_node(node_id)

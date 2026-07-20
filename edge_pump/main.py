@@ -67,18 +67,23 @@ def synthesize_display_level(readings):
 def apply_manual_override(decision, manual_state, clock):
     """Optionally override the pure control decision with an operator command.
 
-    Two-slot manual state: {"action": "ON"|"OFF"|None, "expires_ms": int|None}.
+    Two-slot manual state:
+    {"action": "ON"|"OFF"|"AUTO"|None, "expires_ms": int|None}.
     Returns a new (decision, manual_state) tuple — either passed through
-    unchanged or mutated by the override / expiry / rejection paths.
+    unchanged or mutated by the override / expiry / release / rejection paths.
 
     Contract:
       - Manual OFF is ALWAYS honored (safe direction — stopping never damages).
       - Manual ON is REJECTED (dropped, no retry) when the safety core has
         engaged `dry_run_protect` or `sensor_conflict` — the pump would
         damage itself running dry or with contradicting sensors.
-      - Both commands auto-expire once `expires_ms` is reached (bounded pulse).
+      - Manual AUTO releases the hold: the slot is cleared and the natural
+        control decision passes through untouched.
+      - ON/OFF auto-expire once `expires_ms` is reached (bounded pulse).
         `expires_ms=None` means indefinite (used for OFF-latch, discouraged
-        for ON via the server-side API).
+        for ON via the server-side API). An indefinite OFF is exactly why
+        AUTO exists — without it a hold placed before an operator went off
+        shift would survive into the next rain event.
 
     Design note: no state is added to control_logic — that module stays pure
     and decides the "normal" outcome, this wrapper layers an override on top.
@@ -121,6 +126,19 @@ def apply_manual_override(decision, manual_state, clock):
             "flags": dict(flags, manual_override="ON"),
             "reason": control_logic.MANUAL_ON,
         }, manual_state
+
+    if action == "AUTO":
+        # Explicit release — drop the hold, pass the natural decision through
+        # untouched (no manual_override flag, so telemetry stops reporting a
+        # hold on the very next publish).
+        #
+        # Back-compat note: firmware flashed BEFORE this branch existed also
+        # releases correctly on "AUTO" — it falls through to the unknown-action
+        # path below, which clears the slot exactly the same way. The server
+        # may therefore send AUTO to any node in the fleet without waiting for
+        # a reflash. Handling it explicitly here is about intent, not function:
+        # a release is a first-class command, not a malformed payload.
+        return decision, {"action": None, "expires_ms": None}
 
     # Unknown action — ignore, clear the slot to avoid a stuck state.
     return decision, {"action": None, "expires_ms": None}
@@ -211,13 +229,25 @@ def main():
 
     def on_pump_command(data):
         action = data.get("action")
-        if action not in ("ON", "OFF"):
+        if action not in ("ON", "OFF", "AUTO"):
             print("[CMD] bad action: %r (ignored)" % action)
             return
         # Duration in seconds. ON commands MUST specify a positive duration
         # so a lost operator/network can't leave the pump running dry
         # forever; OFF may be indefinite (safe direction).
         duration_s = data.get("duration_s")
+        if action == "AUTO":
+            # Release the hold and return to automatic control. Any duration_s
+            # is meaningless here and ignored (the server rejects it with a
+            # 400 before it ever reaches the wire). The slot is WRITTEN rather
+            # than cleared in place so the release travels the same path as
+            # every other command — apply_manual_override() clears it on the
+            # next tick and the natural decision resumes.
+            manual_state["action"] = "AUTO"
+            manual_state["expires_ms"] = None
+            manual_state["last_rejected"] = None
+            print("[CMD] manual AUTO (release hold)")
+            return
         if action == "ON" and (not isinstance(duration_s, (int, float)) or duration_s <= 0):
             print("[CMD] ON refused: positive duration_s required")
             return

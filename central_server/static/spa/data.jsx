@@ -64,15 +64,26 @@ const STALE_ACK_THRESHOLD = 1500;
 window.NODES = [];
 window.ALERTS = [];
 window.HISTORY_ALERTS = [];
+// SHL-13: this placeholder MUST stay shape-identical to api.jsx mapWeather's
+// no-data branch, otherwise weather.jsx / WallView crash (or silently render
+// `undefined`) on any field that only exists in one of the two shapes — the
+// window between mount and the first successful /api/weather load, and every
+// load failure thereafter. Fields kept in sync: sources (per-field provenance
+// labels), stale, station, fetchedAt (epoch ms | null), and `wind.dir` as ''
+// (not null) so string concat renders empty rather than "null".
 window.WEATHER = {
   available: false,
   typhoon: null,
-  wind: { speed: null, gust: null, dir: null, degree: null },
+  wind: { speed: null, gust: null, dir: '', degree: null },
   rain: { now: null, hour: null, day: null },
   temp: null, humidity: null, pressure: null, visibility: null,
   lightning: { count: null, nearest: null },
   source: '—',
+  sources: {},
+  stale: true,
+  station: '',
   forecast: [],
+  fetchedAt: null,
 };
 window.ALERT_RATE = new Array(16).fill(0);
 window.HANDOVER = {
@@ -90,6 +101,18 @@ window.SHIFT_SUMMARY = {
   duration: '—', alertsHandled: 0, critical: 0, warn: 0, info: 0,
   ackMedian: '—', resolveMedian: '—', carryOver: 0, highlights: [],
 };
+// SHL-15: PERMANENTLY EMPTY — there is no presence feed. Nothing in api.jsx
+// ever writes this, no backend route serves online-operator state, and no WS
+// event carries it; app.jsx only reads it (`window.OPERATORS_ONLINE ??
+// EMPTY_OPERATORS`) to hand StatusStrip its `operators` prop. So StatusStrip's
+// presence cluster renders an empty roster on a 24/7 console where "who else
+// is on shift right now" is exactly the question it appears to answer — an
+// operator reads "nobody else online" and assumes sole responsibility during a
+// typhoon. Deliberately left as `[]` rather than removed: app.jsx's read is
+// null-safe either way, and deleting it would only move the same lie into a
+// default. Closing this needs EITHER a backend presence endpoint + an api.jsx
+// loader, OR StatusStrip suppressing the cluster when the roster is empty
+// (components.jsx — see handoff). Do not seed fake operators here.
 window.OPERATORS_ONLINE = [];
 
 // ---- Helpers ------------------------------------------------------------

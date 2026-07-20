@@ -15,9 +15,17 @@ body {
   overflow: hidden;
 }
 
+/* CMP-F18: `100vh` excludes the mobile browser chrome, so on a phone/tablet
+   used as a walkaround console the fixed footer sat below the fold and the
+   bottom of every scroll container was unreachable. `100dvh` tracks the
+   *visible* viewport; the 100vh line stays as the fallback for engines that
+   don't know dvh (they simply ignore the second declaration).
+   `100vw` likewise includes the scrollbar gutter and caused a 15px horizontal
+   scroll on desktop Windows — `100%` is the correct width for a root box. */
 #root {
   height: 100vh;
-  width: 100vw;
+  height: 100dvh;
+  width: 100%;
 }
 
 /* Tabular numerics on everything tabular */
@@ -133,6 +141,57 @@ html.light .snapshot-placeholder {
   background-image: repeating-linear-gradient(45deg, #E2E8F0 0, #E2E8F0 8px, #F1F5F9 8px, #F1F5F9 16px);
 }
 
+/* CMP-F4 — Selected row was unreadable in light theme.
+   `.row-selected` above hardcodes the dark navy #111A2E with `!important` and
+   had no light override, so the selected alert row — the one row the operator
+   is actively working — rendered near-black text on near-black background.
+   Light theme gets a blue tint of equivalent "selectedness" and a stronger
+   right-edge indicator. */
+html.light .row-selected {
+  background: #DBEAFE !important;
+  box-shadow: inset -3px 0 0 0 #1D4ED8;
+}
+
+/* CMP-F9 — Opacity-variant surface classes kept their DARK colour in light
+   theme. The overrides above match the exact class names (`.bg-surface-panel`
+   etc.); Tailwind emits the alpha variants as separate escaped selectors
+   (`.bg-surface-panel\/80`), which those rules never touched. Result: blurred
+   modal backdrops, drawer scrims and hover fills stayed dark slate on the
+   light UI. Only the variants actually used in the SPA are listed. */
+html.light .bg-surface-base\/40    { background-color: rgba(241, 245, 249, 0.40) !important; }
+html.light .bg-surface-base\/60    { background-color: rgba(241, 245, 249, 0.60) !important; }
+html.light .bg-surface-base\/80    { background-color: rgba(241, 245, 249, 0.80) !important; }
+html.light .bg-surface-panel\/40   { background-color: rgba(255, 255, 255, 0.40) !important; }
+html.light .bg-surface-panel\/80   { background-color: rgba(255, 255, 255, 0.80) !important; }
+html.light .bg-surface-elevated\/60 { background-color: rgba(248, 250, 252, 0.60) !important; }
+html.light .bg-surface-overlay\/90 { background-color: rgba(226, 232, 240, 0.90) !important; }
+html.light .border-border-subtle\/40 { border-color: rgba(226, 232, 240, 0.40) !important; }
+html.light .border-border-subtle\/60 { border-color: rgba(226, 232, 240, 0.60) !important; }
+html.light .text-ink-muted\/40     { color: rgba(100, 116, 139, 0.40) !important; }
+html.light .bg-ink-muted\/20       { background-color: rgba(100, 116, 139, 0.20) !important; }
+html.light .bg-ink-muted\/60       { background-color: rgba(100, 116, 139, 0.60) !important; }
+html.light .bg-ink-dim\/15         { background-color: rgba(148, 163, 184, 0.15) !important; }
+html.light .border-ink-dim\/30     { border-color: rgba(148, 163, 184, 0.30) !important; }
+
+/* CMP-F9 — Severity TEXT colours are tuned for a near-black background and
+   fail WCAG AA badly on white:
+     sev-warn  #F59E0B on #FFF ≈ 1.9:1   sev-ok   #10B981 on #FFF ≈ 2.1:1
+     sev-info  #3B82F6 on #FFF ≈ 3.7:1
+   The amber one matters most — it is the colour of every 警告-severity label
+   and of the 「已靜音」/「逾期認領」 chips. Darken the FOREGROUND only; the
+   solid `bg-sev-*` fills are untouched so severity hue stays recognisable and
+   the dark theme is unaffected. sev-critical (#DC2626 ≈ 4.8:1) already passes.
+   These sit after the .text-ink-* overrides above; both use !important, so
+   specificity is equal and source order decides — later wins, as intended. */
+html.light .text-sev-warn  { color: #B45309 !important; }
+html.light .text-sev-ok    { color: #047857 !important; }
+html.light .text-sev-info  { color: #1D4ED8 !important; }
+html.light .text-sev-stale { color: #475569 !important; }
+
+/* Light-theme scrollbars — the dark slate thumb read as a smear on white. */
+html.light .scroll-thin::-webkit-scrollbar-thumb { background: #CBD5E1; }
+html.light .scroll-thin::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
 /* Focus rings */
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, [role="button"][tabindex="0"]:focus-visible {
   outline: 2px solid #3B82F6;
@@ -156,6 +215,29 @@ html.focus-mode .focus-hide { display: none !important; }
 html.focus-mode body { background: #000 !important; }
 html.focus-mode .bg-surface-panel { background: #050a14 !important; }
 html.focus-mode .bg-surface-elevated { background: #0a1020 !important; }
+
+/* Focus mode forces near-black surfaces regardless of theme (these rules come
+   after the html.light block and both use !important, so focus-mode wins the
+   background). In light theme the ink colours were NOT overridden, leaving
+   #0F172A text on a #000 background — the 夜深 mode meant for tired eyes at
+   03:00 rendered the console unreadable. Focus mode is inherently a dark mode,
+   so it pulls the dark ink ramp with it. */
+html.light.focus-mode .text-ink-primary   { color: #E2E8F0 !important; }
+html.light.focus-mode .text-ink-secondary { color: #94A3B8 !important; }
+html.light.focus-mode .text-ink-muted     { color: #64748B !important; }
+html.light.focus-mode .text-ink-dim       { color: #475569 !important; }
+html.light.focus-mode body                { color: #E2E8F0 !important; }
+html.light.focus-mode .bg-surface-base    { background: #000 !important; }
+html.light.focus-mode .bg-surface-overlay { background: #131a2b !important; }
+html.light.focus-mode .row-selected {
+  background: #111A2E !important;
+  box-shadow: inset -3px 0 0 0 #3B82F6;
+}
+/* …and with it the dark-tuned severity foregrounds. */
+html.light.focus-mode .text-sev-warn  { color: #F59E0B !important; }
+html.light.focus-mode .text-sev-ok    { color: #10B981 !important; }
+html.light.focus-mode .text-sev-info  { color: #3B82F6 !important; }
+html.light.focus-mode .text-sev-stale { color: #94A3B8 !important; }
 
 /* Command palette */
 .cmdk-shadow { box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(59,130,246,.2); }

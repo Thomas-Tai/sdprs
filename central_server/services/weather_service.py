@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..database import get_weather_config
+from ..timeutil import utcnow
 
 logger = logging.getLogger("weather_service")
 
@@ -34,6 +35,11 @@ HTTP_TIMEOUT_S = 8.0
 
 @dataclass
 class CurrentWeather:
+    # obs_time / fetched_at: naive UTC (API-F12, 2026-07-20) — built via
+    # timeutil.utcnow() or normalized from an aware source timestamp. Never
+    # store a tz-aware datetime here; see the API-F1 trap comments in
+    # _fetch_openmeteo_current / _fetch_openmeteo_forecast for why a naive
+    # string mislabeled with the wrong zone is the dangerous failure mode.
     obs_time: datetime
     wind_speed_ms: float
     wind_direction_deg: int
@@ -87,7 +93,7 @@ class _Cache:
     current: Optional[CurrentWeather] = None
     forecast_36h: List[ForecastBucket] = field(default_factory=list)
     typhoon: Optional[TyphoonWarning] = None
-    last_success_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None  # naive UTC (API-F12)
     last_error: Optional[str] = None
     api_reachable: bool = False
     consecutive_failures: int = 0
@@ -262,14 +268,14 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     sources['pressure_hpa'] = station_label
 
                 return CurrentWeather(
-                    obs_time=datetime.now(timezone.utc),
+                    obs_time=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
                     wind_speed_ms=wind_ms,
                     wind_direction_deg=wind_dir,
                     rainfall_24h_mm=rainfall_hourly,
                     temperature_c=temp_c,
                     humidity_pct=humidity,
                     is_stale=False,
-                    fetched_at=datetime.now(timezone.utc),
+                    fetched_at=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
                     source="SMG",
                     station_name=name,
                     gust_speed_ms=gust_ms,
@@ -367,7 +373,17 @@ async def _fetch_openmeteo_current(
             "hourly": "visibility",
             "forecast_hours": 1,
             "wind_speed_unit": "ms",
-            "timezone": "Asia/Macau",
+            # API-F1 trap (2026-07-20): this is the exact bug just fixed in the
+            # sibling function _fetch_openmeteo_forecast — Open-Meteo's
+            # `current.time` string never carries a zone marker, so requesting
+            # "Asia/Macau" here produced a naive *local* string that `obs_time`
+            # below then treated as UTC (silent +8h error). Currently dormant
+            # only because no frontend file reads obs_time yet; the trap fires
+            # the moment someone wires "observed at" onto the current-
+            # conditions tile. Fixed the same way as the forecast fetcher:
+            # request "UTC" so the naive string genuinely IS UTC. DO NOT
+            # change this back to a local zone name.
+            "timezone": "UTC",
         }
         r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
         if r.status_code != 200:
@@ -436,6 +452,11 @@ async def _fetch_openmeteo_current(
                 visibility_km = None
 
         return CurrentWeather(
+            # `cur["time"]` has no zone marker now that `timezone: "UTC"` is
+            # requested above — fromisoformat() yields a naive datetime that
+            # IS true UTC, matching the naive-UTC wire contract. The
+            # `.replace("Z", ...)` is defensive only, same as in
+            # _fetch_openmeteo_forecast.
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
             wind_direction_deg=int(cur.get("wind_direction_10m", 0) or 0),
@@ -443,7 +464,7 @@ async def _fetch_openmeteo_current(
             temperature_c=float(cur.get("temperature_2m", 0) or 0),
             humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
             is_stale=False,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
             source="Open-Meteo",
             station_name=f"{lat:.3f},{lon:.3f}",
             gust_speed_ms=gust_ms,
@@ -466,7 +487,17 @@ async def _fetch_openmeteo_forecast(
             "longitude": lon,
             "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability,precipitation,weathercode",
             "wind_speed_unit": "ms",
-            "timezone": "Asia/Macau",
+            # API-F1 fix (2026-07-20): Open-Meteo's `hourly.time[]` strings
+            # never carry a zone marker ('Z' or offset) regardless of which
+            # `timezone` is requested — they're always a naive wall-clock
+            # string IN THAT ZONE. This used to be "Asia/Macau", so `start`/
+            # `end` below were naive *local* time mislabeled as naive UTC —
+            # the project-wide wire contract (see central_server.timeutil).
+            # The frontend's parseTs() appends 'Z' assuming UTC, so every
+            # forecast hour rendered 8h late. Requesting "UTC" here makes the
+            # naive string genuinely equal to UTC, so no conversion is needed
+            # after parsing — it's already contract-compliant.
+            "timezone": "UTC",
             "forecast_hours": hours,
         }
         r = await client.get(f"{OPEN_METEO_BASE}/forecast", params=params, timeout=HTTP_TIMEOUT_S)
@@ -486,6 +517,13 @@ async def _fetch_openmeteo_forecast(
         buckets = []
         for i, t_str in enumerate(times[:hours]):
             try:
+                # `t_str` has no zone marker (see the `timezone: "UTC"` param
+                # above) — fromisoformat() yields a naive datetime whose
+                # value IS true UTC now that we request the UTC zone. The
+                # `.replace("Z", ...)` is defensive only (Open-Meteo has never
+                # been observed to emit 'Z' here); kept so a stray 'Z' parses
+                # instead of raising, though it would then come back
+                # tz-aware — a possible future gap, not a live bug today.
                 start = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
                 end = start + timedelta(hours=1)
                 ws = float(wind[i] if i < len(wind) else 0)
@@ -589,12 +627,21 @@ async def _fetch_hko_current(
             except (TypeError, ValueError):
                 continue
 
-        # obs_time comes from HKO's own updateTime (falls back to now UTC)
+        # obs_time comes from HKO's own updateTime (falls back to now UTC).
+        # API-F12 (2026-07-20): HKO's updateTime/recordTime carry an explicit
+        # "+08:00" offset — unlike Open-Meteo's naive-but-mislabeled strings
+        # (API-F1), this one IS genuinely tz-aware and correct. But the wire
+        # contract is naive UTC (see timeutil.utcnow), so normalize
+        # aware -> naive UTC here rather than passing the aware value
+        # through, to keep obs_time naive across every source in this file.
         obs_time_str = data.get("updateTime") or data.get("temperature", {}).get("recordTime")
         try:
-            obs_time = datetime.fromisoformat(obs_time_str) if obs_time_str else datetime.now(timezone.utc)
+            if obs_time_str:
+                obs_time = datetime.fromisoformat(obs_time_str).astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                obs_time = utcnow()
         except (TypeError, ValueError):
-            obs_time = datetime.now(timezone.utc)
+            obs_time = utcnow()
 
         # Declare which fields we actually supplied so merge_currents
         # doesn't accidentally show the "wind_speed_ms=0" default as if
@@ -617,7 +664,7 @@ async def _fetch_hko_current(
             temperature_c=temp_c,
             humidity_pct=humidity_pct,
             is_stale=False,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
             source="HKO",
             station_name=temp_station,
             gust_speed_ms=None,      # HKO rhrread has no gust
@@ -721,7 +768,7 @@ def merge_currents(
         temperature_c=merged_values["temperature_c"],
         humidity_pct=merged_values["humidity_pct"],
         is_stale=False,
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
         source=primary_label,  # legacy single-label
         station_name=primary.station_name,
         gust_speed_ms=merged_values.get("gust_speed_ms"),
@@ -750,7 +797,7 @@ class WeatherService:
         if cur is None:
             return None
         # Recompute is_stale at read time so callers don't see a fixed flag.
-        age_s = (datetime.now(timezone.utc) - cur.fetched_at).total_seconds()
+        age_s = (utcnow() - cur.fetched_at).total_seconds()  # fetched_at is naive UTC (API-F12)
         cur.is_stale = age_s > self._settings.WEATHER_CACHE_STALE_SECONDS
         return cur
 
@@ -762,7 +809,13 @@ class WeatherService:
 
     def is_lightning_window(self) -> bool:
         # True if a forecast bucket covering the current hour mentions 雷.
-        now = datetime.now(timezone.utc)
+        # API-F1b fix (2026-07-20): forecast bucket start/end times are
+        # naive UTC (see _fetch_openmeteo_forecast) — comparing them against
+        # an aware `now` raised "can't compare offset-naive and
+        # offset-aware datetimes" whenever forecast data was present. Use
+        # the same naive-UTC "now" as the rest of the server
+        # (central_server.timeutil.utcnow) instead of datetime.now(timezone.utc).
+        now = utcnow()
         for b in self._cache.forecast_36h:
             if b.start_time <= now <= b.end_time and "雷" in b.weather_phenomenon:
                 return True
@@ -772,7 +825,7 @@ class WeatherService:
         cur = self._cache.current
         cache_age = None
         if cur is not None:
-            cache_age = (datetime.now(timezone.utc) - cur.fetched_at).total_seconds()
+            cache_age = (utcnow() - cur.fetched_at).total_seconds()  # fetched_at is naive UTC (API-F12)
         return {
             "cache_age_s": cache_age,
             "last_fetch_at": self._cache.last_success_at.isoformat() if self._cache.last_success_at else None,
@@ -928,7 +981,7 @@ class WeatherService:
             any_ok = True
 
         if any_ok:
-            self._cache.last_success_at = datetime.now(timezone.utc)
+            self._cache.last_success_at = utcnow()  # API-F12 (2026-07-20): naive UTC, matches the wire contract
             self._cache.api_reachable = True
             self._cache.last_error = None
             self._cache.consecutive_failures = 0

@@ -119,6 +119,34 @@ def test_manual_off_expires_returns_to_natural():
     assert s2 == {"action": None, "expires_ms": None}
 
 
+def test_auto_releases_an_indefinite_off_hold():
+    """MSP-F6: AUTO is the way out of an indefinite manual OFF. The slot must
+    clear and the natural decision (here: ON, because high_water is asserted)
+    must resume — this is the difference between a serviced pump coming back
+    for the next rain event and a flooded station."""
+    clk = FakeClock()
+    d_on = _natural_decision(action="ON", reason=control_logic.HIGH_WATER,
+                             flags={"high_water": True})
+    state = {"action": "AUTO", "expires_ms": None}
+    out, s = main.apply_manual_override(d_on, state, clk)
+    assert out is d_on                      # natural decision, untouched
+    assert out["action"] == "ON"
+    assert out["reason"] == control_logic.HIGH_WATER
+    # No manual_override flag — telemetry stops reporting a hold immediately.
+    assert "manual_override" not in out["flags"]
+    assert s == {"action": None, "expires_ms": None}
+
+
+def test_auto_is_a_noop_when_nothing_is_held():
+    """Releasing an already-released pump must be harmless — operators will
+    click it defensively when they can't tell whether a hold is active."""
+    clk = FakeClock()
+    d = _natural_decision(action="OFF", reason=control_logic.STANDBY)
+    out, s = main.apply_manual_override(d, {"action": "AUTO", "expires_ms": None}, clk)
+    assert out is d
+    assert s == {"action": None, "expires_ms": None}
+
+
 def test_unknown_action_drops_the_slot():
     """A malformed action ('MAYBE') must not stick — clear it and pass
     through, otherwise a bad payload wedges the override forever."""

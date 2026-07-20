@@ -22,6 +22,25 @@ logger = logging.getLogger("websocket_service")
 # delivery to the other clients.
 SEND_TIMEOUT_SECONDS = 5.0
 
+# API-F6: how often an already-open socket re-checks that its session is
+# still valid. Connect-time auth is a point-in-time check only; without this,
+# a session that expires or is logged out server-side keeps receiving live
+# telemetry/pump-state broadcasts until the transport happens to drop.
+SESSION_REVALIDATION_INTERVAL_SECONDS = 45.0
+
+
+def _get_session_user(websocket: WebSocket) -> Optional[str]:
+    """
+    Extract the authenticated username from a WebSocket's session.
+
+    This is the SAME check the connect handler (`websocket_endpoint`) uses
+    to accept/reject a new connection, factored out so the periodic
+    re-validation loop can reuse it verbatim instead of duplicating the
+    session-lookup logic.
+    """
+    session = websocket.scope.get("session") or getattr(websocket, "session", None) or {}
+    return session.get("user")
+
 
 class WebSocketManager:
     """
@@ -176,6 +195,54 @@ ws_manager = WebSocketManager()
 router = APIRouter(tags=["websocket"])
 
 
+async def _session_revalidation_loop(websocket: WebSocket) -> None:
+    """
+    API-F6: periodically re-check the session backing an already-open socket.
+
+    Connect-time auth only proves the session was valid at the moment the
+    handshake completed. Without this loop, a session that later expires or
+    is logged out keeps the socket receiving live broadcasts (alerts, pump
+    state, ...) until the transport happens to drop — which can be a long
+    time for an idle-but-open dashboard tab.
+
+    Runs as its own task, independent of the receive loop in
+    `websocket_endpoint`, so a client that never sends anything (the normal
+    case — we don't expect client-initiated messages) still gets checked,
+    and so this check can never stall broadcast delivery or message
+    dispatch on the main loop.
+
+    Reuses `_get_session_user()` — the exact same session/user lookup the
+    connect handler runs — so "valid" means the same thing at connect time
+    and on every re-check. On failure it mirrors the connect-time rejection
+    path exactly: send the existing `auth_expired` frame, then close with
+    code 1008 (no new WS message type introduced).
+    """
+    try:
+        while True:
+            await asyncio.sleep(SESSION_REVALIDATION_INTERVAL_SECONDS)
+            if _get_session_user(websocket):
+                continue
+            logger.warning(
+                "WebSocket session no longer valid on periodic re-check; closing"
+            )
+            try:
+                await websocket.send_json({
+                    "type": "auth_expired",
+                    "message": "session expired",
+                })
+            except Exception as e:
+                logger.debug(f"auth_expired re-check send failed: {e}")
+            try:
+                await websocket.close(code=1008, reason="session_expired")
+            except Exception as e:
+                logger.debug(f"auth-expired re-check close failed: {e}")
+            return
+    except asyncio.CancelledError:
+        # Normal shutdown path: the connection closed/dropped for some other
+        # reason and websocket_endpoint's finally block cancelled us.
+        raise
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
@@ -197,8 +264,7 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     # Check session authentication
     # SessionMiddleware populates session in scope for both HTTP and WebSocket
-    session = websocket.scope.get("session") or getattr(websocket, "session", None) or {}
-    user = session.get("user")
+    user = _get_session_user(websocket)
 
     if not user:
         logger.warning("WebSocket connection rejected - not authenticated")
@@ -224,6 +290,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Add connection to manager
     await ws_manager.add(websocket)
+
+    # API-F6: periodic session re-validation runs as an independent task so
+    # it can never block/delay the receive loop below (and vice versa).
+    revalidation_task = asyncio.create_task(_session_revalidation_loop(websocket))
 
     try:
         # Keep connection alive, waiting for messages
@@ -255,6 +325,11 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        revalidation_task.cancel()
+        try:
+            await revalidation_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await ws_manager.remove(websocket)
 
 

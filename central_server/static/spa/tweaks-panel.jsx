@@ -47,7 +47,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const __TWEAKS_STYLE = `
-  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:90;width:280px;
     max-height:calc(100vh - 32px);display:flex;flex-direction:column;
     transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
     background:rgba(250,249,247,.78);color:#29261b;
@@ -154,6 +154,72 @@ const __TWEAKS_STYLE = `
   .twk-chip>span>i:first-child{box-shadow:none}
   .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px;
     filter:drop-shadow(0 1px 1px rgba(0,0,0,.3))}
+
+  /* WHA-L5 fix (2026-07-20): every rule above hardcodes a light-glass
+     palette (light background, dark #29261b text) with no dark-mode
+     variant. That's fine for a host page that's light by default, but
+     SDPRS is DARK by default (html.light is the opt-in override) — the
+     panel rendered as a bright card floating over a black NOC screen.
+     Scope the dark palette to html:not(.light) so any other (light-by-
+     default) host embedding this same file is unaffected. */
+  html:not(.light) .twk-panel{background:rgba(17,24,39,.88);color:#e5e7eb;
+    border-color:rgba(255,255,255,.08);
+    box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 12px 40px rgba(0,0,0,.5)}
+  html:not(.light) .twk-x{color:rgba(229,231,235,.55)}
+  html:not(.light) .twk-x:hover{background:rgba(255,255,255,.08);color:#e5e7eb}
+  html:not(.light) .twk-lbl{color:rgba(229,231,235,.72)}
+  html:not(.light) .twk-val{color:rgba(229,231,235,.5)}
+  html:not(.light) .twk-sect{color:rgba(229,231,235,.45)}
+  html:not(.light) .twk-field{border-color:rgba(255,255,255,.14);
+    background:rgba(255,255,255,.06);color:#e5e7eb}
+  html:not(.light) .twk-field:focus{border-color:rgba(255,255,255,.3);
+    background:rgba(255,255,255,.1)}
+  html:not(.light) select.twk-field{background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(229,231,235,.6)' d='M0 0h10L5 6z'/></svg>")}
+  html:not(.light) .twk-slider{background:rgba(255,255,255,.14)}
+  html:not(.light) .twk-seg{background:rgba(255,255,255,.08)}
+  html:not(.light) .twk-seg-thumb{background:rgba(255,255,255,.16)}
+  html:not(.light) .twk-num{border-color:rgba(255,255,255,.14);
+    background:rgba(255,255,255,.06)}
+  html:not(.light) .twk-num-lbl{color:rgba(229,231,235,.6)}
+  html:not(.light) .twk-num-unit{color:rgba(229,231,235,.45)}
+  html:not(.light) .twk-btn.secondary{background:rgba(255,255,255,.08);color:#e5e7eb}
+  html:not(.light) .twk-btn.secondary:hover{background:rgba(255,255,255,.14)}
+  html:not(.light) .twk-swatch{border-color:rgba(255,255,255,.14)}
+  html:not(.light) .twk-chip[data-on="1"]{box-shadow:0 0 0 1.5px rgba(255,255,255,.85),
+    0 2px 6px rgba(0,0,0,.4)}
+`;
+
+// WHA-H4 fix: style for the always-visible in-app trigger (see the `!open`
+// branch of TweaksPanel below). Kept as its own small stylesheet — it's
+// only ever mounted when the panel is closed, whereas __TWEAKS_STYLE is
+// only mounted when open, so the two never need to coexist.
+const __TWEAKS_TRIGGER_STYLE = `
+  .twk-trigger{position:fixed;right:16px;bottom:16px;z-index:90;
+    width:36px;height:36px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    appearance:none;cursor:default;
+    background:rgba(250,249,247,.78);color:#29261b;
+    border:.5px solid rgba(255,255,255,.6);
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 6px 20px rgba(0,0,0,.18);
+    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%)}
+  .twk-trigger:hover{box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 8px 24px rgba(0,0,0,.24)}
+  /* Wall mode: hide the trigger entirely. At right:16px/bottom:16px it is a
+     36px disc spanning 16-52px, which overlaps the WallView exit button
+     (app.jsx, "absolute bottom-10 right-3", i.e. 40-72px) — and at z-index 90
+     vs that button's z-50 it would sit ON TOP of the exit control's corner.
+     NOTE: this whole block is a JS template literal. Do not write backticks
+     or dollar-brace interpolation markers in these comments — either one
+     terminates or reopens the string and blanks the entire dashboard.
+     SHL-2 exists precisely so a 4K wall display can be escaped; partially
+     occluding its only affordance would re-break that. Nothing is lost:
+     app.jsx owns both a dedicated exit button and an Escape handler for wall
+     mode, and theme/density are not adjustable from a wall display anyway.
+     The wall-mode class is set on the html element by app.jsx (see the
+     classList.toggle call there). */
+  html.wall-mode .twk-trigger{display:none}
+  html:not(.light) .twk-trigger{background:rgba(17,24,39,.82);color:#e5e7eb;
+    border-color:rgba(255,255,255,.12);
+    box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 6px 20px rgba(0,0,0,.45)}
 `;
 
 // ── useTweaks ───────────────────────────────────────────────────────────────
@@ -176,15 +242,25 @@ const __writeTweaks = (obj) => {
 };
 function useTweaks(defaults) {
   const [values, setValues] = React.useState(() => __readTweaks(defaults));
+  // WHA-M13 fix (2026-07-20): this used to do
+  //   let next; setValues(prev => { next = {...}; return next; }); __writeTweaks(next);
+  // — reading `next` immediately after calling setValues relies on React
+  // invoking the updater function SYNCHRONOUSLY, which is an internal
+  // optimization (the "eager state" bailout check), not a guarantee of the
+  // public API. Under rapid-fire calls (e.g. a drag-scrub number control
+  // firing many updates per second) this can read `next` before the
+  // updater has run, persisting `undefined` into localStorage and silently
+  // resetting every tweak on next reload. Persist from a useEffect keyed on
+  // `values` instead — that only runs after React has actually committed
+  // the new state, so it can never observe a stale/undefined value.
+  React.useEffect(() => { __writeTweaks(values); }, [values]);
   // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
   // useState-style call doesn't write a "[object Object]" key into the persisted
   // JSON block.
   const setTweak = React.useCallback((keyOrEdits, val) => {
     const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
       ? keyOrEdits : { [keyOrEdits]: val };
-    let next;
-    setValues((prev) => { next = { ...prev, ...edits }; return next; });
-    __writeTweaks(next);
+    setValues((prev) => ({ ...prev, ...edits }));
     // G5: was '*'; the inbound listener already gates on same-origin, so
     // tighten the outbound target to match — nothing legitimate reads these
     // from a cross-origin parent.
@@ -226,7 +302,13 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
   );
   React.useEffect(() => {
     if (!hasDeckStage || railEnabled) return undefined;
+    // WHA-L4 fix (2026-07-20): this listener had no origin check (unlike the
+    // __activate_edit_mode listener below, which gates on
+    // `e.origin === window.location.origin`) — any cross-origin frame could
+    // post this type and flip on the rail-visibility UI. Match the same
+    // same-origin gate for consistency.
     const onMsg = (e) => {
+      if (e.origin !== window.location.origin) return;
       if (e.data && e.data.type === '__omelette_rail_enabled') setRailEnabled(true);
     };
     window.addEventListener('message', onMsg);
@@ -237,7 +319,10 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
   });
   const toggleRail = (on) => {
     setRailVisible(on);
-    window.postMessage({ type: '__deck_rail_visible', on }, '*');
+    // WHA-L4 fix (2026-07-20): was '*' — matches the same tightened-origin
+    // rationale as the useTweaks G5 fix above; this is a same-window post
+    // (deck-stage listens in-page), nothing legitimate needs '*' here.
+    window.postMessage({ type: '__deck_rail_visible', on }, window.location.origin);
   };
   const offsetRef = React.useRef({ x: 16, y: 16 });
   const PAD = 16;
@@ -309,7 +394,43 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     window.addEventListener('mouseup', up);
   };
 
-  if (!open) return null;
+  if (!open) {
+    // WHA-H4 fix (2026-07-20): `open` previously could ONLY become true via
+    // an inbound `__activate_edit_mode` postMessage from an external "host"
+    // frame. In a standalone production deployment nothing sends that
+    // message (grep-confirmed — no caller anywhere in the SPA), so this
+    // panel — which is SDPRS's only control for theme/density/focus-mode/
+    // 4K 牆面模式 (app.jsx renders all of them inside <TweaksPanel>) — could
+    // never be opened at all. A `wallMode: true` persisted from any other
+    // path (manual localStorage edit, future feature) was therefore also a
+    // trap: no in-app way back into the settings that toggle it off. Add a
+    // small always-visible in-app trigger so operators can reach these
+    // controls without depending on the external host protocol; the
+    // postMessage listener below is kept as-is for embeds that DO run
+    // inside that host (e.g. a design-tool preview frame).
+    // Self-contained: no dependency on window.Icon / Tailwind tokens, so
+    // this stays portable to any other (non-SDPRS) host embedding the same
+    // tweaks-panel.jsx — consistent with the rest of this file, which never
+    // reaches for an external icon/class system (see __TwkCheck's raw SVG).
+    return (
+      <>
+        <style>{__TWEAKS_TRIGGER_STYLE}</style>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="twk-trigger"
+          aria-label="開啟顯示設定"
+          title="顯示設定（主題／密度／4K 牆面模式）"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 13.09H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </>
+    );
+  }
   return (
     <>
       <style>{__TWEAKS_STYLE}</style>
@@ -481,6 +602,16 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
     return n;
   };
   const startRef = React.useRef({ x: 0, val: 0 });
+  // WHA-L8 fix (2026-07-20): the <input> used to be bound straight to the
+  // numeric `value` prop. Clearing the field to retype made e.target.value
+  // === '', and Number('') is 0 (not NaN) — so onChange(clamp(0)) fired on
+  // that very keystroke and the field snapped to 0 before the operator could
+  // type a replacement digit. Track the field's own text locally so it can
+  // sit empty mid-edit; commit to onChange only once the text parses to a
+  // real number, and resync from the external `value` on blur (or whenever
+  // it changes from outside, e.g. another control resetting this tweak).
+  const [text, setText] = React.useState(() => String(value));
+  React.useEffect(() => { setText(String(value)); }, [value]);
   const onScrubStart = (e) => {
     e.preventDefault();
     startRef.current = { x: e.clientX, val: value };
@@ -498,11 +629,23 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
+  const onInputChange = (e) => {
+    const raw = e.target.value;
+    setText(raw);
+    if (raw === '') return; // tolerate empty while retyping — don't force 0
+    const n = Number(raw);
+    if (!Number.isNaN(n)) onChange(clamp(n));
+  };
+  const onInputBlur = () => {
+    const n = Number(text);
+    if (text === '' || Number.isNaN(n)) setText(String(value)); // revert
+    else onChange(clamp(n));
+  };
   return (
     <div className="twk-num">
       <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
-      <input type="number" value={value} min={min} max={max} step={step}
-             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
+      <input type="number" value={text} min={min} max={max} step={step}
+             onChange={onInputChange} onBlur={onInputBlur} />
       {unit && <span className="twk-num-unit">{unit}</span>}
     </div>
   );

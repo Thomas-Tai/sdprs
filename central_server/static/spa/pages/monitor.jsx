@@ -18,8 +18,52 @@ const ClockDisplay = React.memo(() => {
   );
 });
 
+// MSP-F19/F8: heartbeat/upload ages are now `null` for a never-reported node
+// (the old 999 sentinel is gone). window.fmtAge (data.jsx) does `sec || 0`,
+// which would silently print "0s" for null — a fabricated reading, exactly
+// the bug this replaces. Guard first, then reuse the app-wide humanizer
+// (data.jsx fmtAge) so "86400s" reads as "1d 0h" like every other age in
+// the dashboard, instead of a raw, unreadable seconds count.
+function fmtAgeOrDash(sec) {
+  return sec == null ? '—' : window.fmtAge(sec);
+}
+
+// MSP-F10: status-rank used both to freely re-sort (pointer not over the
+// grid) and to seed the "newcomer" order for nodes not yet seen while frozen.
+const STATUS_RANK = { offline: 0, critical: 1, warn: 2, online: 3 };
+const _rankOf = (status) => STATUS_RANK[status] ?? 99;
+
+// Keeps the grid's visual order stable while the operator's pointer is over
+// it, so a background refresh (~20s poll / WS event) never reshuffles cards
+// out from under an in-flight click — status-sorted grids used to "teleport"
+// click targets on every tick (MSP-F10). While NOT frozen, re-sorts freely by
+// status rank so the wall always leads with what needs attention. While
+// frozen, the existing slot order is preserved — even if a card's own rank
+// changes — and only genuinely new node ids are appended (in rank order) at
+// the end.
+function useStableSort(list, frozen) {
+  const orderRef = React.useRef([]);
+  const byId = new Map(list.map(n => [n.id, n]));
+  if (!frozen) {
+    const fresh = [...list].sort((a, b) => _rankOf(a.status) - _rankOf(b.status));
+    orderRef.current = fresh.map(n => n.id);
+    return fresh;
+  }
+  const known = orderRef.current.filter(id => byId.has(id));
+  const knownSet = new Set(known);
+  const newcomers = [...list]
+    .filter(n => !knownSet.has(n.id))
+    .sort((a, b) => _rankOf(a.status) - _rankOf(b.status));
+  const order = known.concat(newcomers.map(n => n.id));
+  orderRef.current = order;
+  return order.map(id => byId.get(id)).filter(Boolean);
+}
+
 const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
+  // MSP-F9 contract: `upload` is null for a camera with no snapshot ever —
+  // `null > 60` is false, so this correctly does NOT freeze on "no data yet"
+  // and instead only freezes once we know the age (offline always freezes).
   const frozen = node.status === 'offline' || node.upload > 60;
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   return (
@@ -61,7 +105,9 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         {frozen && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
             <div className="bg-sev-critical text-xs font-bold px-2 py-1 rounded">
-              畫面凍結 {node.upload}s
+              {/* MSP-F19: raw seconds ("86400s") for a node offline for days is
+                  unreadable — humanize via the shared age formatter. */}
+              畫面凍結 {fmtAgeOrDash(node.upload)}
             </div>
           </div>
         )}
@@ -80,8 +126,12 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             <div className="font-mono text-xs font-semibold text-white tnum">{node.id}</div>
             <div className="text-[10px] text-white/70">{node.name}</div>
           </div>
+          {/* MSP-F25: a live-ticking wall clock next to a frozen frame reads as
+              "this is the frame's current timestamp" — exactly the false
+              freshness signal this disaster console must never give. Freeze
+              the clock display itself once the frame is frozen. */}
           <div className="font-mono text-[10px] text-white/60 tnum">
-            <ClockDisplay />
+            {frozen ? <span className="text-white/35">--:--:--</span> : <ClockDisplay />}
           </div>
         </div>
       </div>
@@ -90,19 +140,20 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         <div className="flex flex-col">
           <span className="text-ink-muted">心跳</span>
           <span className={node.heartbeat > 30 ? 'text-sev-critical font-semibold' : node.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {node.heartbeat == null ? '—' : node.heartbeat > 60 ? Math.floor(node.heartbeat/60)+'m' : node.heartbeat+'s'}
+            {fmtAgeOrDash(node.heartbeat)}
           </span>
         </div>
         <div className="flex flex-col">
           <span className="text-ink-muted">上傳</span>
           <span className={node.upload > 60 ? 'text-sev-critical font-semibold' : node.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {node.upload == null ? '—' : node.upload > 60 ? Math.floor(node.upload/60)+'m' : node.upload+'s'}
+            {fmtAgeOrDash(node.upload)}
           </span>
         </div>
         {node.type === 'camera' ? (
           <div className="flex flex-col">
             <span className="text-ink-muted">🌡</span>
-            <span className={node.temp > 50 ? 'text-sev-warn' : 'text-ink-secondary'}>{node.temp ? node.temp+'°' : '—'}</span>
+            {/* MSP-F21: truthy check treated a genuine 0°C reading as "no data" */}
+            <span className={node.temp > 50 ? 'text-sev-warn' : 'text-ink-secondary'}>{node.temp != null ? node.temp+'°' : '—'}</span>
           </div>
         ) : (
           <div className="flex flex-col">
@@ -151,6 +202,10 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
     const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
+  // MSP-F10: freeze card order while the pointer is over the grid (see
+  // useStableSort above) so a background refresh never reshuffles cards out
+  // from under an in-flight click.
+  const [gridHover, setGridHover] = useState_p(false);
   // Pre-compute Map<nodeId, alert[]> so each NodeCard/PumpCard does O(1) lookup
   // instead of O(n) filter on every render. Recomputes only when activeAlerts
   // reference changes (i.e. on refresh, not on tick).
@@ -171,11 +226,15 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
   const cameraNodes = allNodes.filter(n => n.type === 'camera');
   const pumpNodes = allNodes.filter(n => n.type === 'pump');
   const visibleNodes = tab === 'cameras' ? cameraNodes : tab === 'pumps' ? pumpNodes : allNodes;
-  // Sort: OFFLINE > critical > warn > online (unknown statuses sink to the bottom via ?? 99)
-  const sorted = [...visibleNodes].sort((a, b) => {
-    const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
-    return (rank[a.status] ?? 99) - (rank[b.status] ?? 99);
-  });
+  // MSP-F10: was `[...visibleNodes].sort(...)` recomputed fresh every render —
+  // reshuffled the whole grid under the cursor on every ~20s poll/WS tick.
+  // useStableSort (defined above) keeps the last-rendered slot order while
+  // gridHover is true. Three independent hook instances (rules-of-hooks safe:
+  // called unconditionally, same order every render) because the 全部 tab
+  // renders pumps/cameras as two separate sorted sub-lists below.
+  const sorted = useStableSort(visibleNodes, gridHover);
+  const sortedPumpsAll = useStableSort(pumpNodes, gridHover);
+  const sortedCamerasAll = useStableSort(cameraNodes, gridHover);
 
   const summary = {
     online: allNodes.filter(n => n.status === 'online').length,
@@ -215,7 +274,9 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
             onClick={() => {
               const el = document.documentElement;
               if (document.fullscreenElement) {
-                document.exitFullscreen && document.exitFullscreen();
+                // MSP-F24: exitFullscreen() returns a promise that can reject
+                // (denied by the browser); it was unhandled.
+                document.exitFullscreen && document.exitFullscreen().catch(() => {});
               } else if (el.requestFullscreen) {
                 el.requestFullscreen().catch(err => setToast({ tone: 'warn', msg: '全螢幕請求被瀏覽器拒絕' }));
               }
@@ -225,15 +286,23 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
           </button>
         </div>
       </div>
+      {/* MSP-F11: an in-flow banner here would push the whole grid down mid-
+          interaction, landing the next click on the wrong card. Overlay it
+          instead (matches app.jsx's global toast pattern) so it never moves
+          layout. */}
       {toast && (
-        <div role="status" aria-live="polite" className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
-          toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
-            : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
-            : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
-            : 'bg-sev-info/15 text-sev-info border-sev-info/30'
-        }`}>{toast.msg}</div>
+        <div className="fixed top-16 right-4 z-40 animate-in" role="status" aria-live="polite">
+          <div className={`px-3 py-2 rounded-lg border shadow-2xl text-xs bg-surface-overlay ${
+            toast.tone === 'success' ? 'border-sev-ok/50 text-sev-ok'
+              : toast.tone === 'error' ? 'border-sev-critical/50 text-sev-critical'
+              : toast.tone === 'warn' ? 'border-sev-warn/50 text-sev-warn'
+              : 'border-sev-info/50 text-sev-info'
+          }`}>{toast.msg}</div>
+        </div>
       )}
-      <div className="flex-1 overflow-y-auto scroll-thin p-3">
+      <div className="flex-1 overflow-y-auto scroll-thin p-3"
+        onMouseEnter={() => setGridHover(true)}
+        onMouseLeave={() => setGridHover(false)}>
         {sorted.length === 0 ? (
           <div className="h-full flex items-center justify-center">
             <EmptyState icon={Icon.Camera} title="尚無節點資料"
@@ -259,8 +328,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
                   <button onClick={() => setTab('pumps')} className="text-[10px] text-sev-info hover:underline">僅顯示抽水站 →</button>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-                  {[...pumpNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
-                    .map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS} compact/>)}
+                  {sortedPumpsAll.map(n => <PumpCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS} compact/>)}
                 </div>
               </div>
             )}
@@ -273,8 +341,7 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
                   <button onClick={() => setTab('cameras')} className="text-[10px] text-sev-info hover:underline">僅顯示攝影機 →</button>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-                  {[...cameraNodes].sort((a,b) => (({offline:0,critical:1,warn:2,online:3}[a.status]) ?? 99) - (({offline:0,critical:1,warn:2,online:3}[b.status]) ?? 99))
-                    .map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS}/>)}
+                  {sortedCamerasAll.map(n => <NodeCard key={n.id} node={n} onSelect={onSelectNode} nodeAlerts={alertMap.get(n.id) || EMPTY_ALERTS}/>)}
                 </div>
               </div>
             )}
@@ -290,7 +357,14 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
 const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false }) => {
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   const stateTone = node.status === 'offline' || node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
-  const levelTone = node.level > 85 ? 'critical' : node.level > 70 ? 'warn' : 'info';
+  // MSP-F3: an offline pump (or one with no water_level reading yet) must
+  // never draw its last-known level as a live-looking gauge fill — a stale
+  // number silently read as current is exactly the "frozen panel mistaken
+  // for live" failure this console must avoid. Ported from pumps.jsx's
+  // already-shipped guard.
+  const isOffline = node.status === 'offline';
+  const isNoTelemetry = node.level == null;
+  const levelTone = (isOffline || isNoTelemetry) ? 'stale' : node.level > 85 ? 'critical' : node.level > 70 ? 'warn' : 'info';
   const cycleTone = node.cycles > 20 ? 'critical' : node.cycles > 15 ? 'warn' : 'ok';
   const maxCycle = Math.max(...(node.cycleHistory || [node.cycles]));
   return (
@@ -316,6 +390,23 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
         <span className="text-[10px] text-ink-muted bg-surface-elevated px-1.5 py-0.5 rounded font-mono">PUMP</span>
       </div>
 
+      {/* MSP-F1: the actual relay state (node.pumpState), distinct from
+          `status` which is derived from water level / online-ness. This is
+          the single most important fact on a pump card during a flood — the
+          device silently drops ON commands under dry-run/sensor-conflict
+          protection, and without this an operator has no way to learn the
+          pump never actually ran. */}
+      <div className={`flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold border-b ${
+        node.pumpState === 'on' ? 'bg-sev-ok/15 border-sev-ok/30 text-sev-ok'
+          : node.pumpState === 'off' ? 'bg-surface-elevated border-border-subtle text-ink-secondary'
+          : 'bg-sev-warn/10 border-sev-warn/30 text-sev-warn'
+      }`}>
+        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+          node.pumpState === 'on' ? 'bg-sev-ok animate-live-blink' : node.pumpState === 'off' ? 'bg-ink-dim' : 'bg-sev-warn'
+        }`}></span>
+        {node.pumpState === 'on' ? '運轉中' : node.pumpState === 'off' ? '已停止' : '狀態不明'}
+      </div>
+
       {/* Sensor conflict — prominent critical banner, mirrors the glass-node critical alerts */}
       {node.sensorConflict && (
         <div role="alert" className="flex items-center gap-1.5 px-3 py-1.5 bg-sev-critical/15 border-b border-sev-critical/40 text-sev-critical text-xs font-semibold">
@@ -326,7 +417,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
 
       <div className="p-3 flex gap-3">
         {/* LEFT — Water tank gauge */}
-        <div className="relative w-20 flex-shrink-0 bg-surface-base rounded border border-border-subtle overflow-hidden" style={{ height: compact ? '112px' : '140px' }}>
+        <div className={`relative w-20 flex-shrink-0 bg-surface-base rounded border overflow-hidden ${(isOffline || isNoTelemetry) ? 'border-dashed border-sev-stale/50' : 'border-border-subtle'}`} style={{ height: compact ? '112px' : '140px' }}>
           {/* Tick marks on left */}
           <div className="absolute left-0 inset-y-1 w-3 flex flex-col justify-between text-[8px] text-ink-dim font-mono tnum">
             <span className="leading-none pl-0.5">100</span>
@@ -342,21 +433,31 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
           <div className="absolute left-3 right-0 border-t border-dashed border-sev-warn/60" style={{ top: '30%' }}>
             <span className="absolute -top-[7px] right-0.5 text-[8px] font-mono text-sev-warn bg-surface-panel px-0.5 leading-none">70</span>
           </div>
-          {/* Water fill */}
-          <div className={`absolute left-3 right-0 bottom-0 transition-all duration-500 ${levelTone === 'critical' ? 'bg-sev-critical/50' : levelTone === 'warn' ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: (node.level ?? 0) + '%' }}>
-            {/* Wave top edge */}
-            <div className={`h-0.5 ${levelTone === 'critical' ? 'bg-sev-critical' : levelTone === 'warn' ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
-          </div>
+          {/* Water fill — MSP-F3: suppressed entirely when offline/no-data so a
+              stale reading never renders as a live measurement. */}
+          {!(isOffline || isNoTelemetry) && (
+            <div className={`absolute left-3 right-0 bottom-0 transition-all duration-500 ${levelTone === 'critical' ? 'bg-sev-critical/50' : levelTone === 'warn' ? 'bg-sev-warn/40' : 'bg-sev-info/40'}`} style={{ height: node.level + '%' }}>
+              {/* Wave top edge */}
+              <div className={`h-0.5 ${levelTone === 'critical' ? 'bg-sev-critical' : levelTone === 'warn' ? 'bg-sev-warn' : 'bg-sev-info'}`}></div>
+            </div>
+          )}
           {/* Big % readout */}
           <div className="absolute inset-x-3 top-1/2 -translate-y-1/2 text-center pointer-events-none">
-            <div className={`text-xl font-mono font-black tnum leading-none ${levelTone === 'critical' ? 'text-sev-critical' : levelTone === 'warn' ? 'text-sev-warn' : 'text-ink-primary'}`}>
-              {node.level != null ? node.level : '—'}
+            <div className={`text-xl font-mono font-black tnum leading-none ${(isOffline || isNoTelemetry) ? 'text-sev-stale' : levelTone === 'critical' ? 'text-sev-critical' : levelTone === 'warn' ? 'text-sev-warn' : 'text-ink-primary'}`}>
+              {(isOffline || isNoTelemetry) ? '—' : node.level}
               <span className="text-[10px] text-ink-muted font-normal">%</span>
             </div>
           </div>
-          {/* Trend arrow */}
-          <div className={`absolute bottom-0.5 right-0.5 text-[10px] font-mono ${node.trend === 'up' ? 'text-sev-warn' : node.trend === 'down' ? 'text-sev-ok' : 'text-ink-muted'}`}>
-            {node.trend === 'up' ? '↑' : node.trend === 'down' ? '↓' : '→'}
+          {isOffline && (
+            <div className="absolute top-1 left-1 text-[8px] font-bold px-1 py-0.5 rounded bg-sev-stale/20 text-sev-stale tracking-wide">離線</div>
+          )}
+          {/* Trend arrow — MSP-F14: api.jsx's `trend` is always null (not yet
+              computed server-side); showing a fixed "→" claimed a real,
+              flat reading. Render an honest dash instead of a fabricated
+              direction — this still lights up correctly if trend data ever
+              ships. */}
+          <div className="absolute bottom-0.5 right-0.5 text-[10px] font-mono">
+            {node.trend === 'up' ? <span className="text-sev-warn">↑</span> : node.trend === 'down' ? <span className="text-sev-ok">↓</span> : <span className="text-ink-dim">—</span>}
           </div>
         </div>
 
@@ -400,14 +501,17 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             </div>
           </div>
 
-          {/* Rain / dry-run protect badges */}
+          {/* Rain / dry-run protect badges. MSP-F15: was English-only
+              ("Dry-run protect (pump held OFF)") in an otherwise all-zh-TW
+              UI — this is the exact flag that explains "why didn't my ON
+              command run", so it must be readable at a glance. */}
           {(node.raining || node.dryRunProtect) && (
             <div className="flex items-center gap-1.5 flex-wrap">
               {node.raining && (
-                <Pill tone="info" className="!h-5 !text-[10px]">🌧 Raining</Pill>
+                <Pill tone="info" className="!h-5 !text-[10px]">🌧 降雨中</Pill>
               )}
               {node.dryRunProtect && (
-                <Pill tone="warn" className="!h-5 !text-[10px]">Dry-run protect (pump held OFF)</Pill>
+                <Pill tone="warn" className="!h-5 !text-[10px]">防乾轉保護中（幫浦已停止）</Pill>
               )}
             </div>
           )}
@@ -416,7 +520,10 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
           <div className="flex items-center gap-1 text-[10px] text-ink-muted font-mono tnum pt-1 border-t border-border-subtle/60">
             <Icon.MapPin size={9}/>
             <span className="truncate">{node.location}</span>
-            <span className="ml-auto">心跳 {node.heartbeat}s</span>
+            {/* Contract A: heartbeat is `number | null` — was rendered with no
+                null guard, printing the literal string "心跳 nulls" for a
+                never-reported pump. */}
+            <span className="ml-auto">心跳 {fmtAgeOrDash(node.heartbeat)}</span>
           </div>
         </div>
       </div>
@@ -436,4 +543,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
     prev.compact === next.compact;
 });
 
-Object.assign(window, { MonitorPage });
+// fmtAgeOrDash exported explicitly (not relied on as an implicit sloppy-mode
+// global — see SHL-17) so status.jsx can reuse the same age humanizer for a
+// consistent "raw seconds" fix across both pages (MSP-F19/F20).
+Object.assign(window, { MonitorPage, fmtAgeOrDash });

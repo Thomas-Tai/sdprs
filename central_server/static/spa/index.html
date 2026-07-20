@@ -13,21 +13,28 @@
 <!--
   Pre-Tailwind theme reset. `class="dark"` above keeps the no-JS path dark;
   if the operator's persisted theme is light, flip the class BEFORE Tailwind
-  loads so we don't flash dark. Runtime tweak system (see tweaks-panel.jsx)
-  doesn't use localStorage today (postMessage-only), so this is defensive
-  scaffolding — safe to leave in place for future localStorage-backed themes.
-  TODO(dashboard-audit-2026-07-15): once tweak values live in localStorage,
-  read the same key here to make this actually protective.
+  loads so we don't flash dark.
+
+  SHL-6: this used to read localStorage['theme'], a key NOTHING in the app ever
+  writes — so every light-theme operator got a full dark flash on every reload.
+  The real source of truth is the tweak system's atomic JSON blob under
+  `sdprs.tweaks` (see __TWEAKS_LS_KEY / __writeTweaks in tweaks-panel.jsx),
+  whose `theme` field is 'dark' | 'light' and which app.jsx's DEFAULTS seed.
+  Read that. Kept deliberately defensive: this runs before React, before
+  Tailwind, and before any error handling exists, so a corrupt blob or a
+  blocked localStorage must silently fall through to the dark default.
 -->
 <script>
   (function() {
     try {
-      var t = localStorage.getItem('theme');
-      if (t === 'light') {
+      var raw = localStorage.getItem('sdprs.tweaks');
+      if (!raw) return;
+      var t = JSON.parse(raw);
+      if (t && t.theme === 'light') {
         document.documentElement.classList.remove('dark');
         document.documentElement.classList.add('light');
       }
-    } catch (e) { /* localStorage blocked — keep dark default */ }
+    } catch (e) { /* localStorage blocked or blob corrupt — keep dark default */ }
   })();
 </script>
 <style>
@@ -37,6 +44,14 @@
     to   { opacity: 1; transform: translateY(0); }
   }
   .animate-in { animation: sdprs-toast-in 0.2s ease-out both; }
+
+  /* SHL-7: boot spinner keyframes. The #root fallback below animates
+     `spin-slow`, but that name only ever existed inside tailwind.config's
+     `theme.extend.keyframes` — which emits CSS only when some element uses the
+     matching `animate-spin-slow` utility class, and nothing does. The spinner
+     therefore sat perfectly still and a slow first load looked like a hung tab.
+     Declared here as plain CSS so it spins before Tailwind has even loaded. */
+  @keyframes spin-slow { to { transform: rotate(360deg); } }
 </style>
 <script src="/static/spa/vendor/tailwind.min.js"></script>
 <script>
@@ -92,14 +107,30 @@
   };
 </script>
 <link rel="stylesheet" href="/static/spa/styles.css">
-<!-- Logged-in user, injected server-side by the dashboard route.
-     Wrapped in try/catch because a bare identifier (unsubstituted placeholder)
-     is a ReferenceError that would kill the entire <head> script parse. -->
+<!-- Logged-in user, injected server-side by the dashboard route
+     (main.py:508, via _js_safe_json which JSON-encodes and escapes
+     < > & U+2028 U+2029).
+
+     SHL-19: the assignment used to sit inside a try/catch in a script block
+     shared with the fallback. try/catch only ever covered ONE of the two ways
+     this can fail:
+       • placeholder not substituted → bare identifier → ReferenceError, a
+         RUNTIME error, which the catch does handle; and
+       • substituted value with broken escaping → SyntaxError, a PARSE-time
+         error, which kills the whole <script> block *including the catch that
+         was supposed to handle it*. The fallback never ran, window.SDPRS_USER
+         stayed undefined, and data.jsx's `window.SDPRS_USER || ''` quietly
+         produced an operator with no name on every audit-attributed action.
+     So the injection now gets a script block to itself: a parse error there
+     takes down only that block, and the separate normalizer below — which
+     contains no injected text and therefore cannot fail to parse — is
+     guaranteed to run and establish the null fallback either way. -->
 <script>
-  try {
-    window.SDPRS_USER = __SDPRS_USER__;
-  } catch (e) {
-    console.error('[SDPRS] SDPRS_USER placeholder not substituted by server');
+  window.SDPRS_USER = __SDPRS_USER__;
+</script>
+<script>
+  if (typeof window.SDPRS_USER === 'undefined') {
+    console.error('[SDPRS] SDPRS_USER placeholder not substituted or failed to parse');
     window.SDPRS_USER = null;
   }
 </script>

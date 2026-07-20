@@ -378,6 +378,14 @@ class MQTTService:
                 "high_water": data.get("high_water"),
                 "sensor_conflict": data.get("sensor_conflict"),
                 "dry_run_protect": data.get("dry_run_protect"),
+                # MSP-F6: the device publishes its manual-override slot in the
+                # status flags (edge_pump/mqtt_client.py build_payload) —
+                # "ON" / "OFF" while a hold is active, absent/None once it is
+                # released or expired. Persisting it here is what lets
+                # /api/nodes show operators that a pump is still being HELD by
+                # hand rather than sitting in automatic. Telemetry only: this
+                # never gates a command.
+                "manual_override": data.get("manual_override"),
                 "reason": data.get("reason"),
             }
 
@@ -558,13 +566,19 @@ class MQTTService:
 
     def send_pump_command(self, node_id: str, action: str,
                           duration_s: Optional[int] = None) -> bool:
-        """Push a manual pump ON/OFF command to a pump edge node.
+        """Push a manual pump ON/OFF/AUTO command to a pump edge node.
 
         Publishes to `sdprs/edge/{node_id}/cmd/pump` with a payload the ESP32
         firmware (see edge_pump/main.py's on_pump_command) parses to set its
         manual override slot. ON commands MUST carry a positive duration_s so
         a lost network / operator can't leave a pump running dry indefinitely;
         OFF may omit duration_s to hold indefinitely.
+
+        AUTO (MSP-F6) releases an outstanding hold and hands the pump back to
+        automatic control; it carries no duration_s. Nodes still running
+        firmware from before AUTO existed release correctly anyway — the
+        firmware's unknown-action path clears the override slot — so AUTO is
+        safe to send fleet-wide without a reflash.
 
         The safety core (control_logic + apply_manual_override) is the final
         arbiter — an ON command is silently dropped by the node when

@@ -73,6 +73,9 @@ def node_states():
             "raining": True,
             "sensor_conflict": False,
             "dry_run_protect": True,
+            # MSP-F6: device-reported manual hold, ingested by
+            # mqtt_service._handle_pump_status from the status flags.
+            "manual_override": "OFF",
         },
         "glass_node_01": {
             "type": "glass",
@@ -197,6 +200,122 @@ def test_list_nodes_surfaces_visual_and_audio_health(client):
     quiet = by_id["glass_node_02"]
     assert "visual_health" in quiet and quiet["visual_health"] is None
     assert "audio_health" in quiet and quiet["audio_health"] is None
+
+
+# =============================================================================
+# MSP-F6 (manual hold visibility) + MSP-F5 (cross-operator command visibility)
+#
+# Both fields must appear on BOTH /api/nodes and /api/nodes/{id}. The two
+# endpoints drifting apart is exactly the API-F8 bug, so each is pinned twice.
+# =============================================================================
+
+def test_list_nodes_surfaces_manual_override(client):
+    """A pump being HELD by hand must say so. Glass nodes never carry the
+    field (no pump), and a pump that reports no hold serializes null."""
+    response = client.get("/api/nodes")
+    assert response.status_code == 200
+    by_id = {n["node_id"]: n for n in response.json()}
+
+    assert by_id["pump_node_01"]["manual_override"] == "OFF"
+    # Glass node: field present, always null.
+    assert by_id["glass_node_01"]["manual_override"] is None
+    # DB-only pump (no live MQTT state): unknowable -> null, never a crash.
+    assert by_id["pump_node_02"]["manual_override"] is None
+
+
+def test_get_single_node_surfaces_manual_override(client):
+    """Same field on the detail endpoint — API-F8 guard."""
+    response = client.get("/api/nodes/pump_node_01")
+    assert response.status_code == 200
+    assert response.json()["manual_override"] == "OFF"
+
+
+def _fake_last_cmds(monkeypatch, mapping):
+    """Stub the batched audit lookup and record the node_ids it was asked
+    for, so tests can assert the batching contract as well as the payload."""
+    seen = []
+
+    def _stub(node_ids):
+        seen.append(list(node_ids))
+        return mapping
+
+    monkeypatch.setattr(nodes_api, "_last_pump_commands", _stub)
+    return seen
+
+
+def test_list_nodes_surfaces_last_pump_command(client, monkeypatch):
+    """MSP-F5: Operator B must be able to see that Operator A already
+    commanded this pump. Shape is the frozen {"action", "by", "at"} contract
+    with `at` a naive-UTC ISO string (no offset suffix — an offset here would
+    render 8 hours off in the Macau UI)."""
+    _fake_last_cmds(monkeypatch, {
+        "pump_node_01": {"action": "OFF", "by": "operator_a",
+                         "at": "2026-07-20T09:15:00"},
+    })
+
+    response = client.get("/api/nodes")
+    assert response.status_code == 200
+    by_id = {n["node_id"]: n for n in response.json()}
+
+    assert by_id["pump_node_01"]["last_pump_command"] == {
+        "action": "OFF", "by": "operator_a", "at": "2026-07-20T09:15:00",
+    }
+    # Naive UTC on the wire: no timezone designator of any kind.
+    at = by_id["pump_node_01"]["last_pump_command"]["at"]
+    assert not at.endswith("Z") and "+" not in at
+
+    # Never-commanded nodes serialize null rather than being omitted.
+    assert by_id["glass_node_01"]["last_pump_command"] is None
+    assert by_id["pump_node_02"]["last_pump_command"] is None
+
+
+def test_list_nodes_batches_last_pump_command_lookup(client, monkeypatch):
+    """One query for the whole list, never one per node. /api/nodes is polled
+    continuously by every connected operator, so an N+1 here multiplies across
+    the console."""
+    seen = _fake_last_cmds(monkeypatch, {})
+
+    response = client.get("/api/nodes")
+    assert response.status_code == 200
+    assert len(seen) == 1, f"expected 1 batched lookup, got {len(seen)}"
+    # And that single call must cover every node in the response.
+    returned_ids = {n["node_id"] for n in response.json()}
+    assert returned_ids.issubset(set(seen[0]))
+
+
+def test_get_single_node_surfaces_last_pump_command(client, monkeypatch):
+    """Same field on the detail endpoint — API-F8 guard."""
+    _fake_last_cmds(monkeypatch, {
+        "pump_node_01": {"action": "ON", "by": "operator_b",
+                         "at": "2026-07-20T10:30:00"},
+    })
+
+    response = client.get("/api/nodes/pump_node_01")
+    assert response.status_code == 200
+    assert response.json()["last_pump_command"] == {
+        "action": "ON", "by": "operator_b", "at": "2026-07-20T10:30:00",
+    }
+
+
+def test_naive_utc_iso_normalizes_audit_timestamps():
+    """The audit table hands back SQLite's space-delimited string or a
+    (possibly tz-aware) PostgreSQL datetime. Both must land on the wire as a
+    naive-UTC ISO string."""
+    from datetime import timezone as _tz
+
+    # SQLite CURRENT_TIMESTAMP rendering.
+    assert nodes_api._naive_utc_iso("2026-07-20 09:15:00") == "2026-07-20T09:15:00"
+    # Naive datetime passes through.
+    assert nodes_api._naive_utc_iso(datetime(2026, 7, 20, 9, 15)) == "2026-07-20T09:15:00"
+    # tz-aware datetime is converted to UTC and stripped, NOT left with an
+    # offset (this is the 8-hour-shift trap).
+    aware = datetime(2026, 7, 20, 9, 15, tzinfo=_tz.utc)
+    assert nodes_api._naive_utc_iso(aware) == "2026-07-20T09:15:00"
+    # Explicit UTC suffixes are stripped.
+    assert nodes_api._naive_utc_iso("2026-07-20T09:15:00Z") == "2026-07-20T09:15:00"
+    assert nodes_api._naive_utc_iso("2026-07-20T09:15:00+00:00") == "2026-07-20T09:15:00"
+    # Empty/None degrade to "" rather than raising.
+    assert nodes_api._naive_utc_iso(None) == ""
 
 
 # =============================================================================
@@ -521,12 +640,68 @@ def test_pump_command_on_without_duration_rejected(client, monkeypatch):
 
 
 def test_pump_command_bad_action_rejected(client, monkeypatch):
-    """Only ON / OFF are legal. Anything else 422 at Pydantic layer."""
+    """Only ON / OFF / AUTO are legal. Anything else 422 at Pydantic layer."""
     monkeypatch.setattr(nodes_api, "get_mqtt_service",
                         lambda: pytest.fail("mqtt should not be called"))
     response = client.post("/api/nodes/pump_node_01/pump",
                            json={"action": "TOGGLE", "duration_s": 10})
     assert response.status_code == 422
+
+
+def test_pump_command_auto_releases_hold_and_audits(client, monkeypatch):
+    """MSP-F6: AUTO releases a manual hold. It must reach the edge verbatim
+    with duration_s=None and be audit-logged exactly like ON/OFF — an
+    unlogged release would leave a gap in the operator trail right at the
+    moment control changes hands."""
+    calls = {"mqtt": [], "log": []}
+
+    class _FakeMqtt:
+        def send_pump_command(self, node_id, action, duration_s):
+            calls["mqtt"].append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action",
+                        lambda user, action, target_id=None, details=None:
+                        calls["log"].append({"user": user, "action": action,
+                                             "target_id": target_id,
+                                             "details": details}))
+
+    response = client.post("/api/nodes/pump_node_01/pump", json={"action": "AUTO"})
+    assert response.status_code == 200
+    assert response.json() == {"node_id": "pump_node_01", "action": "AUTO",
+                               "duration_s": None, "queued": True}
+    assert calls["mqtt"] == [("pump_node_01", "AUTO", None)]
+    assert calls["log"] == [{
+        "user": "test_user", "action": "PUMP_COMMAND",
+        "target_id": "pump_node_01",
+        "details": {"action": "AUTO", "duration_s": None},
+    }]
+
+
+def test_pump_command_auto_with_duration_rejected(client, monkeypatch):
+    """AUTO + duration_s is a 400. A release is instantaneous, so a duration
+    on it means the caller expected something the command cannot do — fail
+    loudly rather than silently dropping the field."""
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    response = client.post("/api/nodes/pump_node_01/pump",
+                           json={"action": "AUTO", "duration_s": 30})
+    assert response.status_code == 400
+    assert "duration_s" in response.json()["detail"]
+
+
+def test_pump_command_auto_with_zero_duration_rejected(client, monkeypatch):
+    """duration_s=0 is a legal "indefinite" marker for OFF, but on AUTO it is
+    still a duration the caller supplied — same 400. Pinned separately because
+    `0` is falsy and an `if body.duration_s:` check would wrongly allow it."""
+    monkeypatch.setattr(nodes_api, "get_mqtt_service",
+                        lambda: pytest.fail("mqtt should not be called"))
+    response = client.post("/api/nodes/pump_node_01/pump",
+                           json={"action": "AUTO", "duration_s": 0})
+    assert response.status_code == 400
 
 
 def test_pump_command_wrong_node_type_rejected(client, monkeypatch):

@@ -6,30 +6,52 @@ const { useState: useState_p, useMemo: useMemo_p } = React;
 // slow VPN; onKeyDown must stopPropagation so Enter/Space on the focused
 // button doesn't also bubble to the surrounding row's keyboard handler
 // (which would open the side panel).
+//
+// MSP-F13: was snooze-only and invisible from the table — repeat clicks
+// silently reset the 30-min window with no feedback, and there was no way to
+// undo from here. Now toggles: already-snoozed → unsnooze (api.jsx already
+// exposes unsnoozeNode); the button's own color (amber while snoozed) plus
+// the row-level badge in the id column make the state visible without
+// needing hover.
 const SnoozeRowButton = ({ node, onDone, onError }) => {
   const [busy, setBusy] = React.useState(false);
+  // MSP-F26: guard setState after the row's node disappears mid-request
+  // (filtered out / node removed by a refresh that lands while the snooze
+  // call is still in flight).
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  const isSnoozed = node.snoozeMin > 0;
   const trigger = () => {
     if (busy) return;
     // G1: don't silently no-op when the API bundle hasn't loaded / backend is
     // unreachable — route through onError so the parent's toast surfaces the
     // outage instead of the operator wondering why nothing happened.
-    if (!(window.SDPRS_API && window.SDPRS_API.snoozeNode)) {
+    const api = window.SDPRS_API;
+    if (!(api && api.snoozeNode && api.unsnoozeNode)) {
       onError && onError(new Error('暫時無法連線後端，請稍後再試'));
       return;
     }
     setBusy(true);
-    Promise.resolve(window.SDPRS_API.snoozeNode(node.id, 30, '從節點狀態列表靜音'))
-      .then(() => onDone && onDone(node, 30))
+    const call = isSnoozed
+      ? api.unsnoozeNode(node.id)
+      : api.snoozeNode(node.id, 30, '從節點狀態列表靜音');
+    Promise.resolve(call)
+      // MSP-F7-style guard: stay busy through the caller's refresh, not just
+      // the HTTP round-trip, so a second click can't fire before the table
+      // reflects the new state.
+      .then(() => Promise.resolve(onDone && onDone(node, isSnoozed ? 'unsnooze' : 30)))
       .catch(err => onError && onError(err))
-      .finally(() => setBusy(false));
+      .finally(() => { if (mountedRef.current) setBusy(false); });
   };
   return (
     <button
-      title="靜音 30 分鐘"
+      title={isSnoozed ? `取消靜音（剩餘 ${node.snoozeMin} 分鐘）` : '靜音 30 分鐘'}
       disabled={busy}
       onClick={e => { e.stopPropagation(); trigger(); }}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
-      className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"><Icon.BellOff size={12}/></button>
+      className={`w-8 h-8 rounded flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed ${
+        isSnoozed ? 'text-sev-warn hover:bg-sev-warn/15' : 'text-ink-muted hover:bg-surface-overlay hover:text-ink-primary'
+      }`}>{isSnoozed ? <Icon.Bell size={14}/> : <Icon.BellOff size={14}/>}</button>
   );
 };
 
@@ -37,29 +59,72 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
 // local busy guard, click/key stopPropagation so the row's side-panel
 // handler doesn't fire.
 //
-// State proxy: mapNode does not expose stream_status directly, so we infer
-// "streaming now" from n.bitrate > 0. Not perfect (a just-started stream
-// hasn't reported kbps yet, and a stopped stream that leaked a last
-// bitrate sample also shows > 0 briefly), but good enough for a toggle
-// — backend will reject inconsistent state with a 4xx/5xx that we toast.
+// MSP-F7 fix: previously inferred "streaming now" from n.bitrate > 0 — that
+// field is mapNode's `stream_status.bitrate_mbps`, which the edge device
+// never publishes and is therefore always 0 (see api.jsx's API-F3 comment),
+// so it desynced from reality and a rapid double-click could fire the wrong
+// command against a state the button never actually knew. Now backed by
+// window.SDPRS_API.getStreamHealth(nodeId): `enabled`/`reachable` are the
+// streaming bridge's own health (mediamtx up + scrapeable) and gate
+// everything else — if the bridge itself is down/disabled nothing can be
+// "streaming" regardless of any per-node number. Layered under that gate,
+// this node has a live mediamtx path entry (bitrateMbps/viewers/drops come
+// back non-null together once mediamtx has scraped a sample for this path,
+// per api.jsx's roundOrNull convention) — that's the per-node signal the
+// endpoint actually exposes.
 //
-// API-gated: if SDPRS_API.startStream / stopStream are missing (waiting
-// on api.jsx follow-up), render disabled with "串流控制 (等待 API)".
+// Double-fire guard: an in-flight ref (checked synchronously, not the
+// `busy` state, which can lag a tick behind a fast double-click) so two
+// clicks in the same tick can't both read "not busy" and both fire.
+//
+// API-gated: if SDPRS_API.startStream / stopStream / getStreamHealth are
+// missing (waiting on api.jsx follow-up), render disabled with
+// "串流控制 (等待 API)".
 const StreamRowButton = ({ node, onDone, onError }) => {
   const [busy, setBusy] = React.useState(false);
+  const [health, setHealth] = React.useState(null); // getStreamHealth() result, or null while unknown/loading
+  // MSP-F26: same unmount guard as SnoozeRowButton.
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  // MSP-F7: synchronous in-flight latch, separate from `busy` state — a ref
+  // is read-after-write within the same synchronous click handler, so a
+  // second click in the same tick sees it immediately regardless of when
+  // React actually commits the `busy` state update.
+  const inFlightRef = React.useRef(false);
   const api = window.SDPRS_API || {};
-  const hasApi = typeof api.startStream === 'function' && typeof api.stopStream === 'function';
-  const isActive = (node.bitrate || 0) > 0;
+  const hasApi = typeof api.startStream === 'function' && typeof api.stopStream === 'function' && typeof api.getStreamHealth === 'function';
+  const refreshHealth = React.useCallback(() => {
+    if (!hasApi) return Promise.resolve();
+    return Promise.resolve(api.getStreamHealth(node.id))
+      .then(h => { if (mountedRef.current) setHealth(h || null); })
+      .catch(() => {}); // best-effort probe — fall back to "unknown", never throw into a caller that didn't ask for this
+  }, [node.id, hasApi]);
+  React.useEffect(() => { refreshHealth(); }, [refreshHealth]);
+  const hasLiveEntry = !!(health && (health.bitrateMbps != null || health.viewers != null || health.drops != null));
+  const isActive = health
+    ? !!(health.enabled && health.reachable && hasLiveEntry)
+    : (node.bitrate || 0) > 0; // bootstrap fallback only, before the first getStreamHealth() resolves — never the steady-state source of truth
   const label = isActive ? '停止串流' : '開始串流';
   const Glyph = isActive ? Icon.Pause : Icon.Play;
   const trigger = () => {
-    if (busy || !hasApi) return;
+    if (inFlightRef.current || busy || !hasApi) return;
+    inFlightRef.current = true;
     setBusy(true);
-    const call = isActive ? api.stopStream(node.id) : api.startStream(node.id);
+    const wasActive = isActive; // snapshot at click time — the async health refetch below must not change which command this click fires
+    const call = wasActive ? api.stopStream(node.id) : api.startStream(node.id);
     Promise.resolve(call)
-      .then(() => onDone && onDone(node, isActive ? 'stop' : 'start'))
+      .then(() => refreshHealth())
+      // MSP-F7: previously cleared `busy` as soon as the HTTP call resolved,
+      // before the parent's refresh had a chance to update the cached
+      // bitrate this button's `isActive` is derived from — a second click in
+      // that window re-read the stale bitrate and could fire the opposite
+      // command against a state that had already changed (desync +
+      // double-fire). Stay busy until this button's own health refetch (the
+      // new source of truth) AND the caller's refresh (awaited via onDone)
+      // actually land.
+      .then(() => Promise.resolve(onDone && onDone(node, wasActive ? 'stop' : 'start')))
       .catch(err => onError && onError(err))
-      .finally(() => setBusy(false));
+      .finally(() => { inFlightRef.current = false; if (mountedRef.current) setBusy(false); });
   };
   return (
     <button
@@ -67,7 +132,7 @@ const StreamRowButton = ({ node, onDone, onError }) => {
       disabled={busy || !hasApi}
       onClick={e => { e.stopPropagation(); trigger(); }}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
-      className="w-6 h-6 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"><Glyph size={12}/></button>
+      className="w-8 h-8 rounded hover:bg-surface-overlay flex items-center justify-center text-ink-muted hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"><Glyph size={14}/></button>
   );
 };
 
@@ -112,13 +177,19 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   const filtersActive = typeFilter !== 'all' || statusFilter !== 'all' || locationFilter !== 'all';
   return (
     <div className="h-full flex flex-col min-h-0">
+      {/* MSP-F11: an in-flow banner here pushed the whole table down mid-
+          interaction — the next click could land on a different row's device
+          button. Overlay it instead (matches app.jsx's global toast pattern)
+          so it never shifts layout. */}
       {toast && (
-        <div role="status" aria-live="polite" className={`px-4 py-2 text-xs border-b tone-${toast.tone} ${
-          toast.tone === 'success' ? 'bg-sev-ok/15 text-sev-ok border-sev-ok/30'
-            : toast.tone === 'error' ? 'bg-sev-critical/15 text-sev-critical border-sev-critical/30'
-            : toast.tone === 'warn' ? 'bg-sev-warn/15 text-sev-warn border-sev-warn/30'
-            : 'bg-sev-info/15 text-sev-info border-sev-info/30'
-        }`}>{toast.msg}</div>
+        <div className="fixed top-16 right-4 z-40 animate-in" role="status" aria-live="polite">
+          <div className={`px-3 py-2 rounded-lg border shadow-2xl text-xs bg-surface-overlay ${
+            toast.tone === 'success' ? 'border-sev-ok/50 text-sev-ok'
+              : toast.tone === 'error' ? 'border-sev-critical/50 text-sev-critical'
+              : toast.tone === 'warn' ? 'border-sev-warn/50 text-sev-warn'
+              : 'border-sev-info/50 text-sev-info'
+          }`}>{toast.msg}</div>
+        </div>
       )}
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">節點狀態</h1>
@@ -127,65 +198,30 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
         </span>
         <div className="flex-1"></div>
         <div className="flex gap-1.5">
-          <FilterChip active={typeFilter !== 'all'} onClick={cycleType}>
-            類型: {typeLabel} <Icon.ChevronDown size={10}/>
-            {typeFilter !== 'all' && (
-              // G2: FilterChip renders a <button>; a nested real <button> is
-              // invalid HTML (browsers unwrap or split). Use span+role so the
-              // clear × stays keyboard-operable without breaking the DOM.
-              <span
-                role="button"
-                tabIndex={0}
-                aria-label="清除類型篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
-                onClick={(e) => { e.stopPropagation(); setTypeFilter('all'); }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setTypeFilter('all');
-                  }
-                }}
-              >×</span>
-            )}
+          {/* MSP-F22 fix: this chip is a click-to-cycle control, not a real
+              <select> — the ChevronDown made it look like one and promised a
+              dropdown menu that never opens, so it's dropped rather than
+              built out into an actual listbox (a bigger design change than
+              this fix warrants). The clear-× is now FilterChip's own built-in
+              `onClear` (components.jsx): a plain, non-interactive span, never
+              a second interactive element nested inside this chip's own
+              <button> — keyboard users clear via Delete/Backspace while the
+              chip is focused. */}
+          <FilterChip active={typeFilter !== 'all'} onClick={cycleType}
+            onClear={typeFilter !== 'all' ? () => setTypeFilter('all') : undefined}>
+            類型: {typeLabel}
           </FilterChip>
-          <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}>
-            狀態: {statusLabel} <Icon.ChevronDown size={10}/>
-            {statusFilter !== 'all' && (
-              <span
-                role="button"
-                tabIndex={0}
-                aria-label="清除狀態篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
-                onClick={(e) => { e.stopPropagation(); setStatusFilter('all'); }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setStatusFilter('all');
-                  }
-                }}
-              >×</span>
-            )}
+          {/* MSP-F22 fix: see 類型 chip above for the fake-chevron + nested-
+              interactive-clear-× rationale. */}
+          <FilterChip active={statusFilter !== 'all'} onClick={cycleStatus}
+            onClear={statusFilter !== 'all' ? () => setStatusFilter('all') : undefined}>
+            狀態: {statusLabel}
           </FilterChip>
-          <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}>
-            位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span> <Icon.ChevronDown size={10}/>
-            {locationFilter !== 'all' && (
-              <span
-                role="button"
-                tabIndex={0}
-                aria-label="清除位置篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200 cursor-pointer"
-                onClick={(e) => { e.stopPropagation(); setLocationFilter('all'); }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setLocationFilter('all');
-                  }
-                }}
-              >×</span>
-            )}
+          {/* MSP-F22 fix: see 類型 chip above for the fake-chevron + nested-
+              interactive-clear-× rationale. */}
+          <FilterChip active={locationFilter !== 'all'} onClick={cycleLocation}
+            onClear={locationFilter !== 'all' ? () => setLocationFilter('all') : undefined}>
+            位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span>
           </FilterChip>
         </div>
       </div>
@@ -224,7 +260,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               const pumpLevelMissing = n.type === 'pump' && n.level == null;
               let tone = n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok';
               if (tone === 'ok' && pumpLevelMissing) tone = 'warn';
-              const uploadIssue = n.heartbeat < 60 && n.upload > 600;
+              // Contract A: heartbeat/upload are `number | null`. Relational
+              // comparison against null coerces to 0 (`null < 60` is true) —
+              // was silently misclassifying a never-reported node. Guard both
+              // sides explicitly.
+              const uploadIssue = n.heartbeat != null && n.heartbeat < 60 && n.upload != null && n.upload > 600;
               return (
                 <tr key={n.id}
                   role="button"
@@ -234,25 +274,57 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                   onKeyDown={e => {
                     if (onSelectNode && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelectNode(n); }
                   }}>
-                  <td className="px-3 py-2 font-mono font-semibold">{n.id}</td>
+                  <td className="px-3 py-2 font-mono font-semibold">
+                    {n.id}
+                    {/* MSP-F13: snooze state was invisible from the table
+                        unless you hovered the row's action button. */}
+                    {n.snoozeMin > 0 && (
+                      <span className="ml-1.5 inline-flex items-center gap-0.5 text-[9px] font-bold px-1 py-0.5 rounded bg-sev-warn/15 text-sev-warn align-middle">
+                        <Icon.BellOff size={8} strokeWidth={2.5}/>{n.snoozeMin}m
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-ink-secondary">
                     <span className="inline-flex items-center gap-1.5">
                       {n.type === 'camera' ? <Icon.Camera size={12}/> : <Icon.Pump size={12}/>}
                       {n.type === 'camera' ? '攝影機' : '抽水站'}
+                      {/* MSP-F1: surface the actual relay state — distinct
+                          from `status` (derived from water level) — the fact
+                          that explains "why didn't my ON command run". */}
+                      {n.type === 'pump' && (
+                        <span className={`text-[9px] font-bold px-1 rounded ${
+                          n.pumpState === 'on' ? 'bg-sev-ok/15 text-sev-ok'
+                            : n.pumpState === 'off' ? 'bg-surface-elevated text-ink-muted'
+                            : 'bg-sev-warn/15 text-sev-warn'
+                        }`}>{n.pumpState === 'on' ? '運轉中' : n.pumpState === 'off' ? '已停止' : '不明'}</span>
+                      )}
                     </span>
                   </td>
                   <td className="px-3 py-2 text-ink-secondary">{n.location}</td>
                   <td className="px-3 py-2">
                     <span className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded border text-[10px] font-medium bg-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}/15 text-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'} border-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}/30`}>
                       <span className={`w-1.5 h-1.5 rounded-full bg-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}`}></span>
-                      {n.status === 'offline' ? '離線' : n.status === 'critical' ? '嚴重' : n.status === 'warn' ? '警告' : '正常'}
+                      {/* MSP-F12: badge color already downgraded to amber for
+                          pumpLevelMissing, but the text still read n.status
+                          directly — an amber badge captioned "正常" is a lie.
+                          Name the actual condition instead of a generic 警告. */}
+                      {n.status === 'offline' ? '離線' : n.status === 'critical' ? '嚴重' : pumpLevelMissing ? '水位未知' : n.status === 'warn' ? '警告' : '正常'}
                     </span>
                   </td>
-                  <td className={`px-3 py-2 text-right font-mono ${n.heartbeat > 60 ? 'text-sev-critical font-semibold' : n.heartbeat > 5 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
-                    {n.heartbeat != null ? (n.heartbeat > 60 ? Math.floor(n.heartbeat/60)+'m' : n.heartbeat+'s') : '—'}
+                  {/* MSP-F20: thresholds now match monitor.jsx (10s/30s) and
+                      the backend's own STALE_THRESHOLD_SECONDS=10 — this
+                      column previously alarmed at 5s/60s, a different point
+                      than every other page. MSP-F19: humanized via the same
+                      age formatter monitor.jsx exports, so a node stale for
+                      days reads "1d 2h" instead of a raw seconds count. */}
+                  <td className={`px-3 py-2 text-right font-mono ${n.heartbeat == null ? 'text-ink-muted' : n.heartbeat > 30 ? 'text-sev-critical font-semibold' : n.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
+                    {window.fmtAgeOrDash ? window.fmtAgeOrDash(n.heartbeat) : (n.heartbeat != null ? (n.heartbeat > 60 ? Math.floor(n.heartbeat/60)+'m' : n.heartbeat+'s') : '—')}
                   </td>
-                  <td className={`px-3 py-2 text-right font-mono ${uploadIssue ? 'text-sev-critical font-semibold' : n.upload > 60 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
-                    {n.upload > 60 ? Math.floor(n.upload/60)+'m' : n.upload+'s'}
+                  {/* Contract A: `upload` is null for a camera with no
+                      snapshot ever. This column previously had NO null guard
+                      at all and rendered the literal string "nulls". */}
+                  <td className={`px-3 py-2 text-right font-mono ${uploadIssue ? 'text-sev-critical font-semibold' : n.upload == null ? 'text-ink-muted' : n.upload > 60 ? 'text-sev-critical font-semibold' : n.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
+                    {window.fmtAgeOrDash ? window.fmtAgeOrDash(n.upload) : (n.upload != null ? (n.upload > 60 ? Math.floor(n.upload/60)+'m' : n.upload+'s') : '—')}
                     {uploadIssue && <span className="ml-1 text-[10px] bg-sev-critical/20 text-sev-critical px-1 rounded">上傳異常</span>}
                   </td>
                   <td className="px-3 py-2 font-mono">
@@ -264,7 +336,8 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                   </td>
                   <td className="px-3 py-2 text-right font-mono">
                     {n.type === 'camera' ? (
-                      <span className={n.temp > 50 ? 'text-sev-warn' : n.temp ? 'text-ink-secondary' : 'text-ink-muted'}>{n.temp ? n.temp+'°C' : '—'}</span>
+                      // MSP-F21: truthy check treated a genuine 0°C reading as "no data".
+                      <span className={n.temp > 50 ? 'text-sev-warn' : n.temp != null ? 'text-ink-secondary' : 'text-ink-muted'}>{n.temp != null ? n.temp+'°C' : '—'}</span>
                     ) : n.level == null ? (
                       // No water_level reading — do not render 0%/blank% which
                       // would look like a real reading. Amber "—" makes the gap
@@ -273,7 +346,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                       <span className="text-sev-warn" title="水位資料未上傳">—</span>
                     ) : (
                       <span className="inline-flex items-center gap-1">
-                        {n.trend === 'up' ? <Icon.ArrowUp size={10} className="text-sev-warn"/> : n.trend === 'down' ? <Icon.ArrowDown size={10} className="text-sev-ok"/> : <Icon.ArrowRight size={10} className="text-ink-muted"/>}
+                        {/* MSP-F14: api.jsx's `trend` is always null — a fixed
+                            ArrowRight claimed a real "flat" reading every
+                            time. Honest dash instead of a fabricated
+                            direction (still lights up if trend data ships). */}
+                        {n.trend === 'up' ? <Icon.ArrowUp size={10} className="text-sev-warn"/> : n.trend === 'down' ? <Icon.ArrowDown size={10} className="text-sev-ok"/> : <span className="text-ink-dim">—</span>}
                         <span className={n.level > 85 ? 'text-sev-critical font-semibold' : n.level > 70 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.level}%</span>
                         <span className="text-ink-muted ml-1">· {n.cycles}×</span>
                       </span>
@@ -289,21 +366,35 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     ) : <span className="text-ink-muted text-[10px] font-mono">PoE</span>}
                   </td>
                   <td className="px-3 py-2 text-right pr-4">
-                    <div className="inline-flex gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
+                    {/* MSP-F23: 24px buttons hidden behind opacity-60-until-hover
+                        are both a sub-32px hit target and undiscoverable on a
+                        touch/no-hover NOC display. Always full opacity, ≥32px. */}
+                    <div className="inline-flex gap-1">
                       {n.type === 'camera' && (
                         <StreamRowButton
                           node={n}
                           onDone={(node, action) => {
                             setToast({ tone: 'success', msg: `${node.name || node.id} ${action === 'stop' ? '串流已停止' : '串流已啟動'}` });
-                            if (typeof onRefresh === 'function') onRefresh();
+                            // MSP-F7: the button's own getStreamHealth() refetch
+                            // is now the source of truth for its `isActive`
+                            // state, but also return the parent's refresh
+                            // promise so the button stays busy/disabled until
+                            // BOTH the node list and the per-node health probe
+                            // have settled.
+                            return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                           }}
                           onError={err => setToast({ tone: 'error', msg: `串流指令失敗: ${err?.message || err}` })}/>
                       )}
                       <SnoozeRowButton
                         node={n}
                         onDone={(node, minutes) => {
-                          setToast({ tone: 'success', msg: `${node.name || node.id} 已靜音 ${minutes} 分鐘` });
-                          if (typeof onRefresh === 'function') onRefresh();
+                          setToast({
+                            tone: 'success',
+                            msg: minutes === 'unsnooze'
+                              ? `${node.name || node.id} 已取消靜音`
+                              : `${node.name || node.id} 已靜音 ${minutes} 分鐘`,
+                          });
+                          return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                         }}
                         onError={err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` })}/>
                     </div>

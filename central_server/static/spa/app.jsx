@@ -106,13 +106,50 @@ function LiveClockProvider({ children, registerReset }) {
 // force StatusStrip to re-render every parent update).
 const EMPTY_OPERATORS = Object.freeze([]);
 
+// Every loader key refreshLive()/loadInitial() fan out to, in the same order
+// api.jsx declares them. Used as the "everything is unavailable" warning set
+// when a refresh fails wholesale (SHL-12) rather than per-loader.
+const _LOADER_KEYS = Object.freeze(['nodes', 'alerts', 'history', 'rate', 'weather', 'handover', 'audit']);
+
+// SHL-11 (app-side half). api.jsx now attaches `.status` / `.detail` / `.timeout`
+// to everything it throws precisely so callers stop string-matching `.message`
+// — but the ack/resolve/snooze toasts still concatenated `(e.message || e)`
+// straight into zh-TW copy. What an operator actually saw on failure:
+//   • 401 → 「認領失敗: unauthorized」 — an English word, and the wrong advice:
+//     the real remedy is the re-login modal, not retrying the ack.
+//   • timeout → 「認領失敗: timeout after 10000ms on /api/alerts/318/ack」 —
+//     an internal path in the operator's face, and actively misleading: an
+//     aborted fetch does NOT mean the POST didn't execute server-side. Read as
+//     "it failed", the operator re-sends and double-commands.
+//   • 5xx → 「HTTP 502 on /api/…」.
+// Branch on the structured fields, in most-specific-first order, and only fall
+// back to raw `.message` when there is nothing better.
+function actionErrorText(e) {
+  if (!e) return '未知錯誤';
+  // Checked before `.status`: api.jsx stamps aborted fetches with status 0.
+  if (e.timeout || e.status === 0) return '連線逾時 — 指令可能已送出，請重新整理後確認狀態';
+  if (e.status === 401) return '登入階段已逾時，請重新登入';
+  if (e.status === 403) return '權限不足，無法執行此操作';
+  // 409 detail is the useful part ("already resolved by alice at 14:32") and
+  // is the one place we deliberately surface a backend string verbatim —
+  // losing the peer's name and timestamp costs more than the language mismatch.
+  if (e.status === 409) return e.detail ? String(e.detail) : '此警報已被其他操作員處理';
+  if (e.detail) return Array.isArray(e.detail) ? e.detail.join('; ') : String(e.detail);
+  if (e.status) return `伺服器錯誤 (HTTP ${e.status})`;
+  return e.message ? String(e.message) : String(e);
+}
+
 function App({ initialError = null }) {
   const [tweaks, setTweak] = window.useTweaks(DEFAULTS);
 
-  // Bootstrap error surface — populated by bootstrap() below when loadInitial
-  // rejects; renders the retry UI in place of the full app so mount-time
-  // reads of window.ALERTS/NODES don't crash on undefined.
+  // Bootstrap error surface — populated by the boot effect below when
+  // loadInitial rejects; renders the retry UI in place of the full app so
+  // mount-time reads of window.ALERTS/NODES don't crash on undefined.
   const [bootstrapError, setBootstrapError] = useStateA(initialError);
+  // SHL-10: true until the first data load settles. The shell renders
+  // immediately underneath it; this only drives a thin "載入中" strip so an
+  // operator can tell an empty queue apart from an unfinished load.
+  const [booting, setBooting] = useStateA(true);
 
   // F2: RESTORED_STATE (H-1 cross-login roundtrip) wins if present; otherwise
   // fall back to the page persisted in sessionStorage (see the persistence
@@ -135,20 +172,25 @@ function App({ initialError = null }) {
   // WS events propagate to the panel automatically.
   const [nodeHistory, setNodeHistory] = useStateA(window.NODE_HISTORY ?? {});
   // F2 (nice-to-have): same idea as `page` above, for the selected alert.
-  // Matched by String() comparison since sessionStorage only stores strings
-  // but alert ids may not be — on match we return the LIVE alert's `.id` (not
-  // the raw string) so downstream `a.id === selectedId` strict-equality
-  // checks throughout this file keep working against the original type.
+  //
+  // SHL-10 changed the timing here: the app now mounts BEFORE the initial load
+  // (see the boot effect below), so window.ALERTS is still the empty data.jsx
+  // placeholder at this point and there is nothing to match a saved id
+  // against. Resolution therefore happens in two steps — capture the saved
+  // string now, resolve it to a live alert once the data lands.
+  //
+  // The capture has to happen during render, not in an effect: the
+  // selectedId-persistence effect further down runs on mount with the initial
+  // value and would removeItem() the very key we need to read. Lazy-init via
+  // an `undefined` sentinel so it reads sessionStorage exactly once.
+  const savedSelectedIdRef = useRefA(undefined);
+  if (savedSelectedIdRef.current === undefined) {
+    try { savedSelectedIdRef.current = sessionStorage.getItem('sdprs.selectedId'); }
+    catch (_) { savedSelectedIdRef.current = null; /* sessionStorage unavailable */ }
+  }
   const [selectedId, setSelectedId] = useStateA(() => {
     if (RESTORED_STATE?.selectedId != null) return RESTORED_STATE.selectedId;
-    try {
-      const savedId = sessionStorage.getItem('sdprs.selectedId');
-      if (savedId != null) {
-        const match = (window.ALERTS ?? []).find(a => String(a.id) === savedId);
-        if (match) return match.id;
-      }
-    } catch (_) { /* sessionStorage unavailable */ }
-    return window.ALERTS?.[0]?.id ?? null;
+    return null;
   });
   // LiveClock ref — LiveClockProvider registers its reset function here so
   // runRefresh and onPing can reset the drift counter without App owning the state.
@@ -205,6 +247,38 @@ function App({ initialError = null }) {
     };
   });
   const [ackedIds, setAckedIds] = useStateA(new Set());
+  // ALR-L5: `ackedIds` accumulates every alert id acked this session and was
+  // never pruned — across a 24/7 shift it grows without bound. It is read only
+  // to gate the one-time ack flash on a CURRENTLY-rendered alert
+  // (alerts.jsx: `ackedIds.has(a.id)`), so any id no longer in the live `alerts`
+  // list is dead weight. Prune to the intersection whenever the list changes.
+  // Guards: (1) skip while `alerts` is empty so a transient empty snapshot
+  // (pre-load / mid-refresh) can't wipe legitimately-acked ids; (2) functional
+  // setState returns `prev` unchanged when nothing drops, so React bails the
+  // re-render and this can't loop.
+  useEffectA(() => {
+    if (!alerts.length) return;
+    const live = new Set(alerts.map(a => a.id));
+    setAckedIds(prev => {
+      let stale = false;
+      for (const id of prev) { if (!live.has(id)) { stale = true; break; } }
+      if (!stale) return prev;
+      const next = new Set();
+      for (const id of prev) if (live.has(id)) next.add(id);
+      return next;
+    });
+    // ALR-L5 (other half): the ack-flash dedupe set was hoisted to
+    // window.__SDPRS_FLASHED_ALERT_IDS (alerts.jsx) so an already-flashed alert
+    // doesn't re-flash after AlertsPage remounts — correct, but that global is
+    // never pruned either, so it re-grew the same unbounded set in a new place.
+    // Its ids are exactly the acked ids (alerts.jsx seeds it from `ackedIds`),
+    // so prune it against the same `live` set here in one pass. In-place delete:
+    // alerts.jsx reads it by reference at render, and this runs post-commit.
+    const flashed = window.__SDPRS_FLASHED_ALERT_IDS;
+    if (flashed && flashed.size) {
+      for (const id of Array.from(flashed)) if (!live.has(id)) flashed.delete(id);
+    }
+  }, [alerts]);
   const [toast, setToast] = useStateA(null);
   // Partial data-load failures — populated when loadInitial() or refreshLive()
   // has some (but not all) loaders reject. Drives the warning banner below the
@@ -229,17 +303,11 @@ function App({ initialError = null }) {
   // B3: ref for the session-expiry modal's sole focusable button — used by
   // the focus-trap effect below to keep Tab from escaping the modal.
   const sessionModalButtonRef = useRefA(null);
-  // B5: guard so muteState.nodes is seeded from backend snooze data only on
-  // the FIRST successful refresh — avoids clobbering user-driven mute toggles
-  // on subsequent refreshes.
-  const muteHydratedRef = useRefA(false);
-  // Bug #1 fix: ref mirror so the WebSocket onEvent callback (which is
-  // memoized once) reads the CURRENT muteState instead of the stale closure
-  // captured at mount time. Without this, lightning auto-mute breaks after
-  // the first render because muteState.lightning / muteState.global are
-  // frozen at their initial values inside the callback.
-  const muteStateRef = useRefA(muteState);
-  muteStateRef.current = muteState;
+  // SHL-5: muteState.nodes is now reconciled against server snooze state on
+  // every refresh (see runRefresh), so the old one-shot `muteHydratedRef`
+  // guard — and the `muteStateRef` mirror that existed only to feed the
+  // deleted lightning auto-mute branch (SHL-1) — are both gone.
+  //
   // F4: ref mirror of `sessionExpired` so the 20s poll interval and the
   // `online` recovery handler (both set up in effects with stable/unrelated
   // dep arrays — see below) can read the CURRENT modal-open state without
@@ -335,9 +403,26 @@ function App({ initialError = null }) {
   useEffectA(() => {
     try { window.history.replaceState({ page }, '', window.location.pathname + window.location.search); }
     catch (_) { /* history API unavailable */ }
+    // SHL-4: only act on history entries WE tagged with a `page`. Entries with
+    // a null/foreign state (most commonly the "跳至主要內容" skip link, which
+    // pushes a bare `#main-content` hash entry) are not ours; the old
+    // `?? 'alerts'` fallback treated them as an explicit "go to Alerts"
+    // navigation, so a keyboard user tabbing through the skip link and then
+    // pressing Back got teleported off their page.
+    //
+    // The second guard matters just as much: skipNextUrlPushRef was armed
+    // BEFORE we knew whether `page` would actually change. When popstate
+    // resolved to the page already displayed, setPageRaw bailed as a no-op, the
+    // push effect never ran, and the armed flag survived to swallow the NEXT
+    // genuine navigation's pushState — wedging the history stack so Back
+    // desynced from the visible page. Arm it only when we truly are changing
+    // page in response to the browser's own navigation.
     const onPopState = (event) => {
+      const nextPage = event.state && event.state.page;
+      if (!nextPage) return;
+      if (nextPage === prevPageRef.current) return;
       skipNextUrlPushRef.current = true;
-      setPageRaw(event.state?.page ?? 'alerts');
+      setPageRaw(nextPage);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -441,23 +526,44 @@ function App({ initialError = null }) {
         // when history changes (C-8). buildNodeHistory ran in api.jsx and
         // wrote window.NODE_HISTORY — mirror the fresh copy here.
         setNodeHistory(window.NODE_HISTORY ?? {});
-        // B5: seed muteState.nodes from backend snooze data on first refresh.
-        // Nodes with snoozeMin > 0 are actively snoozed server-side; mirror
-        // that into muteState so the UI reflects it without requiring the
-        // operator to manually re-snooze. Only runs once (ref-guarded).
-        if (!muteHydratedRef.current) {
-          muteHydratedRef.current = true;
-          const snoozedNodeIds = r.nodes.filter(n => n.snoozeMin > 0).map(n => n.id);
-          if (snoozedNodeIds.length > 0) {
-            setMuteState(prev => ({ ...prev, nodes: [...new Set([...prev.nodes, ...snoozedNodeIds])] }));
+        // SHL-5: reconcile muteState.nodes against server snooze state on EVERY
+        // refresh, not just the first one. Per-node mute is entirely
+        // server-owned — it is created by onSnooze (POST snoozeNode) and
+        // cleared by MuteDrawer's 解除/解除所有 (POST unsnoozeNode), with no
+        // local-only path — so `snoozeMin > 0` is the single source of truth
+        // and mirroring it is safe. The old one-shot hydration (ref-guarded,
+        // union-merged) meant the list only ever GREW: an expired 30-minute
+        // snooze stayed visibly muted for the rest of the shift, and a snooze
+        // a peer operator set never appeared at all. Both are the sort of
+        // silent audio suppression that loses an alert on a typhoon night.
+        //
+        // Only write when the membership actually differs, otherwise every 20s
+        // poll would mint a new muteState object and re-render MuteDrawer,
+        // StatusStrip and every muteState consumer for no reason.
+        const snoozedNodeIds = (r.nodes || []).filter(n => n.snoozeMin > 0).map(n => n.id);
+        setMuteState(prev => {
+          if (prev.nodes.length === snoozedNodeIds.length
+              && prev.nodes.every(id => snoozedNodeIds.includes(id))) {
+            return prev;
           }
-        }
+          return { ...prev, nodes: snoozedNodeIds };
+        });
         resetClockRef.current();
         // Surface partial failures from this refresh cycle (api.jsx populates
         // r.failures with the keys of loaders that rejected).
-        setDataWarnings(r.failures || []);
+        //
+        // SHL-12 (app-side half): a result object with no usable `failures`
+        // array is not evidence that everything succeeded — treat it as a
+        // total failure rather than clearing the stale-data banner. See the
+        // catch below and the api.jsx handoff noted there.
+        setDataWarnings(Array.isArray(r?.failures) ? r.failures : _LOADER_KEYS.slice());
       } catch (e) {
+        // SHL-12: a wholesale refresh failure is precisely when the operator
+        // most needs the "displaying cached data" banner — silently logging
+        // and leaving the banner cleared let a dead backend look like a quiet
+        // night. Mark every feed unavailable.
         console.warn('[SDPRS] refresh failed', e);
+        setDataWarnings(_LOADER_KEYS.slice());
       } finally {
         refreshInFlight.current = null;
         if (refreshPending.current) {
@@ -528,21 +634,18 @@ function App({ initialError = null }) {
           if (wsStopRef.current) { wsStopRef.current(); wsStopRef.current = null; }
           return;
         }
+        // SHL-1: a `weather` branch used to live here, implementing lightning
+        // auto-mute. It was dead on arrival in BOTH directions: `weather` is
+        // not in api.jsx's _WS_EVENT_TYPES whitelist (so onEvent could never
+        // be called with it) and no backend code path emits a `weather` frame
+        // at all. The feature has therefore never once run in production.
+        // Removed rather than left in place, because dormant code that looks
+        // implemented is what let the MuteDrawer keep advertising a 雷擊自動靜音
+        // toggle the system cannot honour. Re-implementing it needs a backend
+        // emit + a whitelist entry + this branch, as one deliberate change.
         if (type === 'alert_updated' || type === 'alert_acknowledged' || type === 'alert_resolved') {
           scheduleRefresh();
         } else if (type === 'node_status' || type === 'pump_status' || type === 'node_deleted') {
-          scheduleRefresh();
-        } else if (type === 'weather') {
-          // Auto-mute on lightning when lightning auto-mute is enabled.
-          // Bug #1 fix: read from muteStateRef.current instead of the stale
-          // muteState closure so lightning auto-mute works after mount.
-          const lightningCount = _data?.lightning?.count || 0;
-          if (lightningCount > 0 && muteStateRef.current.lightning && !muteStateRef.current.global) {
-            try { window.SDPRS_AUDIO?.setMuted(true); } catch (_) {}
-          } else if (lightningCount === 0 && muteStateRef.current.lightning && window.SDPRS_AUDIO?.isMuted()) {
-            // Unmute when lightning clears (only if we muted it)
-            try { window.SDPRS_AUDIO?.setMuted(false); } catch (_) {}
-          }
           scheduleRefresh();
         }
       },
@@ -580,6 +683,53 @@ function App({ initialError = null }) {
     return () => clearInterval(id);
   }, []);
 
+  // API-F7: session keep-alive. The backend hard-expires a session at 24h and
+  // /api/session/extend existed with ZERO callers, so an operator who came on
+  // shift before the boundary got logged out mid-shift — potentially mid-typhoon,
+  // which is exactly when nobody can afford to stop and re-authenticate.
+  //
+  // Deliberately activity-gated rather than a bare timer. A plain interval would
+  // keep an abandoned browser authenticated forever, which defeats the point of
+  // having an expiry at all. Instead we only extend when the operator has
+  // actually interacted since the last extend: a worked console never dies
+  // mid-shift, an abandoned one still expires on schedule.
+  //
+  // A NOC wall display counts as abandoned by this rule and WILL expire. That's
+  // correct — a read-only wall panel showing a login screen is a visible,
+  // fixable problem; a wall panel authenticated indefinitely is a standing
+  // credential nobody is watching.
+  const lastActivityRef = useRefA(0);
+  useEffectA(() => {
+    // `pointerdown`/`keydown` (not `mousemove`) so a cat on the keyboard or a
+    // jittery trackpad doesn't count, but any real operator action does.
+    const mark = () => { lastActivityRef.current = Date.now(); };
+    window.addEventListener('pointerdown', mark, { passive: true });
+    window.addEventListener('keydown', mark, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', mark);
+      window.removeEventListener('keydown', mark);
+    };
+  }, []);
+
+  useEffectA(() => {
+    const EXTEND_EVERY_MS = 15 * 60 * 1000;
+    let lastExtend = Date.now();
+    const id = setInterval(() => {
+      // Nothing to keep alive if the session is already gone — extending here
+      // would race the expiry modal's re-login flow.
+      if (sessionExpired) return;
+      if (lastActivityRef.current <= lastExtend) return;   // idle since last extend
+      const api = window.SDPRS_API;
+      if (!(api && typeof api.extendSession === 'function')) return;
+      lastExtend = Date.now();
+      // Best-effort: a failed extend is not worth interrupting the operator.
+      // If the session really is dead, the existing 401 → __SDPRS_SESSION_EXPIRED
+      // path above surfaces it through the normal modal.
+      Promise.resolve(api.extendSession()).catch(() => {});
+    }, EXTEND_EVERY_MS);
+    return () => clearInterval(id);
+  }, [sessionExpired]);
+
   // Offline / online detection — toast the operator when connectivity changes
   // and trigger a refresh when the connection comes back so stale data is
   // replaced immediately.
@@ -601,8 +751,52 @@ function App({ initialError = null }) {
     };
   }, [showToast, refresh]);
 
-  const findNextUnack = useCallbackA((currentId) => {
-    const list = alerts.filter(a => a.state === 'pending' && a.id !== currentId);
+  // --- Contract B: the alert list the operator can actually SEE --------------
+  // ALR-H2: app.jsx used to run every keyboard behaviour (↑/↓ nav, N
+  // next-unack, ack/resolve auto-advance) against the raw `alerts` array while
+  // AlertsPage rendered a tab/severity/search-filtered subset. The two lists
+  // disagreed constantly: ↓ would "move" to an alert that isn't on screen, the
+  // page would immediately snap the selection back to its own filtered[0], and
+  // arrow triage froze solid under any filter.
+  //
+  // AlertsPage now reports its rendered order via onVisibleChange(visibleIds)
+  // — ids as strings, in exactly the order painted, after tab + severity +
+  // search are applied. We keep it in a REF, never state: the page emits from
+  // an effect on every list change, so routing it through setState would make
+  // App re-render → AlertsPage re-render → effect → setState … a render loop.
+  // Nothing here needs to re-render on a visibility change either; the ref is
+  // only ever read inside event handlers.
+  //
+  // Null/empty ref = "the page hasn't told us yet" (not on the alerts page, or
+  // an older AlertsPage that doesn't implement the contract) → every consumer
+  // below falls back to the previous unfiltered behaviour.
+  const visibleAlertIdsRef = useRefA(null);
+  const onVisibleAlertsChange = useCallbackA((visibleIds) => {
+    visibleAlertIdsRef.current = Array.isArray(visibleIds) ? visibleIds : null;
+  }, []);
+
+  // Shared next-unacknowledged picker. `sourceAlerts` is passed explicitly
+  // rather than closed over so callers can hand in FRESH post-refresh data
+  // (SHL-8) instead of the render-time `alerts` snapshot; that also keeps this
+  // callback's identity stable for the whole session.
+  //
+  // Membership (which alerts are candidates) comes from the visible list;
+  // ORDER (which candidate wins) stays severity-first-then-newest, because
+  // that's the triage priority the operator expects from N / auto-advance
+  // regardless of how the table happens to be sorted.
+  const pickNextUnack = useCallbackA((currentId, sourceAlerts) => {
+    // String() compare on the exclusion too: `currentId` can arrive from a
+    // path that stringified it (Contract B ids, sessionStorage), and a missed
+    // exclusion would let auto-advance re-select the alert just acted on.
+    let list = (sourceAlerts || [])
+      .filter(a => a.state === 'pending' && String(a.id) !== String(currentId));
+    const visible = visibleAlertIdsRef.current;
+    if (Array.isArray(visible) && visible.length > 0) {
+      // String() on both sides: ids cross a sessionStorage/DOM boundary in
+      // places, so the page may hand us string ids for numeric alerts.
+      const visibleSet = new Set(visible.map(String));
+      list = list.filter(a => visibleSet.has(String(a.id)));
+    }
     if (list.length === 0) return null;
     // Severity-first, then RECENCY (newest first) — critical+new always wins.
     // Unknown severities (schema drift, new backend enum) get rank 99 so
@@ -616,7 +810,12 @@ function App({ initialError = null }) {
       return a.ageSec - b.ageSec; // smaller ageSec = newer
     });
     return sorted[0].id;
-  }, [alerts]);
+  }, []);
+
+  const findNextUnack = useCallbackA(
+    (currentId) => pickNextUnack(currentId, alerts),
+    [pickNextUnack, alerts]
+  );
 
   const markSeen = useCallbackA((id) => {
     // Best-effort background write; a failure here shouldn't break the UI,
@@ -624,7 +823,18 @@ function App({ initialError = null }) {
     Promise.resolve()
       .then(() => window.SDPRS_API.markSeen(id))
       .catch(err => console.warn('[app] markSeen failed', err));
-    setAlerts(prev => prev.map(a => a.id === id ? { ...a, seen: true } : a));
+    setAlerts(prev => {
+      const next = prev.map(a => a.id === id ? { ...a, seen: true } : a);
+      // Contract A attaches `.truncated` / `.totalAvailable` as PROPERTIES on
+      // the alerts array (api.jsx loadAlerts). Array.prototype.map returns a
+      // plain new array and silently drops them — and markSeen runs every time
+      // an operator so much as views an alert, so the "list is capped" banner
+      // would disappear on first read and not return until the next full
+      // refresh. Carry the metadata across explicitly.
+      if (prev.truncated !== undefined) next.truncated = prev.truncated;
+      if (prev.totalAvailable !== undefined) next.totalAvailable = prev.totalAvailable;
+      return next;
+    });
   }, []);
 
   // Shared in-flight guard for Ack/Resolve/Snooze dispatch. Hoisted from
@@ -646,8 +856,11 @@ function App({ initialError = null }) {
       try {
         await window.SDPRS_API.ackAlert(id);
       } catch (e) {
-        showToast('認領失敗: ' + (e.message || e), 'warn');
-        return;
+        // Contract C: toast, then RETHROW. Returning normally here told the
+        // caller "acknowledged" when nothing was acknowledged, which is what
+        // made AlertDetail's failure branches dead code (ALR-H1/ALR-M8).
+        showToast('認領失敗: ' + actionErrorText(e), 'warn');
+        throw e;
       }
       // Play confirmation sound on successful ack. muteState.global gates it
       // because the StatusStrip mute toggle doesn't mirror to SDPRS_AUDIO.setMuted.
@@ -660,17 +873,30 @@ function App({ initialError = null }) {
       // count doesn't linger after everything's been touched.
       setNewAlertBannerCount(0);
       showToast('已認領' + (advance ? ' → 下一筆' : ''), 'info');
-      const next = advance ? findNextUnack(id) : null;
+      // SHL-8: pick the advance target AFTER the refresh, from the data the
+      // refresh just landed. Choosing it beforehand meant a peer operator who
+      // resolved that alert seconds earlier left us selecting a row that no
+      // longer exists — the detail pane goes blank and every subsequent
+      // keyboard action (A/R/↑/↓, all gated on `sel`) silently does nothing.
+      // window.ALERTS is what refreshLive just wrote and is readable
+      // synchronously; the `alerts` state variable still holds the pre-refresh
+      // snapshot at this point (React hasn't re-rendered this closure).
       await refresh();
+      const next = advance ? pickNextUnack(id, window.ALERTS ?? []) : null;
       if (next) setSelectedId(next);
     } finally {
       alertBusyRef.current = false;
       setAlertBusy(false);
     }
-  }, [showToast, findNextUnack, refresh, muteState.global]);
+  }, [showToast, pickNextUnack, refresh, muteState.global]);
 
   const onResolve = useCallbackA(async (id, note) => {
-    if (!note) {
+    // ALR-M4: `!note` let a note of pure whitespace through the keyboard-R
+    // gate — the backend stores it, the alert closes, and the audit trail
+    // carries a blank disposition for an event someone will have to explain
+    // later. Test the trimmed value, the same way the UI's own required-field
+    // affordance reads to an operator.
+    if (!note || !String(note).trim()) {
       showToast('需備註才能解決', 'warn');
       return;
     }
@@ -681,20 +907,25 @@ function App({ initialError = null }) {
       try {
         await window.SDPRS_API.resolveAlert(id, note);
       } catch (e) {
-        showToast('解決失敗: ' + (e.message || e), 'warn');
-        return;
+        // Contract C: toast, then RETHROW so AlertDetail's catch (which keeps
+        // the drafted note) actually runs. Returning normally here is what
+        // wiped a failed resolve's write-up (ALR-H1) — on a typhoon night
+        // that is a paragraph of incident notes gone with no way back.
+        showToast('解決失敗: ' + actionErrorText(e), 'warn');
+        throw e;
       }
       // Operator engaged with the queue — clear the "N new" banner too.
       setNewAlertBannerCount(0);
       showToast('警報已解決', 'ok');
-      const next = findNextUnack(id);
+      // SHL-8: see onAck — advance target chosen from post-refresh data.
       await refresh();
+      const next = pickNextUnack(id, window.ALERTS ?? []);
       if (next) setSelectedId(next);
     } finally {
       alertBusyRef.current = false;
       setAlertBusy(false);
     }
-  }, [showToast, findNextUnack, refresh]);
+  }, [showToast, pickNextUnack, refresh]);
 
   const onSnooze = useCallbackA(async (id, mins) => {
     const a = alerts.find(x => x.id === id);
@@ -706,8 +937,13 @@ function App({ initialError = null }) {
       try {
         await window.SDPRS_API.snoozeNode(a.node, mins);
       } catch (e) {
-        showToast('延期失敗: ' + (e.message || e), 'warn');
-        return;
+        // Contract C: toast, then RETHROW. Without it the snooze menu closed
+        // on failure exactly as it does on success (ALR-M8) — the operator
+        // walks away believing a node is muted while it is still armed to
+        // wake them, or believing the snooze took when it never reached the
+        // server.
+        showToast('延期失敗: ' + actionErrorText(e), 'warn');
+        throw e;
       }
       setMuteState(prev => ({ ...prev, nodes: prev.nodes.includes(a.node) ? prev.nodes : [...prev.nodes, a.node] }));
       showToast(`${a.node} 已延期 ${mins} 分鐘`, 'warn');
@@ -751,14 +987,68 @@ function App({ initialError = null }) {
     nodes: '節點資料', alerts: '警報', history: '歷史紀錄',
     rate: '警報頻率', weather: '天氣資訊', handover: '交接備註', audit: '稽核紀錄',
   };
+  // SHL-10: mount-then-load. The initial data fetch used to sit in front of
+  // ReactDOM.render(), so the operator stared at index.html's (motionless —
+  // see SHL-7) boot spinner until all SEVEN loaders settled; each carries a
+  // 10s abort timeout, so a degraded backend meant ~20s of frozen page with no
+  // nav, no clock and no way to tell a slow load from a hung tab. Nothing in
+  // the shell needs the data to render — every consumer already reads the
+  // empty data.jsx placeholders — so we mount first and fill in here.
+  //
+  // This effect also absorbs the two mount-time effects that used to read
+  // window.* immediately (the partial-failure banner and the B8 shift banner);
+  // both would now run before the data exists and see nothing.
+  const bootRanRef = useRefA(false);
   useEffectA(() => {
-    const failures = window.__SDPRS_LOAD_FAILURES;
-    if (failures && failures.length > 0) {
-      setDataWarnings(failures);
-      const labels = failures.map(k => _FAILURE_LABELS[k] || k).join('、');
-      showToast('部分資料載入失敗: ' + labels, 'warn');
-    }
-  }, [showToast]);
+    if (bootRanRef.current) return;
+    bootRanRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        await window.SDPRS_API.loadInitial();
+        if (cancelled) return;
+        setAlerts(window.ALERTS ?? []);
+        setNodes(window.NODES ?? []);
+        setNodeHistory(window.NODE_HISTORY ?? {});
+        // Resolve the selection now that there are alerts to resolve against:
+        // an explicit cross-login RESTORED_STATE id wins (already seeded), then
+        // the sessionStorage id captured during first render, then the head of
+        // the queue. Functional update so a selection the operator made while
+        // the load was in flight is never yanked out from under them.
+        setSelectedId(prev => {
+          if (prev != null) return prev;
+          const saved = savedSelectedIdRef.current;
+          if (saved != null) {
+            const match = (window.ALERTS ?? []).find(a => String(a.id) === saved);
+            if (match) return match.id;
+          }
+          return window.ALERTS?.[0]?.id ?? null;
+        });
+        // B8: auto-open the shift banner when there's meaningful summary data.
+        if (window.SHIFT_SUMMARY && window.SHIFT_SUMMARY.alertsHandled > 0) {
+          setShiftBannerOpen(true);
+        }
+        // Partial-failure surface — loadInitial records which loaders rejected
+        // on window.__SDPRS_LOAD_FAILURES.
+        const failures = window.__SDPRS_LOAD_FAILURES;
+        if (failures && failures.length > 0) {
+          setDataWarnings(failures);
+          const labels = failures.map(k => _FAILURE_LABELS[k] || k).join('、');
+          showToast('部分資料載入失敗: ' + labels, 'warn');
+        }
+      } catch (e) {
+        // Total failure — show the in-app retry UI rather than a bare shell
+        // full of empty states that looks like a quiet night.
+        console.error('[SDPRS] initial data load failed:', e);
+        if (!cancelled) setBootstrapError(e || new Error('loadInitial failed'));
+      } finally {
+        if (!cancelled) setBooting(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint: mount-only by design — showToast is a stable useCallback and
+    // _FAILURE_LABELS is a module-constant-shaped literal.
+  }, []);
 
   // Command palette command dispatch
   const onCmdkCommand = useCallbackA((id) => {
@@ -767,7 +1057,13 @@ function App({ initialError = null }) {
     else if (id === 'density') setTweak('density', tweaks.density === 'compact' ? 'comfortable' : 'compact');
     else if (id === 'shortcuts') setShortcutsOpen(true);
     else if (id === 'audit-me') setPage('audit');
-  }, [tweaks.density, setTweak, setPage]);
+    // CMP-F11: palette node results dispatch `node:<id>` (see CommandPalette) so
+    // picking a node opens that node's detail panel instead of dead-ending on the
+    // generic status page. `'node:'.length === 5`. The panel is derived from
+    // nodePanelNodeId via nodes.find (see line ~215), so the sliced id must match
+    // a node.id exactly — the palette emits `node:` + the same n.id.
+    else if (typeof id === 'string' && id.indexOf('node:') === 0) setNodePanelNodeId(id.slice(5));
+  }, [tweaks.density, setTweak, setPage, setNodePanelNodeId]);
 
   useEffectA(() => {
     const handler = (e) => {
@@ -814,6 +1110,16 @@ function App({ initialError = null }) {
         }
         return;
       }
+      // SHL-9: the session-expiry modal is blocking and action-required, but
+      // it never blocked the single-key shortcuts underneath it. Keys 1-7 kept
+      // switching the page BEHIND the modal, so the `page` snapshot encoded
+      // into the re-login roundtrip (see the modal's button below) was
+      // whatever the operator's stray keystrokes last landed on — they came
+      // back from logging in on the wrong page. A / R / M / T were equally
+      // live against a dead session, firing 401s and toasting failures. Every
+      // shortcut below this line is now inert while the modal is up; Cmd/Ctrl+K
+      // and Escape are handled above and already carry their own guards.
+      if (sessionExpired) return;
       // Ctrl+. focus mode
       if ((e.ctrlKey || e.metaKey) && e.key === '.') {
         e.preventDefault();
@@ -894,9 +1200,28 @@ function App({ initialError = null }) {
       }
       if (inResolveTemplateFlow && /^[1-6]$/.test(e.key)) {
         const idx = parseInt(e.key, 10) - 1;
-        if (window.RESOLVE_TEMPLATES && window.RESOLVE_TEMPLATES[idx]) {
-          setResolveNote(window.RESOLVE_TEMPLATES[idx]);
-          showToast(`已套用模板: ${window.RESOLVE_TEMPLATES[idx]}`, 'info');
+        const templates = window.RESOLVE_TEMPLATES || [];
+        const t = templates[idx];
+        if (t) {
+          // ALR-M3: this used to overwrite the note outright, so an operator
+          // who had typed half a disposition and then reached for the "2"
+          // shortcut lost it — while clicking the very same template as a chip
+          // appends (see applyTemplate in alerts.jsx). Two paths to one action
+          // must not differ on whether they destroy your work.
+          //
+          // The chip path appends only when its local `noteEdited` flag says
+          // the operator typed. app.jsx can't see that flag, so we approximate
+          // it with the one thing that's observable from here: a note that is
+          // exactly some template is pure template application (replace, so
+          // pressing 1 then 2 swaps rather than accumulates, matching chips);
+          // anything else contains operator writing (append, never destroy).
+          setResolveNote(prev => {
+            const cur = prev || '';
+            if (!cur.trim()) return t;
+            if (templates.includes(cur.trim())) return t;
+            return cur.replace(/\s+$/, '') + '\n' + t;
+          });
+          showToast(`已套用模板: ${t}`, 'info');
         }
         return;
       }
@@ -917,23 +1242,50 @@ function App({ initialError = null }) {
           // keyboard A doesn't fire an ack the backend will 409.
           const waiting = !(sel.timeline || []).some(t => t.label === 'UPLOADED');
           if (waiting) { showToast('等待影像上傳中 — 尚未可認領', 'warn'); return; }
-          onAck(sel.id, !e.shiftKey);
+          // Contract C: onAck/onResolve now REJECT on failure. These two
+          // call sites are fire-and-forget (a keydown handler can't await),
+          // so they must swallow the rejection explicitly — otherwise every
+          // failed keyboard ack becomes an unhandled promise rejection in the
+          // console of a console that runs for weeks at a time. The operator
+          // has already been told by the toast inside the handler.
+          onAck(sel.id, !e.shiftKey).catch(() => { /* toasted in onAck */ });
         }
         return;
       }
       if (e.key === 'r' || e.key === 'R') {
-        if (sel.state === 'acknowledged') onResolve(sel.id, resolveNote);
+        if (sel.state === 'acknowledged') {
+          onResolve(sel.id, resolveNote).catch(() => { /* toasted in onResolve */ });
+        }
         return;
       }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        const list = alerts.filter(a => a.state !== 'resolved');
-        // C-9: when every alert is resolved, list[nextIdx] is undefined and
-        // `.id` throws. Bail before indexing.
-        if (list.length === 0) return;
-        const idx = list.findIndex(a => a.id === selectedId);
-        const nextIdx = e.key === 'ArrowDown' ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
-        setSelectedId(list[nextIdx].id);
+        // ALR-H2 (Contract B): walk the list the operator is actually looking
+        // at. `alerts.filter(state !== 'resolved')` is the whole queue; under
+        // any tab/severity/search filter it contains rows AlertsPage isn't
+        // rendering, so ↓ would select an invisible alert and the page would
+        // immediately snap the selection back — arrow triage just stopped
+        // responding. The ref holds the page's own rendered order.
+        const visible = visibleAlertIdsRef.current;
+        const ids = (Array.isArray(visible) && visible.length > 0)
+          ? visible
+          : alerts.filter(a => a.state !== 'resolved').map(a => a.id);
+        // C-9: when the list is empty, ids[nextIdx] is undefined and `.id`
+        // throws. Bail before indexing.
+        if (ids.length === 0) return;
+        // String() compare: ids arriving over Contract B may be stringified
+        // even when the underlying alert id is not. -1 (selection not in the
+        // visible list) is intentionally left to fall through — ArrowDown then
+        // lands on index 0, which is the right recovery when the operator's
+        // selection has just been filtered out from under them.
+        const idx = ids.findIndex(x => String(x) === String(selectedId));
+        const nextIdx = e.key === 'ArrowDown' ? Math.min(ids.length - 1, idx + 1) : Math.max(0, idx - 1);
+        const nextId = ids[nextIdx];
+        // Hand back the LIVE alert's own id, not the possibly-stringified one,
+        // so the `a.id === selectedId` strict-equality checks used throughout
+        // this file keep matching.
+        const liveAlert = alerts.find(a => String(a.id) === String(nextId));
+        setSelectedId(liveAlert ? liveAlert.id : nextId);
       }
     };
     window.addEventListener('keydown', handler);
@@ -960,14 +1312,10 @@ function App({ initialError = null }) {
     };
   }, [sessionExpired]);
 
-  // B8: auto-open shift banner on mount when there's meaningful shift summary
-  // data. Empty dependency array so it runs exactly once; the guard prevents
-  // opening a blank banner when no shift activity has been recorded yet.
-  useEffectA(() => {
-    if (window.SHIFT_SUMMARY && window.SHIFT_SUMMARY.alertsHandled > 0) {
-      setShiftBannerOpen(true);
-    }
-  }, []);
+  // B8's auto-open-shift-banner check moved into the SHL-10 boot effect above:
+  // window.SHIFT_SUMMARY is only populated by loadInitial, which no longer
+  // runs before mount, so a mount-time check here would always see the empty
+  // data.jsx placeholder and the banner would never open.
 
   // Sync the in-app "global mute" toggle back to persisted tweaks.muted.
   // Skip the first invocation: the initial value was seeded FROM tweaks.muted
@@ -1012,6 +1360,62 @@ function App({ initialError = null }) {
   const onToggleFocus = useCallbackA(() => setFocusMode(f => !f), []);
   const onSetDensity = useCallbackA((v) => setTweak('density', v), [setTweak]);
 
+  // CMP-F1 (defense in depth): stable `onClose` identities for the four
+  // overlays. These were inline `() => setX(false)` lambdas, freshly allocated
+  // on every App render — and each overlay's open/close effect in
+  // components.jsx lists `onClose` in its dependency array. So every ~20s poll
+  // and every inbound WS alert tore those effects down and re-ran them: the
+  // cleanup restored focus to whatever sat behind the modal, and the re-run
+  // grabbed it again (or, for CommandPalette/ShortcutsModal, didn't). Focus
+  // moved out from under the operator mid-keystroke, and the stray keys landed
+  // on the global single-key hotkeys — A acking an alert nobody chose. The
+  // authoritative fix is the ref pattern inside components.jsx (owned by the
+  // components agent); stabilising the props here removes the trigger from
+  // this side too, and neither fix depends on the other.
+  const onCloseShortcuts = useCallbackA(() => setShortcutsOpen(false), []);
+  const onCloseMuteDrawer = useCallbackA(() => setMuteDrawerOpen(false), []);
+  const onCloseCmdk = useCallbackA(() => setCmdkOpen(false), []);
+  const onCloseNodePanel = useCallbackA(() => setNodePanelNodeId(null), []);
+
+  // SHL-2 / WHA-H4: the way OUT of wall mode. Wall mode disables every hotkey
+  // and replaces the entire shell — and its only toggle lives in the tweaks
+  // panel, which nothing in production can open (no code posts
+  // `__activate_edit_mode`). A `wallMode: true` persisted in the sdprs.tweaks
+  // localStorage blob therefore booted the console into a display with no
+  // controls and no exit: recovery meant opening devtools on a NOC machine
+  // during whatever event put it there. This callback backs both the visible
+  // button and the Escape handler below.
+  const onExitWallMode = useCallbackA(() => setTweak('wallMode', false), [setTweak]);
+
+  // Escape leaves wall mode. This needs its own listener because the main
+  // shortcut handler deliberately bails on `tweaks.wallMode` (a wall display
+  // has no operator context for hotkeys) — and that early return is exactly
+  // what made the mode inescapable. Scoped to wall mode only, so it adds no
+  // Escape behaviour to the normal shell, where Escape already has an
+  // overlay-dismissal stack. IME guard mirrored from the main handler: a
+  // zh-TW composition must never be able to tear down the wall display.
+  useEffectA(() => {
+    if (!tweaks.wallMode) return;
+    const onKey = (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onExitWallMode();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tweaks.wallMode, onExitWallMode]);
+
+  // Contract B housekeeping: AlertsPage owns the visible-id ref while it is
+  // mounted; once the operator navigates away, the last-reported list is a
+  // stale snapshot of filters that are no longer on screen. Drop it so the
+  // next visit starts from the fallback (unfiltered) behaviour until the page
+  // reports afresh.
+  useEffectA(() => {
+    if (page !== 'alerts') visibleAlertIdsRef.current = null;
+  }, [page]);
+
   // --- Memoized active alerts (non-resolved) ---
   // Previously `alerts.filter(a => a.state !== 'resolved')` ran inline in
   // renderPage() AND in the NodeSidePanel JSX — twice per render. Hoisting
@@ -1020,9 +1424,28 @@ function App({ initialError = null }) {
   const activeAlerts = useMemoA(() => alerts.filter(a => a.state !== 'resolved'), [alerts]);
 
   const renderPage = () => {
+    // SHL-10: the shell (status strip, nav rail, clock, footer) paints
+    // immediately, but the PAGE must not render against data.jsx's empty
+    // placeholders. AlertsPage's empty state is SystemOKState — a full-panel
+    // 「系統正常」 all-clear — and an all-clear the console has not actually
+    // verified is the single most dangerous thing this UI can display. Same
+    // class of lie on the monitor wall (every node absent) and pumps. Show an
+    // honest loading panel until the first load settles; the operator can
+    // still navigate, open the palette and read the strip meanwhile, which is
+    // the entire point of mounting first.
+    if (booting) {
+      return (
+        <div className="h-full flex items-center justify-center" role="status">
+          <div className="flex flex-col items-center gap-3 text-ink-muted">
+            <span className="w-8 h-8 rounded-full border-[3px] border-border-subtle border-t-sev-info animate-spin" aria-hidden="true"></span>
+            <div className="text-sm tracking-wide">正在載入即時資料…</div>
+          </div>
+        </div>
+      );
+    }
     const wrap = (el) => <ErrorBoundary key={page}>{el}</ErrorBoundary>;
     switch (page) {
-      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
+      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
       case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
       case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);
@@ -1043,6 +1466,10 @@ function App({ initialError = null }) {
       setBootstrapError(null);
       window.__SDPRS_LOAD_FAILURES = [];
       setDataWarnings([]);
+      // SHL-10: re-enter the loading state for the duration of the retry, so
+      // the shell shows the honest 「正在載入…」 panel instead of dropping
+      // straight to empty pages that read as an all-clear.
+      setBooting(true);
       try {
         await window.SDPRS_API.loadInitial();
         setAlerts(window.ALERTS ?? []);
@@ -1052,6 +1479,8 @@ function App({ initialError = null }) {
       } catch (e) {
         console.error('[SDPRS] retry loadInitial failed:', e);
         setBootstrapError(e || err);
+      } finally {
+        setBooting(false);
       }
     };
     bootstrapErrorUI = (
@@ -1077,7 +1506,41 @@ function App({ initialError = null }) {
 
   return (<LiveClockProvider registerReset={registerClockReset}>
   {bootstrapError ? bootstrapErrorUI : tweaks.wallMode ? (
-    <WallView alerts={alerts} nodes={nodes} unackCount={unackCount}/>
+    <div className="relative h-screen w-screen bg-black">
+      {/* SHL-17: WallView was the one view rendered OUTSIDE an ErrorBoundary,
+          so a render-time throw in it (a malformed node, a missing
+          SnapshotImage) blanked the whole 4K display to a white screen with
+          nothing but a console message — on the screen a room full of people
+          is watching. renderPage() has wrapped every other page for a while;
+          the wall branch simply never got the same treatment. */}
+      <ErrorBoundary>
+        {booting ? (
+          // Same honesty rule as renderPage(): a wall showing zero unacked
+          // alerts and an empty node grid is an all-clear the console has not
+          // earned yet — and this one is being read across a room.
+          <div className="h-screen w-screen flex flex-col items-center justify-center gap-4 bg-black text-ink-muted" role="status">
+            <span className="w-12 h-12 rounded-full border-4 border-border-subtle border-t-sev-info animate-spin" aria-hidden="true"></span>
+            <div className="text-xl tracking-widest">SDPRS · 正在載入即時資料…</div>
+          </div>
+        ) : (
+          <WallView alerts={alerts} nodes={nodes} unackCount={unackCount}/>
+        )}
+      </ErrorBoundary>
+      {/* SHL-2: the exit. Deliberately rendered OUTSIDE the ErrorBoundary
+          above — if WallView itself crashes, the way out must still be on
+          screen, which is precisely the case where an operator would
+          otherwise be reaching for devtools. */}
+      <button
+        type="button"
+        onClick={onExitWallMode}
+        className="absolute bottom-10 right-3 z-50 inline-flex items-center gap-1.5 px-3 h-8 rounded border border-border-strong bg-surface-overlay/90 text-ink-secondary text-xs font-medium hover:text-ink-primary hover:border-ink-muted focus:outline-none focus:ring-2 focus:ring-sev-info"
+        aria-label="離開牆面模式，返回操作介面"
+      >
+        <Icon.ChevronRight size={13} className="rotate-180" aria-hidden="true"/>
+        離開牆面模式
+        <span className="kbd !h-4 !text-[9px] !px-1 ml-0.5">Esc</span>
+      </button>
+    </div>
   ) : (
     <div className="h-screen w-screen overflow-hidden text-ink-primary">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:bg-sev-info focus:text-white focus:px-4 focus:py-2 focus:rounded">
@@ -1134,13 +1597,13 @@ function App({ initialError = null }) {
       {/* Shift onboarding banner */}
       {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
 
-      <window.ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)}/>
-      <window.MuteDrawer open={muteDrawerOpen} onClose={() => setMuteDrawerOpen(false)} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
-      <window.CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} alerts={alerts} nodes={nodes} onSelectAlert={setSelectedId} onNav={setPage} onCmd={onCmdkCommand}/>
+      <window.ShortcutsModal open={shortcutsOpen} onClose={onCloseShortcuts}/>
+      <window.MuteDrawer open={muteDrawerOpen} onClose={onCloseMuteDrawer} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
+      <window.CommandPalette open={cmdkOpen} onClose={onCloseCmdk} alerts={alerts} nodes={nodes} onSelectAlert={setSelectedId} onNav={setPage} onCmd={onCmdkCommand}/>
       <window.NodeSidePanel
         node={nodePanelNode}
         history={nodePanelNode ? (nodeHistory[nodePanelNode.id] || []) : []}
-        onClose={() => setNodePanelNodeId(null)}
+        onClose={onCloseNodePanel}
         onJumpAlert={onJumpAlert}
         onSelectAlert={onJumpAlert}
         onNavigate={setPage}
@@ -1215,6 +1678,14 @@ function App({ initialError = null }) {
         <p className="text-sm text-ink-secondary mb-4">
           您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
         </p>
+        {/* `bg-brand-primary` used to be this button's background — a token
+            that exists in NEITHER tailwind.config's `colors` block (only
+            surface/ink/border/sev-* are declared) NOR styles.css. Tailwind
+            Play emits nothing for an unknown utility, so the button rendered
+            with no background at all: white text on the elevated panel, i.e.
+            effectively invisible. It is the ONLY control on a blocking,
+            action-required modal — the operator's single way back into a live
+            session. Same failure mode as SHL-7's never-spinning spinner. */}
         <button
           ref={sessionModalButtonRef}
           onClick={() => {
@@ -1233,7 +1704,7 @@ function App({ initialError = null }) {
             } catch (_) { /* fall through with pathname only */ }
             window.location.href = '/login?next=' + encodeURIComponent(target);
           }}
-          className="w-full h-9 bg-brand-primary text-white rounded font-medium hover:opacity-90"
+          className="w-full h-9 bg-sev-info text-white rounded font-medium hover:opacity-90"
           autoFocus
         >
           前往登入頁
@@ -1247,6 +1718,28 @@ function App({ initialError = null }) {
 // =================================================================
 // WALL VIEW — 4K NOC display
 // =================================================================
+
+// SHL-17 (second half): `SnapshotImage` is declared in components.jsx as a
+// bare top-level `const` and is never assigned to `window`. It only resolves
+// here because Babel's preset-env rewrites top-level `const` to `var`, which
+// on a classic <script> becomes a property of the global object — an accident
+// of the no-build-step setup, not an export. Any change to how these files are
+// compiled (a real bundler, `type="module"`, preset-env targets that keep
+// `const`) turns the wall display into a ReferenceError at render time.
+//
+// Resolve it defensively AT RENDER, preferring a real `window.SnapshotImage`
+// export if components.jsx ever adds one (see the handoff note), falling back
+// to the accidental global, and finally degrading to the same
+// `snapshot-placeholder` box the component itself renders when a node has no
+// frame — a wall with icon-less tiles beats a wall that is a blank screen.
+function WallSnapshot(props) {
+  const Impl = window.SnapshotImage
+    || (typeof SnapshotImage !== 'undefined' ? SnapshotImage : null);
+  if (!Impl) {
+    return <div className="absolute inset-0 snapshot-placeholder" aria-hidden="true"></div>;
+  }
+  return <Impl {...props}/>;
+}
 
 function WallView({ alerts, nodes, unackCount }) {
   const { liveSec } = React.useContext(LiveClockContext);
@@ -1294,9 +1787,18 @@ function WallView({ alerts, nodes, unackCount }) {
               <span className="text-ink-dim">|</span>
             </>
           )}
-          <span className="font-mono tnum">{weather.wind?.dir} {weather.wind?.speed} km/h</span>
+          {/* SHL-14 (= WHA-M6): both of these rendered their unit with no
+              number in front of it. `rain.now` is hardcoded null in mapWeather
+              — the backend exposes only a 24h total, and api.jsx deliberately
+              refuses to fabricate an instantaneous rate from it — so this line
+              read a bare 「 mm/h」 forever, which on a wall parses as "0" at a
+              glance. Wind had the same hole whenever a provider supplied no
+              wind data (JSX renders null as nothing, so 「 km/h」). Quote the
+              figure we genuinely have (the 24h accumulation, labelled as such)
+              and render 「—」 for anything missing. */}
+          <span className="font-mono tnum">{weather.wind?.dir || ''} {weather.wind?.speed ?? '—'} km/h</span>
           <span className="text-ink-dim">|</span>
-          <span className="font-mono tnum text-sev-info">{weather.rain?.now} mm/h</span>
+          <span className="font-mono tnum text-sev-info">{weather.rain?.day ?? '—'} mm/24h</span>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
         <div className="font-mono tnum text-base text-ink-secondary">{new Date(wallClock).toLocaleTimeString('zh-TW', { hour12: false })}</div>
@@ -1310,11 +1812,21 @@ function WallView({ alerts, nodes, unackCount }) {
             {sorted.slice(0, 9).map(n => (
               <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
                 <div className={`relative h-full snapshot-placeholder ${n.status === 'offline' ? 'snapshot-frozen' : ''}`}>
-                  <SnapshotImage node={n} iconSize={64}/>
+                  <WallSnapshot node={n} iconSize={64}/>
                   <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
                   {n.status === 'offline' && (
                     <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                      <div className="bg-sev-critical text-white text-base font-bold px-3 py-1 rounded">離線 {Math.floor(n.heartbeat/60)}m</div>
+                      {/* Contract A: `heartbeat` is `number | null` — the old
+                          `999` never-reported sentinel is gone. The previous
+                          `Math.floor(n.heartbeat/60)` turned a null into
+                          `Math.floor(0)` and painted 「離線 0m」 across the NOC
+                          wall for a node that has NEVER checked in — the exact
+                          opposite of the truth, and the reading a room full of
+                          people acts on. Only quote a duration we actually
+                          have; otherwise say so. */}
+                      <div className="bg-sev-critical text-white text-base font-bold px-3 py-1 rounded">
+                        {n.heartbeat != null ? `離線 ${window.fmtAge(n.heartbeat)}` : '離線 · 從未回報'}
+                      </div>
                     </div>
                   )}
                   <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2">
@@ -1375,15 +1887,25 @@ function WallView({ alerts, nodes, unackCount }) {
               <span className="text-7xl font-mono font-black tnum text-sev-warn">{weather.wind?.speed ?? '—'}</span>
               <span className="text-ink-muted text-xl">km/h</span>
             </div>
-            <div className="text-sm text-ink-muted font-mono tnum mt-1">{weather.wind?.dir || '—'} {weather.wind?.degree}°</div>
+            {/* Same missing-number-with-a-unit trap as the rain tile: a null
+                `degree` left a bare 「°」 on the wall. */}
+            <div className="text-sm text-ink-muted font-mono tnum mt-1">{weather.wind?.dir || '—'} {weather.wind?.degree != null ? `${weather.wind.degree}°` : ''}</div>
           </div>
           <div className="bg-surface-panel border border-sev-info/30 rounded p-4 flex-1">
-            <div className="text-xs uppercase tracking-wider text-sev-info font-bold flex items-center gap-2"><Icon.CloudRain size={14}/> 雨量</div>
+            {/* SHL-14 (= WHA-M6): this hero tile advertised 「雨量 … mm/h」 with
+                `rain.now`, which mapWeather hardcodes to null — so the wall's
+                largest rain figure was a permanent 「—」 while the one real
+                number (the 24h total) hid in 8px type underneath, and rendered
+                as a confident 「0mm」 when it was actually absent. Promote the
+                measurement that exists, label its true window, and say plainly
+                that no instantaneous rate is available rather than leaving a
+                dash the room will read as "no rain". */}
+            <div className="text-xs uppercase tracking-wider text-sev-info font-bold flex items-center gap-2"><Icon.CloudRain size={14}/> 24 小時雨量</div>
             <div className="mt-2 flex items-baseline gap-1">
-              <span className="text-7xl font-mono font-black tnum text-sev-info">{weather.rain?.now ?? '—'}</span>
-              <span className="text-ink-muted text-xl">mm/h</span>
+              <span className="text-7xl font-mono font-black tnum text-sev-info">{weather.rain?.day ?? '—'}</span>
+              <span className="text-ink-muted text-xl">mm</span>
             </div>
-            <div className="text-sm text-ink-muted font-mono tnum mt-1">日累計 {weather.rain?.day ?? 0}mm</div>
+            <div className="text-sm text-ink-muted font-mono tnum mt-1">即時雨率 — 資料來源未提供</div>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-3">
             <div className="text-xs uppercase tracking-wider text-ink-muted font-bold mb-2">系統健康</div>
@@ -1411,20 +1933,17 @@ function WallView({ alerts, nodes, unackCount }) {
   );
 }
 
-// Load the first batch of live data, then mount. The loading spinner in
-// index.html stays visible until render() replaces #root.
+// SHL-10: mount FIRST, load after. This used to `await loadInitial()` before
+// rendering anything, which put all seven loaders (10s abort timeout each) in
+// front of first paint — up to ~20s of nothing but index.html's boot spinner
+// on a degraded backend, indistinguishable from a hung tab.
 //
-// If loadInitial() rejects we STILL mount (with the failure passed down as
-// initialError) so the operator sees an in-app retry UI instead of the bare
-// spinner. Previously a rejection just logged and left mount to crash on
-// undefined `window.NODES.filter(...)` etc.
-(async function bootstrap() {
-  let initialError = null;
-  try {
-    await window.SDPRS_API.loadInitial();
-  } catch (e) {
-    console.error('[SDPRS] initial data load failed:', e);
-    initialError = e || new Error('loadInitial failed');
-  }
-  ReactDOM.createRoot(document.getElementById('root')).render(<App initialError={initialError}/>);
+// Mounting first is safe because data.jsx seeds every window.* global the
+// shell reads with an empty placeholder of the correct shape, and App's own
+// state initializers read those same placeholders. The load, its failure
+// surfaces (partial-failure banner, bootstrap-error retry UI) and the
+// selection/shift-banner resolution that depend on it all now live in App's
+// boot effect, which runs immediately after this first paint.
+(function bootstrap() {
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 })();

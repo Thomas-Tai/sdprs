@@ -34,6 +34,38 @@ def test_pump_status_stores_new_flags(monkeypatch):
     assert st["raining"] is True and st["sensor_conflict"] is True
 
 
+def test_pump_status_stores_manual_override(monkeypatch):
+    """MSP-F6: the device publishes its manual-override slot in the status
+    flags. Persisting it is what lets /api/nodes show that a pump is still
+    being HELD by hand — an indefinite manual OFF used to be invisible."""
+    svc = make_service()
+    monkeypatch.setattr("central_server.services.mqtt_service.upsert_node", lambda *a, **k: None)
+    monkeypatch.setattr("central_server.services.mqtt_service.insert_pump_reading", lambda *a, **k: None)
+    payload = json.dumps({"node_id": "pump_node_01", "pump_state": "OFF",
+                          "water_level": 40.0, "manual_override": "OFF"})
+    svc._handle_pump_status("pump_node_01", payload)
+    assert svc.node_states["pump_node_01"]["manual_override"] == "OFF"
+
+
+def test_pump_status_without_manual_override_stores_none(monkeypatch):
+    """No hold (or firmware predating the flag) -> None, never KeyError. This
+    is also what a released hold looks like on the next publish, so the field
+    must clear itself rather than latch."""
+    svc = make_service()
+    monkeypatch.setattr("central_server.services.mqtt_service.upsert_node", lambda *a, **k: None)
+    monkeypatch.setattr("central_server.services.mqtt_service.insert_pump_reading", lambda *a, **k: None)
+
+    held = json.dumps({"node_id": "pump_node_01", "pump_state": "OFF",
+                       "manual_override": "OFF"})
+    svc._handle_pump_status("pump_node_01", held)
+    assert svc.node_states["pump_node_01"]["manual_override"] == "OFF"
+
+    # Hold released on the device — the next publish omits the flag entirely.
+    released = json.dumps({"node_id": "pump_node_01", "pump_state": "ON"})
+    svc._handle_pump_status("pump_node_01", released)
+    assert svc.node_states["pump_node_01"]["manual_override"] is None
+
+
 def test_malformed_payload_still_bumps_last_seen():
     svc = make_service()
     svc._handle_pump_status("pump_node_01", "{not json")

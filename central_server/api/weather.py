@@ -73,29 +73,50 @@ async def set_weather_config_api(
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Item 9 + Option C (2026-07-19): update weather location + multi-source
-    selectors. Fields omitted from the payload are cleared (set to NULL) in
-    the DB — the SPA settings pane always sends the full form. Takes effect
-    on the NEXT weather tick (~10s worst case) — no server restart needed
-    since `_tick` reads the config row on every iteration."""
+    selectors.
+
+    API-F5/WHA-M3 fix (2026-07-20): this used to write `payload` straight
+    through, so any field the caller didn't supply (Pydantic default: None)
+    NULLed the stored value — e.g. the SPA settings form never round-tripped
+    `station_name`, so every save silently wiped it. This is a partial
+    update: a field is only overwritten when the payload actually supplies a
+    non-null value; omitted fields keep whatever is already in the DB. Takes
+    effect on the NEXT weather tick (~10s worst case) — no server restart
+    needed since `_tick` reads the config row on every iteration."""
+    existing = get_weather_config()
+
+    def _merged(new_val: Any, key: str) -> Any:
+        return new_val if new_val is not None else existing.get(key)
+
+    site_lat = _merged(payload.site_lat, "site_lat")
+    site_lon = _merged(payload.site_lon, "site_lon")
+    station_name = _merged(payload.station_name, "station_name")
+    smg_station = _merged(payload.smg_station, "smg_station")
+    hko_station = _merged(payload.hko_station, "hko_station")
+    fallback_provider = _merged(payload.fallback_provider, "fallback_provider")
+
     ok = set_weather_config(
-        payload.site_lat, payload.site_lon, payload.station_name,
-        smg_station=payload.smg_station,
-        hko_station=payload.hko_station,
-        fallback_provider=payload.fallback_provider,
+        site_lat, site_lon, station_name,
+        smg_station=smg_station,
+        hko_station=hko_station,
+        fallback_provider=fallback_provider,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to update weather config")
-    # Update the running weather service if available
+    # Update the running weather service if available. Use the merged
+    # values, not the raw payload — otherwise an omitted lat/lon in the
+    # payload would blank out the live service's location even though the
+    # DB row (and the merge above) correctly kept the existing coordinates.
     svc = get_weather_service()
     if svc:
-        update_weather_location(payload.site_lat, payload.site_lon)
+        update_weather_location(site_lat, site_lon)
     return {
         "ok": True,
-        "site_lat": payload.site_lat, "site_lon": payload.site_lon,
-        "station_name": payload.station_name,
-        "smg_station": payload.smg_station,
-        "hko_station": payload.hko_station,
-        "fallback_provider": payload.fallback_provider,
+        "site_lat": site_lat, "site_lon": site_lon,
+        "station_name": station_name,
+        "smg_station": smg_station,
+        "hko_station": hko_station,
+        "fallback_provider": fallback_provider,
     }
 
 

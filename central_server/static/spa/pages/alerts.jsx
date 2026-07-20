@@ -2,6 +2,15 @@
 
 const { useState: useState_p, useMemo: useMemo_p, useRef: useRef_p, useEffect: useEffect_p } = React;
 
+// ALR-L5: module-level (not component-local) so an alert id that has already
+// played its .row-flash animation stays marked "flashed" even after
+// AlertsPage unmounts and remounts (filter/tab toggle, navigating to another
+// page and back). A useRef-held Set resets to empty on every fresh mount —
+// that's what let an already-seen ack flash replay. Mirrors this codebase's
+// window.__SDPRS_* cross-remount state convention (see components.jsx's
+// window.__SDPRS_OVERLAY_STACK).
+window.__SDPRS_FLASHED_ALERT_IDS = window.__SDPRS_FLASHED_ALERT_IDS || new Set();
+
 // Rendered when the underlying list has alerts but the current
 // severity/tab/search filter hides all of them. Distinguishes "nothing to
 // worry about" from "you filtered them out" (BUG 3).
@@ -33,7 +42,13 @@ const SystemOKState = ({ nodes = [] }) => {
       <div className="text-sm text-sev-ok mt-1.5 font-medium tnum">{onlineCount} / {total} 節點正常回報</div>
       <div className="text-xs text-ink-muted mt-3 font-mono tnum flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-sev-ok animate-live-blink"></span>
-        最後檢查 {lastCheck} · WebSocket 連線中
+        {/* ALR-L2: this page has no real WS-connection signal to check — the
+            previous copy asserted "WebSocket 連線中" unconditionally, which
+            is a confident claim with zero backing data (and would keep
+            reading "connected" while the socket was down). `lastCheck` is
+            also just this render's timestamp, not a periodic health probe,
+            so the label says exactly that and nothing more. */}
+        最後畫面更新 {lastCheck}
       </div>
     </div>
   );
@@ -97,14 +112,13 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
           {isWaitingForVideo && (
             <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30 flex-shrink-0" title="等待影像上傳中 — 尚未可認領">等待影像</span>
           )}
-          {alert.prevShift && (
-            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 flex-shrink-0" title="從上一班次承接">↶ 上班</span>
-          )}
-          {alert.viewer && (
-            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono px-1 h-3.5 rounded bg-sev-warn/15 text-sev-warn border border-sev-warn/30 flex-shrink-0" title={`${alert.viewer} 正在查看`}>
-              <Icon.Eye size={8}/>{alert.viewer}
-            </span>
-          )}
+          {/* ALR-L1: the 上一班次承接 (`.prevShift`) and 正在查看 (`.viewer`)
+              badges used to render here. Both fields are never mapped from the
+              API (grep of api.jsx's mapAlert confirms neither is ever set), so
+              they were permanently-dead branches — the badge could never
+              appear, and the copy ("正在查看" for a single unnamed operator
+              with no live-presence feed behind it) was ambiguous even in the
+              hypothetical case it did. Removed rather than left as dead UI. */}
         </div>
         {/* Severity+state+operator line (mobile) / cells (md+), same
             md:contents trick — order (severity, state, operator) is
@@ -123,14 +137,14 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
   const pa = prev.alert, na = next.alert;
   return pa.id === na.id && pa.sev === na.sev && pa.state === na.state &&
     pa.ageSec === na.ageSec && pa.seen === na.seen && pa.node === na.node &&
-    pa.type === na.type && pa.viewer === na.viewer && pa.prevShift === na.prevShift &&
+    pa.type === na.type &&
     pa.ackBy === na.ackBy && (pa.timeline?.length || 0) === (na.timeline?.length || 0) &&
     prev.selected === next.selected && prev.density === next.density &&
     prev.checked === next.checked && prev.flash === next.flash &&
     prev.siblingCount === next.siblingCount && prev.nodes === next.nodes;
 });
 
-const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, ackedIds, resolveNote, setResolveNote, busy, nodes = [], nodeHistory = {} }) => {
+const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, onVisibleChange, ackedIds, resolveNote, setResolveNote, busy, nodes = [], nodeHistory = {} }) => {
   const [tab, setTab] = useState_p('active');
   const [filterSev, setFilterSev] = useState_p('all');
   const [checked, setChecked] = useState_p(new Set());
@@ -148,6 +162,54 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     return () => clearTimeout(t);
   }, [pageToast]);
 
+  // Bulk-action double-submit guard as a ref (ALR-L3) — mirrors app.jsx's
+  // alertBusyRef pattern: the ref is the synchronous correctness gate (closes
+  // the race a state-only guard would lose across the setState scheduling
+  // boundary), `bulkBusy` state remains only the visual disabled-button signal.
+  const bulkBusyRef = useRef_p(false);
+
+  // One-time-per-id ack flash (ALR-L5). `ackedIds` is owned by app.jsx and
+  // never pruned — it grows for the whole shift — so keying the flash off it
+  // directly forever means any remount of a row (filter/tab toggle unmounts
+  // then re-mounts the same id) replays the .row-flash CSS animation.
+  // `window.__SDPRS_FLASHED_ALERT_IDS` (module-level, declared at the top of
+  // this file) makes the flash strictly one-shot per id for the whole
+  // session, not just this component instance — see the comment there for
+  // why a useRef Set wasn't enough. `flashScheduledRef` prevents scheduling
+  // more than one clear timer per id per mount; it's fine for this one to
+  // reset on remount since it only guards against double-scheduling within a
+  // single mount's lifetime, not "was this ever flashed before". The clear is
+  // delayed to just past the CSS animation's duration (styles.css: `row-flash
+  // 2s ease-out 1`) so a currently-playing flash is never cut short by an
+  // unrelated re-render.
+  const flashScheduledRef = useRef_p(new Set());
+  // Timer handles for the scheduling effect below, tracked so unmount can
+  // cancel any still-pending clears instead of leaking them.
+  const flashTimersRef = useRef_p(new Set());
+  // Refs alone don't trigger a re-render, so `flash={...}` on AlertRow would
+  // never flip back to false once a timer fires — bump this to force
+  // AlertsPage to recompute the (now one-shot-expired) flash prop.
+  const [, bumpFlashTick] = useState_p(0);
+
+  useEffect_p(() => {
+    ackedIds.forEach((id) => {
+      if (window.__SDPRS_FLASHED_ALERT_IDS.has(id) || flashScheduledRef.current.has(id)) return;
+      flashScheduledRef.current.add(id);
+      const timerId = setTimeout(() => {
+        window.__SDPRS_FLASHED_ALERT_IDS.add(id);
+        flashScheduledRef.current.delete(id);
+        flashTimersRef.current.delete(timerId);
+        bumpFlashTick(x => x + 1);
+      }, 2100); // just past styles.css `row-flash 2s ease-out 1`
+      flashTimersRef.current.add(timerId);
+    });
+  }, [ackedIds]);
+
+  useEffect_p(() => () => {
+    flashTimersRef.current.forEach(id => clearTimeout(id));
+    flashTimersRef.current.clear();
+  }, []);
+
   const activeList = tab === 'active'
     ? alerts.filter(a => a.state !== 'resolved')
     : window.HISTORY_ALERTS;
@@ -160,7 +222,36 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     });
   }, [activeList, filterSev, search]);
 
+  // --- Contract B: publish rendered order to app.jsx's keyboard layer (ALR-H2) ---
+  // `filtered` above is the FINAL list — tab + severity + search already
+  // applied, in exact rendered order. app.jsx's ↑/↓ nav, N-next-unack and
+  // ack/resolve auto-advance previously walked the raw unfiltered `alerts`
+  // array and disagreed with what was on screen; this closes that gap by
+  // handing over the ids app.jsx should treat as "visible" — nothing more.
+  //
+  // Guarded twice: (1) `typeof onVisibleChange === 'function'` so the page
+  // still works standalone / with an older app.jsx that doesn't pass the
+  // prop; (2) a joined-id-string comparison so we only call up when the
+  // list actually changed — firing on every render would schedule a
+  // setState in the parent every render and hang the dashboard.
+  const lastVisibleKeyRef = useRef_p(null);
+  useEffect_p(() => {
+    if (typeof onVisibleChange !== 'function') return;
+    const ids = filtered.map(a => String(a.id));
+    const key = ids.join(',');
+    if (key === lastVisibleKeyRef.current) return;
+    lastVisibleKeyRef.current = key;
+    onVisibleChange(ids);
+  }, [filtered, onVisibleChange]);
+
   const selected = alerts.find(a => a.id === selectedId) || window.HISTORY_ALERTS.find(a => a.id === selectedId);
+
+  // ALR-M1: the 作用中 tab's own badge must always show the count of
+  // currently-active (non-resolved) alerts, independent of which tab is
+  // selected. `activeList` below is deliberately tab-dependent (it becomes
+  // window.HISTORY_ALERTS while viewing 歷史), so reusing it for the badge
+  // makes the 作用中 label show the HISTORY count while parked on 歷史.
+  const activeAlertsCount = alerts.filter(a => a.state !== 'resolved').length;
 
   const counts = {
     all: activeList.length,
@@ -199,7 +290,13 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     if (attempted && lastErr) throw lastErr;
   };
   const handleBulkAck = async () => {
-    if (checked.size === 0 || bulkBusy) return;
+    // ALR-L3: `bulkBusyRef` is the synchronous gate — two rapid clicks (or a
+    // click racing a keyboard-triggered call) both read `bulkBusy` state as
+    // `false` until React re-renders, so a state-only check loses the race.
+    // The ref closes it; `bulkBusy` state remains only the disabled-button
+    // visual signal.
+    if (checked.size === 0 || bulkBusyRef.current) return;
+    bulkBusyRef.current = true;
     setBulkBusy(true);
     const ids = [...checked];
     try {
@@ -220,7 +317,20 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         // selection so the operator can retry without re-selecting (A2).
         try {
           await runRefreshAfterBulk();
-          setChecked(new Set()); setBulkNote('');
+          // ALR-M6: the endpoint only returns a rowcount, never which ids
+          // succeeded, so on a PARTIAL success we can't trust the whole
+          // `ids` batch as "done" — the previous code cleared the entire
+          // selection including the ones that FAILED, silently losing track
+          // of which rows still need attention. Re-derive success from the
+          // refreshed truth instead: any id still 'pending' after the
+          // round-trip wasn't accepted, so keep only those checked.
+          const fresh = window.ALERTS ?? [];
+          const stillPending = new Set(ids.filter(id => {
+            const a = fresh.find(x => String(x.id) === String(id));
+            return a && a.state === 'pending';
+          }));
+          setChecked(stillPending);
+          if (stillPending.size === 0) setBulkNote('');
         } catch (e) {
           setPageToast({ tone: 'warn', msg: '批次已提交但刷新失敗，請手動刷新' });
         }
@@ -228,15 +338,18 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     } catch (e) {
       setPageToast({ tone: 'error', msg: '批次操作失敗' });
     } finally {
+      bulkBusyRef.current = false;
       setBulkBusy(false);
     }
   };
   const handleBulkResolve = async () => {
-    if (checked.size === 0 || bulkBusy) return;
+    // ALR-L3: ref is the synchronous double-submit gate (see handleBulkAck).
+    if (checked.size === 0 || bulkBusyRef.current) return;
     if (!bulkNote.trim()) {
       setPageToast({ tone: 'warn', msg: '批次解決需填寫備註' });
       return;
     }
+    bulkBusyRef.current = true;
     setBulkBusy(true);
     const ids = [...checked];
     try {
@@ -254,7 +367,16 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         // network hiccup mid-refresh shouldn't cost the operator a re-select.
         try {
           await runRefreshAfterBulk();
-          setChecked(new Set()); setBulkNote('');
+          // ALR-M6 mirror: keep only ids that DIDN'T actually resolve (still
+          // 'acknowledged' post-refresh) checked, so a partial failure never
+          // silently drops the failed rows from the selection.
+          const fresh = window.ALERTS ?? [];
+          const stillAcked = new Set(ids.filter(id => {
+            const a = fresh.find(x => String(x.id) === String(id));
+            return a && a.state === 'acknowledged';
+          }));
+          setChecked(stillAcked);
+          if (stillAcked.size === 0) setBulkNote('');
         } catch (e) {
           setPageToast({ tone: 'warn', msg: '批次已提交但刷新失敗，請手動刷新' });
         }
@@ -262,9 +384,61 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     } catch (e) {
       setPageToast({ tone: 'error', msg: '批次操作失敗' });
     } finally {
+      bulkBusyRef.current = false;
       setBulkBusy(false);
     }
   };
+
+  // ALR-M5: bulk-resolve of up to 200 alerts previously fired on a single
+  // click with no confirmation and no undo endpoint. A note is required
+  // first (existing friction), but that's typed once and easy to rubber-
+  // stamp; a second, explicit click is cheap insurance against a fat-
+  // fingered mass-resolve. Two-step "arm" pattern (no modal — a modal here
+  // would cost focus mid-triage, see the pageToast comment above) with a 4s
+  // window; disarms on its own timeout or if the selection changes under it.
+  const [resolveArmed, setResolveArmed] = useState_p(false);
+  const resolveArmTimerRef = useRef_p(null);
+  const disarmResolve = () => {
+    setResolveArmed(false);
+    if (resolveArmTimerRef.current) { clearTimeout(resolveArmTimerRef.current); resolveArmTimerRef.current = null; }
+  };
+  useEffect_p(() => { disarmResolve(); }, [checked]);
+  useEffect_p(() => disarmResolve, []);
+  const onBulkResolveClick = () => {
+    if (checked.size === 0 || bulkBusyRef.current) return;
+    if (!bulkNote.trim()) {
+      setPageToast({ tone: 'warn', msg: '批次解決需填寫備註' });
+      return;
+    }
+    if (!resolveArmed) {
+      setResolveArmed(true);
+      resolveArmTimerRef.current = setTimeout(() => setResolveArmed(false), 4000);
+      return;
+    }
+    disarmResolve();
+    handleBulkResolve();
+  };
+
+  // ALR-M2: the bulk-clear button has always advertised "(Esc)" in its title
+  // even though no keydown handler backed it — implement the shortcut for
+  // real rather than keep advertising a shortcut that doesn't exist. Skips
+  // IME composition and focused text inputs so Escape still does whatever
+  // the input/browser normally does with it (e.g. blur, clear IME) instead
+  // of being hijacked into a bulk-selection clear.
+  useEffect_p(() => {
+    if (checked.size === 0) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+      const t = e.target;
+      const tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+      setChecked(new Set());
+      setBulkNote('');
+      disarmResolve();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [checked.size]);
 
   // Prune bulk-select set to intersect with the currently visible list
   // whenever filter/tab/search change. Hidden IDs must never leak into a
@@ -282,23 +456,40 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     });
   }, [filtered]);
 
+  // ALR-H3: the selected alert used to be silently swapped out from under
+  // the operator — a peer resolving it over WS, or even the operator's OWN
+  // filter/search keystroke, would make it drop out of `filtered`, and an
+  // effect used to snap selectedId straight to filtered[0]. That's actively
+  // dangerous: a fast click lands on the alert that just slid into the old
+  // one's spot (acks the wrong target), and any drafted resolveNote for the
+  // old alert vanished with no trace. Fix: never auto-reselect. Instead we
+  // track whether the alert's own STATE changed since it was selected (peer
+  // action — the dangerous case) separately from it merely being hidden by
+  // the operator's own filter (harmless — the alert is unchanged, just off
+  // screen), and surface each as an explicit, dismissible banner in the
+  // detail pane below rather than acting behind the operator's back.
+  const [stateChangeAck, setStateChangeAck] = useState_p(false);
+  const selectedStateAtSelectRef = useRef_p(null);
+  useEffect_p(() => {
+    selectedStateAtSelectRef.current = selected ? selected.state : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
   // Reset per-selection state when the operator flips to a different alert,
   // so snooze menu / resolve draft from the previous alert don't leak into
   // the new one (audit findings A1, A3).
   useEffect_p(() => {
     setSnoozeOpen(false);
     setResolveNote('');
+    setStateChangeAck(false);
   }, [selectedId]);
 
-  // If the currently-selected alert is filtered out of the visible list
-  // (severity chip flip, tab change, search text), drop the selection so the
-  // detail panel + keyboard shortcuts A/R never target an invisible row
-  // (audit H-1). Same shape as the `checked` intersection pattern above.
-  useEffect_p(() => {
-    if (selectedId == null) return;
-    if (filtered.some(a => a.id === selectedId)) return;
-    setSelectedId(filtered[0]?.id ?? null);
-  }, [filtered, selectedId, setSelectedId]);
+  const selectedStateChanged = !!selected
+    && selectedStateAtSelectRef.current != null
+    && selected.state !== selectedStateAtSelectRef.current
+    && !stateChangeAck;
+  const selectedHiddenByFilter = selectedId != null && !!selected
+    && !filtered.some(a => a.id === selectedId);
 
   return (
     <div className="h-full grid grid-cols-1 md:grid-cols-[3fr_2fr] xl:grid-cols-[7fr_5fr] relative">
@@ -323,7 +514,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
           <div className="flex items-center px-3 pt-2.5">
             <div className="flex gap-1 text-sm">
               <button onClick={() => setTab('active')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors flex items-center gap-2 ${tab === 'active' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
-                作用中 <span className={`text-[10px] font-mono tnum px-1.5 rounded ${tab==='active' ? 'bg-sev-critical text-white' : 'bg-surface-elevated text-ink-muted'}`}>{activeList.length}</span>
+                作用中 <span className={`text-[10px] font-mono tnum px-1.5 rounded ${tab==='active' ? 'bg-sev-critical text-white' : 'bg-surface-elevated text-ink-muted'}`}>{activeAlertsCount}</span>
               </button>
               <button onClick={() => setTab('history')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors ${tab === 'history' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
                 歷史
@@ -362,6 +553,17 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
           </div>
         </div>
 
+        {/* ALR-M7: backend caps this endpoint at _ACTIVE_ALERTS_LIMIT rows with
+            no total-count field, so `alerts.totalAvailable` is a floor, never a
+            verified exact total — the copy below says "至少" (at least) and
+            never asserts a confident exact count, per the frozen contract. */}
+        {tab === 'active' && alerts && alerts.truncated && (
+          <div className="px-3 py-1.5 bg-sev-warn/10 border-b border-sev-warn/30 text-[11px] text-sev-warn flex items-center gap-1.5">
+            <Icon.AlertTriangle size={11} className="flex-shrink-0"/>
+            <span>已達顯示上限 — 作用中警報至少有 <span className="font-mono tnum font-semibold">{alerts.totalAvailable}</span> 筆，較早等待的警報可能未顯示</span>
+          </div>
+        )}
+
         {/* Bulk bar */}
         {checked.size > 0 && (
           <div className="bg-sev-info/10 border-b border-sev-info/30 px-3 py-2 flex items-center gap-2 text-xs">
@@ -369,14 +571,28 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             <span className="text-ink-muted">|</span>
             <button onClick={handleBulkAck} disabled={bulkBusy}
               className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed">批次認領</button>
-            <button onClick={handleBulkResolve} disabled={bulkBusy || !bulkNote.trim()}
-              title={!bulkNote.trim() ? '批次解決需備註' : ''}
-              className="px-2 py-1 bg-surface-elevated border border-border-strong rounded hover:bg-surface-overlay disabled:opacity-50 disabled:cursor-not-allowed">批次解決</button>
+            {/* ALR-M5: bulk-resolve has no undo endpoint, so a single click on
+                up to 200 alerts got zero confirmation. Two-step arm: first
+                click arms (relabels + 4s window), second click within the
+                window actually submits. */}
+            <button onClick={onBulkResolveClick} disabled={bulkBusy || !bulkNote.trim()}
+              title={!bulkNote.trim() ? '批次解決需備註' : (resolveArmed ? '再次點擊以確認' : '')}
+              className={`px-2 py-1 border rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${resolveArmed ? 'bg-sev-critical/20 border-sev-critical text-sev-critical animate-pulse-critical' : 'bg-surface-elevated border-border-strong hover:bg-surface-overlay'}`}>
+              {resolveArmed ? `確認解決 ${checked.size} 筆？` : '批次解決'}
+            </button>
             <input type="text" value={bulkNote} onChange={e => setBulkNote(e.target.value)}
               placeholder="批次備註 (解決時必填)..."
               aria-label="批次操作備註"
+              maxLength={500}
               className="flex-1 h-7 px-2 bg-surface-base border border-border-subtle rounded text-xs placeholder-ink-muted focus:border-sev-info focus:outline-none"/>
-            <button onClick={() => { setChecked(new Set()); setBulkNote(''); }} aria-label="清除批次選取" title="清除批次選取 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
+            {/* ALR-L4: server caps bulk note at 500 chars (Field max_length=500);
+                previously nothing stopped the operator from typing past it, so
+                the batch would 422 with the detail dropped by the toast
+                extractor (API-F10) — opaque "failed" with no reason shown. */}
+            {bulkNote.length >= 450 && (
+              <span className={`text-[10px] tnum flex-shrink-0 ${bulkNote.length >= 500 ? 'text-sev-critical' : 'text-sev-warn'}`}>{bulkNote.length}/500</span>
+            )}
+            <button onClick={() => { setChecked(new Set()); setBulkNote(''); disarmResolve(); }} aria-label="清除批次選取" title="清除批次選取 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
           </div>
         )}
 
@@ -400,11 +616,22 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               <SystemOKState nodes={nodes}/>
             ) : (
               <FilteredEmptyState hiddenCount={activeList.length}
-                onClearFilters={() => { setFilterSev('all'); setSearch(''); setTab('active'); }}/>
+                // ALR-L6: this button clears the severity/search filters — it
+                // must not also yank the tab back to 作用中. An operator
+                // clearing filters while parked on 歷史 (reviewing past
+                // shifts) got silently teleported to a different tab.
+                onClearFilters={() => { setFilterSev('all'); setSearch(''); }}/>
             )
           ) : (
             filtered.map(a => {
-              const sib = activeList.filter(x => x.node === a.node && x.id !== a.id).length;
+              // ALR-L8: sibling "+N" must always count truly-active
+              // (non-resolved) alerts on the same node — never `activeList`,
+              // which is tab-dependent and becomes window.HISTORY_ALERTS
+              // (including resolved rows) while viewing 歷史. The badge's
+              // warn styling implies "other live problems here right now";
+              // showing it for resolved history entries would be a false
+              // alarm. Mirrors AlertDetail's `siblings` filter below.
+              const sib = alerts.filter(x => x.state !== 'resolved' && x.node === a.node && x.id !== a.id).length;
               return (
                 <AlertRow key={a.id} alert={a}
                   selected={selectedId === a.id}
@@ -412,7 +639,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
                   density={density}
                   checked={checked.has(a.id)}
                   onCheck={toggleCheck}
-                  flash={ackedIds.has(a.id)}
+                  flash={ackedIds.has(a.id) && !window.__SDPRS_FLASHED_ALERT_IDS.has(a.id)}
                   siblingCount={sib}
                   nodes={nodes}
                 />
@@ -434,6 +661,38 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
               className="inline-flex items-center gap-1.5 text-xs text-ink-secondary hover:text-ink-primary">
               <Icon.ChevronRight size={14} className="rotate-180" aria-hidden="true"/> 返回列表
             </button>
+          </div>
+        )}
+        {/* ALR-H3: the alert's state changed (peer ack/resolve, WS refresh)
+            while it was selected — the dangerous case. Never auto-swap the
+            selection or silently drop the draft note; interrupt instead, and
+            surface the note text itself since AlertDetail hides its textarea
+            once the alert is resolved (it would otherwise vanish from view
+            with no trace). */}
+        {selected && selectedStateChanged && (
+          <div role="alert" className="mx-3 mt-2 flex flex-col gap-1.5 text-xs px-2.5 py-2 rounded border bg-sev-warn/15 border-sev-warn/40 text-sev-warn">
+            <div className="flex items-center gap-2">
+              <Icon.AlertTriangle size={14} className="flex-shrink-0"/>
+              <span className="flex-1">此警報狀態已變更為「{window.safeStateMeta(selected.state).label}」— 可能已由其他操作人員處理。</span>
+              <button onClick={() => setStateChangeAck(true)}
+                className="px-2 py-0.5 rounded border border-sev-warn/50 hover:bg-sev-warn/20 flex-shrink-0">知道了</button>
+            </div>
+            {resolveNote && resolveNote.trim().length > 0 && (
+              <div className="pl-6 text-ink-secondary">
+                <span className="text-ink-dim">您尚未送出的備註：</span>{resolveNote}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Harmless case — the alert itself is unchanged, it's just outside
+            the current tab/severity/search view (e.g. the operator typed a
+            search term while it was open). Purely informational; action
+            buttons below stay fully live. */}
+        {selected && !selectedStateChanged && selectedHiddenByFilter && (
+          <div className="mx-3 mt-2 flex items-center gap-2 text-xs px-2.5 py-2 rounded border bg-surface-elevated border-border-strong text-ink-muted">
+            <Icon.Filter size={12} className="flex-shrink-0"/>
+            <span className="flex-1">此警報目前不符合篩選/分頁條件，僅顯示於詳情。</span>
+            <button onClick={() => setSelectedId(null)} className="text-ink-secondary hover:text-ink-primary underline flex-shrink-0">返回列表</button>
           </div>
         )}
         {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy} nodes={nodes} nodeHistory={nodeHistory}/> : (
@@ -609,12 +868,10 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             </div>
           </div>
         )}
-        {alert.viewer && (
-          <div className="mb-2 flex items-center gap-2 text-xs bg-sev-warn/10 border border-sev-warn/30 rounded px-2 py-1.5">
-            <Icon.Eye size={12} className="text-sev-warn"/>
-            <span className="text-sev-warn font-medium">{alert.viewer} 正在查看此警報</span>
-          </div>
-        )}
+        {/* ALR-L1: a "{alert.viewer} 正在查看此警報" presence banner used to
+            render here. `.viewer` is never mapped from the API (no live-
+            presence feed exists), so the banner was permanently dead —
+            removed along with the field. */}
         <div className="flex items-start gap-3">
           <div className={`w-8 h-8 rounded flex items-center justify-center bg-${m.color}/15 text-${m.color} flex-shrink-0`}>
             <m.Icon/>
@@ -628,9 +885,8 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                   <Icon.Clock size={9}/> 等待影像
                 </span>
               )}
-              {alert.prevShift && (
-                <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">↶ 上班次承接</span>
-              )}
+              {/* ALR-L1: a "↶ 上班次承接" (`.prevShift`) badge used to render
+                  here. Never mapped from the API — removed with the field. */}
               <span className="text-[11px] font-mono text-ink-muted tnum">{alert.id}</span>
             </div>
             <h2 className="text-base font-semibold mt-1.5">{window.alertTypeLabel(alert.type)}</h2>
@@ -648,23 +904,20 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         </div>
       </div>
 
-      {/* Video / snapshot — honest placeholder. If a snapshot_url is available
-          (edge pushed a frame), show it. Otherwise: static "no preview yet"
-          card. The real HLS clip needs stream endpoint wiring — see TODO. */}
+      {/* Video / snapshot — honest placeholder. ALR-L7: this used to branch on
+          `alert.snapshot_url`, but grep of api.jsx's mapAlert confirms that
+          field is never populated by any backend response — the branch could
+          never take the image path, so it's removed rather than kept as
+          always-dead code. The real HLS clip still needs stream endpoint
+          wiring — see TODO. */}
       {/* TODO(dashboard-audit-2026-07-15): real HLS preview needs stream endpoint wiring */}
       <div className="px-4 pt-3">
         <div className="relative aspect-video w-full rounded overflow-hidden border border-border-strong snapshot-placeholder">
-          {alert.snapshot_url ? (
-            <img src={alert.snapshot_url}
-              alt={`${alert.node} snapshot`}
-              className="absolute inset-0 w-full h-full object-cover"/>
-          ) : (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-ink-muted">
-              <Icon.Camera size={36} strokeWidth={1.25}/>
-              <div className="font-mono text-[11px] mt-2 tnum">尚無即時影像</div>
-              <div className="font-mono text-[10px] mt-0.5 text-ink-dim">MP4 稍後上傳 · HLS 預覽尚未接線</div>
-            </div>
-          )}
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-ink-muted">
+            <Icon.Camera size={36} strokeWidth={1.25}/>
+            <div className="font-mono text-[11px] mt-2 tnum">尚無即時影像</div>
+            <div className="font-mono text-[10px] mt-0.5 text-ink-dim">MP4 稍後上傳 · HLS 預覽尚未接線</div>
+          </div>
           {/* Top overlay — node + capture time (read-only, not a fake REC light) */}
           <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
             <Pill tone="muted" className="!bg-black/60 !text-white !border-black/0 font-mono">{alert.node}</Pill>
@@ -684,17 +937,20 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             </div>
             <div className="flex gap-1.5 overflow-x-auto scroll-thin pb-1">
               {history.map((h, i) => (
-                <div key={i} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong cursor-pointer transition-colors`}>
+                // ALR-L7: index-only keys mis-associate rows across re-renders
+                // if this list is ever reordered/spliced (React reuses the DOM
+                // node at that index for whatever item now occupies it). `t`
+                // (resolved/acked timestamp) + `type` is what this data
+                // actually has for identity — no backend id exists on these
+                // rows — combined with the index only to break ties.
+                <div key={`${h.t}-${h.type}-${i}`} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong cursor-pointer transition-colors`}>
                   <div className={`relative aspect-video snapshot-placeholder`}>
-                    {h.snapshot_url ? (
-                      <img src={h.snapshot_url}
-                        alt={`${h.t} snapshot`}
-                        className="absolute inset-0 w-full h-full object-cover"/>
-                    ) : (
-                      <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
-                        <Icon.Camera size={20} strokeWidth={1}/>
-                      </div>
-                    )}
+                    {/* ALR-L7: `h.snapshot_url` was the same always-dead field
+                        as the alert-level snapshot above — never populated,
+                        so the image branch is removed. */}
+                    <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
+                      <Icon.Camera size={20} strokeWidth={1}/>
+                    </div>
                     <div className={`absolute top-1 left-1 w-1.5 h-1.5 rounded-full bg-sev-${h.sev === 'critical' ? 'critical' : h.sev === 'warn' ? 'warn' : 'info'}`}></div>
                   </div>
                   <div className="p-1.5">
@@ -773,9 +1029,13 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 <div className="absolute -left-[18px] top-1 w-2 h-2 rounded-full bg-sev-info ring-2 ring-sev-info/30"></div>
                 <div className="flex items-baseline gap-2 text-xs">
                   <span className="font-mono tnum text-ink-muted">{alert.ackAt}</span>
-                  <span className="font-semibold text-sev-info text-[11px] tracking-wider font-mono">ACKNOWLEDGED</span>
+                  {/* CMP-F17: was the hardcoded English literal "ACKNOWLEDGED"
+                      — localized to match stateMeta.acknowledged.label
+                      (data.jsx) and the 認領/解決 labels used just below in
+                      the 處理紀錄 tab. */}
+                  <span className="font-semibold text-sev-info text-[11px] tracking-wider font-mono">已認領</span>
                 </div>
-                <div className="text-xs text-ink-secondary mt-0.5">by <span className="font-mono">{alert.ackBy}</span></div>
+                <div className="text-xs text-ink-secondary mt-0.5">由 <span className="font-mono">{alert.ackBy}</span></div>
               </div>
             )}
           </div>
@@ -787,8 +1047,12 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
             <dt className="text-ink-muted">名稱</dt><dd className="text-ink-secondary">{node?.name || '—'}</dd>
             <dt className="text-ink-muted">位置</dt><dd className="text-ink-secondary">{node?.location || '—'}</dd>
             <dt className="text-ink-muted">狀態</dt><dd className="text-ink-secondary">{node?.status || '—'}</dd>
-            <dt className="text-ink-muted">心跳</dt><dd className="font-mono tnum text-ink-secondary">{node ? node.heartbeat + 's' : '—'}</dd>
-            <dt className="text-ink-muted">上傳</dt><dd className="font-mono tnum text-ink-secondary">{node ? node.upload + 's' : '—'}</dd>
+            {/* Contract A: .heartbeat/.upload are `number | null` (the 999
+                sentinel is gone) — a bare `node ? node.x + 's' : '—'` guard
+                only checks the NODE exists, not the field, so a never-
+                reported node rendered the literal string "nulls" here. */}
+            <dt className="text-ink-muted">心跳</dt><dd className="font-mono tnum text-ink-secondary">{node && node.heartbeat != null ? node.heartbeat + 's' : '—'}</dd>
+            <dt className="text-ink-muted">上傳</dt><dd className="font-mono tnum text-ink-secondary">{node && node.upload != null ? node.upload + 's' : '—'}</dd>
             {node?.type === 'camera' && (
               <>
                 <dt className="text-ink-muted">溫度</dt><dd className="font-mono tnum text-ink-secondary">{node.temp != null ? node.temp + '°C' : '—'}</dd>
@@ -811,7 +1075,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 <div className="flex items-baseline gap-2">
                   <span className="font-mono tnum text-ink-muted">{alert.ackAt}</span>
                   <span className="text-sev-info font-semibold">認領</span>
-                  <span className="text-ink-secondary">by <span className="font-mono">{alert.ackBy || '—'}</span></span>
+                  <span className="text-ink-secondary">由 <span className="font-mono">{alert.ackBy || '—'}</span></span>
                 </div>
               </div>
             )}
@@ -820,7 +1084,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 <div className="flex items-baseline gap-2">
                   <span className="font-mono tnum text-ink-muted">{alert.resAt}</span>
                   <span className="text-sev-ok font-semibold">解決</span>
-                  <span className="text-ink-secondary">by <span className="font-mono">{alert.resBy || '—'}</span></span>
+                  <span className="text-ink-secondary">由 <span className="font-mono">{alert.resBy || '—'}</span></span>
                 </div>
                 {alert.note && (
                   <div className="mt-1 text-ink-secondary leading-relaxed">{alert.note}</div>

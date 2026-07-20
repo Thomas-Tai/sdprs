@@ -8,6 +8,19 @@ const { useState: useState_p, useMemo: useMemo_p } = React;
 // fall through and are included — same tolerance as inDateRange below.
 const SHIFT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
+// WHA-H2 fix (2026-07-20): render a full date+time stamp so multi-day rows
+// (e.g. under the "近 7 天" filter) are distinguishable — `a.t` alone is
+// HH:MM:SS with no date. Uses the browser's LOCAL Date getters only — `ts`
+// is already-correct epoch ms (parseTs upstream), so this is a pure display
+// conversion, not a compensating offset (see forecast-timezone contract).
+const formatAuditTs = (ts) => {
+  if (ts == null) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
 const AuditPage = ({ auditLog = [] }) => {
   const [meOnly, setMeOnly] = useState_p(false);
   const [operatorFilter, setOperatorFilter] = useState_p('all');
@@ -15,21 +28,34 @@ const AuditPage = ({ auditLog = [] }) => {
   const [dateFilter, setDateFilter] = useState_p('all'); // all | today | 7d
   const [exportState, setExportState] = useState_p(null);
   React.useEffect(() => {
-    if (!exportState) return undefined;
+    // WHA-M1 fix (2026-07-20): this used to auto-dismiss unconditionally
+    // after 3s, including the 'info' (匯出中...) in-flight state — but the
+    // export fetch can take up to ~10s (up to 10000 rows, see exportAuditCsv
+    // below), and `disabled={exportState?.tone === 'info'}` on the export
+    // button is the ONLY double-submit guard. The guard was disarming itself
+    // ~7s before the request it was guarding could finish. Only auto-dismiss
+    // the terminal states (success/error); 'info' is cleared explicitly by
+    // exportAuditCsv's own try/catch when the request actually settles.
+    if (!exportState || exportState.tone === 'info') return undefined;
     const timer = setTimeout(() => setExportState(null), 3000);
     return () => clearTimeout(timer);
   }, [exportState]);
+  // WHA-M2 fix (2026-07-20): 'muted' is not one of the configured Tailwind
+  // sev tokens (only critical/warn/info/ok/stale exist — see index.html
+  // theme config) — `bg-sev-muted/15 text-sev-muted border-sev-muted/30`
+  // resolved to nothing, so these six action types rendered unstyled
+  // badges. 'stale' is the closest existing neutral/gray token.
   const actionMeta = {
     ACKNOWLEDGE:      { label: '已確認',   tone: 'info' },
     RESOLVE:          { label: '已解決',   tone: 'ok' },
     BULK_ACKNOWLEDGE: { label: '批次確認', tone: 'info' },
     BULK_RESOLVE:     { label: '批次解決', tone: 'ok' },
-    SNOOZE:           { label: '節點靜音', tone: 'muted' },
-    UNSNOOZE:         { label: '解除靜音', tone: 'muted' },
-    LOCATION_EDIT:    { label: '位置編輯', tone: 'muted' },
-    HANDOVER_EDIT:    { label: '交接編輯', tone: 'muted' },
-    LOGIN:            { label: '登入',     tone: 'muted' },
-    LOGOUT:           { label: '登出',     tone: 'muted' },
+    SNOOZE:           { label: '節點靜音', tone: 'stale' },
+    UNSNOOZE:         { label: '解除靜音', tone: 'stale' },
+    LOCATION_EDIT:    { label: '位置編輯', tone: 'stale' },
+    HANDOVER_EDIT:    { label: '交接編輯', tone: 'stale' },
+    LOGIN:            { label: '登入',     tone: 'stale' },
+    LOGOUT:           { label: '登出',     tone: 'stale' },
   };
   const operators = useMemo_p(() => {
     const set = new Set();
@@ -95,28 +121,42 @@ const AuditPage = ({ auditLog = [] }) => {
   // query. Previously only `type` was forwarded, so compliance would receive
   // every SNOOZE row across all operators/history instead of the narrow
   // "today · my actions · SNOOZE" the operator saw. meOnly wins over
-  // operatorFilter (they compose semantically as an AND, but the button
-  // implies self), and the shift window replaces any date-chip window when
-  // meOnly is active (12h ≤ today ≤ 7d for typical use).
+  // operatorFilter for the `operator` param (they compose semantically as an
+  // AND, but the button implies self); the shift window and the date-chip
+  // window instead AND together (see WHA-L1 fix below) since that's how
+  // `records` above actually filters the on-screen rows.
   const exportAuditCsv = async () => {
     setExportState({ tone: 'info', msg: '匯出中...' });
     const now = Date.now();
     let operatorParam;
-    let sinceMs;
     if (meOnly) {
       if (_sessionUser) operatorParam = _sessionUser;
-      sinceMs = now - SHIFT_WINDOW_MS;
-    } else {
-      if (operatorFilter !== 'all') operatorParam = operatorFilter;
-      if (dateFilter === 'today') {
-        const d = new Date(now);
-        // Local midnight — matches inDateRange's local-day comparison so the
-        // exported set equals the on-screen set for the operator's session.
-        sinceMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-      } else if (dateFilter === '7d') {
-        sinceMs = now - 7 * 24 * 60 * 60 * 1000;
-      }
+    } else if (operatorFilter !== 'all') {
+      operatorParam = operatorFilter;
     }
+    // WHA-L1 fix (2026-07-20): meOnly and the 日期 (今日/近 7 天) chip are NOT
+    // mutually exclusive on screen — the `records` filter above ANDs the
+    // meOnly shift-window check together with inDateRange regardless of
+    // meOnly's state. This used to branch as if only one could ever apply
+    // (meOnly ⇒ shift window only, ignoring dateFilter entirely), so early in
+    // a local day (e.g. 00:30) turning on both 本班·我的動作 and 今日 exported
+    // rows back to the full 12h shift floor even though the on-screen table
+    // ALSO excluded anything from before local midnight — CSV and screen
+    // disagreed right at the boundary where "12h ago" crosses into
+    // yesterday. Reuse `_shiftFloor` (the exact value `records` filters
+    // with) and the same local-midnight cutoff `inDateRange` uses, and AND
+    // them the same way the screen does — the later (larger) cutoff wins.
+    const cutoffs = [];
+    if (meOnly) cutoffs.push(_shiftFloor);
+    if (dateFilter === 'today') {
+      const d = new Date(now);
+      // Local midnight — matches inDateRange's local-day comparison so the
+      // exported set equals the on-screen set for the operator's session.
+      cutoffs.push(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
+    } else if (dateFilter === '7d') {
+      cutoffs.push(now - 7 * 24 * 60 * 60 * 1000);
+    }
+    const sinceMs = cutoffs.length ? Math.max(...cutoffs) : undefined;
     try {
       await window.SDPRS_API.exportAuditCsv({
         // G4: was 1000 — docs advertise 10000 as the ceiling; the previous
@@ -152,6 +192,24 @@ const AuditPage = ({ auditLog = [] }) => {
             className="ml-auto text-current opacity-70 hover:opacity-100"
             onClick={() => setExportState(null)}
           >×</button>
+        </div>
+      )}
+      {/* WHA-M14 fix (2026-07-20): /api/audit has no total-count field, so
+          api.jsx's loadAudit() can only prove a FLOOR when the server-side
+          cap is hit (`totalAvailable` == the row limit it received) — the
+          true count could be higher. Wording MUST NOT claim an exact total.
+          Note `totalAvailable` equals the number of rows actually shown, so
+          quoting it as both "at least N on the server" AND "only N loaded"
+          states the same number twice for two different quantities and tells
+          the operator nothing. The honest framing is simply: this is the cap,
+          and more rows exist beyond it. This is a persistent banner (no auto-dismiss) since it
+          reflects actual data completeness, not a transient action result —
+          an operator reviewing an incident log needs to know the list may
+          be incomplete for as long as it actually is. */}
+      {auditLog && auditLog.truncated && (
+        <div role="status" className="px-4 py-1.5 text-xs border-b border-sev-warn/30 bg-sev-warn/10 text-sev-warn flex items-center gap-2 flex-shrink-0">
+          <Icon.AlertTriangle size={12}/>
+          <span>稽核紀錄已達載入上限 · 僅顯示最新 {auditLog.totalAvailable} 筆，伺服器上仍有更多紀錄未顯示 · 請縮小篩選範圍或使用 CSV 匯出取得完整紀錄</span>
         </div>
       )}
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
@@ -258,11 +316,26 @@ const AuditPage = ({ auditLog = [] }) => {
                 </td>
               </tr>
             )}
-            {records.map((a, i) => {
-              const m = actionMeta[a.action] || { tone: 'muted', label: a.action };
+            {records.map((a) => {
+              const m = actionMeta[a.action] || { tone: 'stale', label: a.action };
+              // WHA-L6 fix (2026-07-20): was keyed on array index, which
+              // shifts every time a new row is prepended by a refresh —
+              // React then reuses/misattributes DOM nodes across unrelated
+              // rows. Synthesize a stable-enough key from the row's own
+              // content (no backend row id is mapped through mapAuditRow).
+              const rowKey = `${a.ts != null ? a.ts : 'na'}-${a.by}-${a.action}-${a.target}`;
               return (
-                <tr key={i} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60">
-                  <td className="px-4 py-2 font-mono text-ink-muted">{a.t}</td>
+                <tr key={rowKey} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60">
+                  {/* WHA-H2 fix (2026-07-20): `a.t` is a time-only HH:MM:SS
+                      string (see api.jsx mapAuditRow's fmtClock) — under the
+                      "近 7 天" filter, rows from different days become
+                      indistinguishable. Derive a full MM-DD HH:MM:SS stamp
+                      from `a.ts` (already-correct epoch ms per parseTs) using
+                      the browser's local time getters — no manual UTC offset
+                      arithmetic, so this can't reintroduce an API-F1-class
+                      timezone bug. Falls back to the time-only string for
+                      legacy rows with no parseable ts. */}
+                  <td className="px-4 py-2 font-mono text-ink-muted whitespace-nowrap">{formatAuditTs(a.ts) || a.t || '—'}</td>
                   <td className="px-4 py-2 font-mono">
                     <span className={a.by === 'system' ? 'text-ink-muted' : (_sessionUser && a.by === _sessionUser) ? 'text-sev-info font-semibold' : 'text-ink-primary'}>{a.by}</span>
                   </td>

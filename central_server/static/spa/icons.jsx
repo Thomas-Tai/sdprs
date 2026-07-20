@@ -67,6 +67,14 @@ const Icon = {
   Minus: (p) => <Svg {...p}><line x1="5" y1="12" x2="19" y2="12"/></Svg>,
   Keyboard: (p) => <Svg {...p}><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></Svg>,
   MoreHorizontal: (p) => <Svg {...p}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></Svg>,
+  // CMP-F5: safeSevMeta's crash-guard fallback renders Icon.HelpCircle for an
+  // unknown severity. It was never defined here, so the guard itself threw —
+  // a schema-drift severity took the whole row down instead of degrading.
+  HelpCircle: (p) => <Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></Svg>,
+  // CMP-F18: focus ("夜深") mode and the theme toggle both rendered a bare
+  // Moon, so the two adjacent buttons in StatusStrip were visually identical.
+  // MoonStar is the focus-mode glyph; Moon stays the theme glyph.
+  MoonStar: (p) => <Svg {...p}><path d="M18 15.5A8.5 8.5 0 0 1 8.5 6a8.86 8.86 0 0 1 .3-2.2 9 9 0 1 0 11.4 11.4 8.86 8.86 0 0 1-2.2.3z"/><path d="m17.5 2 .7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></Svg>,
 };
 
 window.Icon = Icon;

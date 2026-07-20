@@ -13,7 +13,14 @@ const safeSevMeta = (sev) => {
   return window.sevMeta && window.sevMeta.info
     ? { ...window.sevMeta.info, label: sev || '未知' }
     : { label: sev || '未知', color: 'ink-muted', bar: 'sev-bar-info',
-        Icon: () => (window.Icon ? window.Icon.HelpCircle({size:14}) : null) };
+        // CMP-F5: this fallback used to call window.Icon.HelpCircle, which did
+        // not exist — the crash-guard threw a TypeError of its own, so an
+        // unknown severity blanked the row it was meant to rescue. The icon is
+        // now defined in icons.jsx; the existence check below keeps the guard
+        // honest even if icons.jsx fails to load at all.
+        Icon: () => (window.Icon && window.Icon.HelpCircle
+          ? window.Icon.HelpCircle({ size: 14 })
+          : null) };
 };
 const safeStateMeta = (state) => {
   const m = window.stateMeta && window.stateMeta[state];
@@ -26,11 +33,45 @@ const safeDetectorHealthMeta = (v) => {
   return meta[v] || meta.unknown || { label: v || '未知', tone: 'muted' };
 };
 
+// CMP-F10: node status was rendered as a bare coloured dot in three places
+// (command palette rows, node side panel heading, monitor tiles). Colour alone
+// carries the whole "this camera is down" signal — invisible to screen readers
+// and unreliable for red/green colour deficiency. These three helpers give the
+// dot a text label and a token-safe class, and are the single place the
+// status→appearance mapping lives.
+//
+// Only the sev-* tokens configured in index.html exist; the class strings below
+// are written out in full (never interpolated) so Tailwind's Play CDN scanner
+// can see them.
+const NODE_STATUS_META = {
+  offline:  { label: '離線',   dot: 'bg-sev-critical', text: 'text-sev-critical' },
+  critical: { label: '嚴重',   dot: 'bg-sev-critical', text: 'text-sev-critical' },
+  warn:     { label: '警告',   dot: 'bg-sev-warn',     text: 'text-sev-warn' },
+  warning:  { label: '警告',   dot: 'bg-sev-warn',     text: 'text-sev-warn' },
+  degraded: { label: '降級',   dot: 'bg-sev-warn',     text: 'text-sev-warn' },
+  online:   { label: '正常',   dot: 'bg-sev-ok',       text: 'text-sev-ok' },
+  ok:       { label: '正常',   dot: 'bg-sev-ok',       text: 'text-sev-ok' },
+  active:   { label: '正常',   dot: 'bg-sev-ok',       text: 'text-sev-ok' },
+  stale:    { label: '停滯',   dot: 'bg-sev-stale',    text: 'text-sev-stale' },
+};
+// Unknown / never-reported status must not masquerade as healthy green — an
+// absent status is a data gap, not an OK. Degrade to the neutral 'stale' look
+// and say 「未知」 out loud.
+const NODE_STATUS_UNKNOWN = { label: '未知', dot: 'bg-ink-muted', text: 'text-ink-muted' };
+const nodeStatusMeta = (status) =>
+  NODE_STATUS_META[String(status || '').toLowerCase()] || NODE_STATUS_UNKNOWN;
+const nodeStatusLabel   = (status) => nodeStatusMeta(status).label;
+const nodeStatusDotCls  = (status) => nodeStatusMeta(status).dot;
+const nodeStatusTextCls = (status) => nodeStatusMeta(status).text;
+
 // Expose the safe helpers so pages/* / app.jsx call sites (rendered rows,
 // wall-view ticker, alert-detail header) don't crash on unknown severities.
 window.safeSevMeta = safeSevMeta;
 window.safeStateMeta = safeStateMeta;
 window.safeDetectorHealthMeta = safeDetectorHealthMeta;
+window.nodeStatusLabel = nodeStatusLabel;
+window.nodeStatusDotCls = nodeStatusDotCls;
+window.nodeStatusTextCls = nodeStatusTextCls;
 
 // ---------- LiveClockContext ----------
 // Shared context for the 1-second drift timer. LiveClockProvider (app.jsx)
@@ -188,11 +229,17 @@ const Pill = React.memo(({ tone = 'neutral', children, dot, pulse, className = '
   const dotColors = {
     ok: 'bg-sev-ok', warn: 'bg-sev-warn', critical: 'bg-sev-critical', info: 'bg-sev-info', muted: 'bg-ink-muted', neutral: 'bg-ink-muted',
   };
+  // CMP-F18: an unmapped tone (e.g. `nodeStatusTone`'s 'warning', or a tone
+  // pulled from backend metadata) resolved to `undefined` and was interpolated
+  // into the class string as the literal text "undefined" — the pill rendered
+  // borderless and colourless. Degrade to `neutral` instead.
+  const toneCls = tones[tone] || tones.neutral;
+  const dotCls = dotColors[tone] || dotColors.neutral;
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 h-6 rounded border text-xs font-medium tnum whitespace-nowrap ${tones[tone]} ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2 h-6 rounded border text-xs font-medium tnum whitespace-nowrap ${toneCls} ${className}`}>
       {dot && (
         <span className="relative inline-flex w-1.5 h-1.5">
-          <span className={`absolute inset-0 rounded-full ${dotColors[tone]} ${pulse ? 'animate-live-blink' : ''}`}></span>
+          <span className={`absolute inset-0 rounded-full ${dotCls} ${pulse ? 'animate-live-blink' : ''}`}></span>
         </span>
       )}
       {children}
@@ -215,23 +262,48 @@ const Pill = React.memo(({ tone = 'neutral', children, dot, pulse, className = '
 // B,G,R; the edge adapter passes it straight through to cv2.imencode.
 // If colours ever look magenta again, check edge_glass/utils/camera.py.
 const SnapshotImage = ({ node, iconSize = 48 }) => {
-  const frozen = node.status === 'offline' || node.upload > 60;
+  // Contract A: `upload` is `number | null`; null means no snapshot has ever
+  // been received. `null > 60` is false, so a camera that has never uploaded
+  // used to be treated as NOT frozen — the tile then requested a snapshot URL
+  // built from an undefined timestamp and, on the wall, read as a live feed.
+  // Absent data is frozen data.
+  const frozen = node.status === 'offline' || node.upload == null || node.upload > 60;
   const wantsLiveImg = node.type === 'camera' && !frozen;
-  if (wantsLiveImg && node.snapshotTimestamp) {
+  const src = `/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}`;
+  // CMP-F14: a snapshot fetch that 404s / times out / returns a truncated JPEG
+  // used to leave the browser's broken-image glyph on the monitor wall, which
+  // reads as "the camera is fine, the dashboard is broken". Remember which URL
+  // failed (not just a boolean) so the next pushed frame — a new
+  // snapshotTimestamp, hence a new URL — retries automatically instead of
+  // pinning the tile to the fallback until remount.
+  const [failedSrc, setFailedSrc] = useState(null);
+  if (wantsLiveImg && node.snapshotTimestamp && failedSrc !== src) {
     return (
       <img
-        src={`/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}`}
-        alt={`${node.name || node.id} snapshot`}
+        src={src}
+        alt={`${node.name || node.id} 即時畫面`}
+        onError={() => setFailedSrc(src)}
         className="absolute inset-0 w-full h-full object-cover"
       />
     );
   }
+  const loadFailed = wantsLiveImg && node.snapshotTimestamp && failedSrc === src;
   return (
-    <div className="absolute inset-0 flex items-center justify-center text-ink-muted/40">
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-ink-muted/40">
       {node.type === 'camera' ? <Icon.Camera size={iconSize} strokeWidth={1}/> : <Icon.Droplet size={iconSize} strokeWidth={1}/>}
+      {loadFailed && (
+        <span className="text-[10px] text-sev-warn font-mono tnum">畫面載入失敗</span>
+      )}
     </div>
   );
 };
+
+// SHL-17: app.jsx's WallView renders camera frames too, and reached this
+// component by relying on Babel's `const`→global-`var` accident rather than an
+// explicit export. Publish it deliberately so the NOC wall doesn't depend on a
+// compiler implementation detail. WallSnapshot in app.jsx prefers this and
+// falls back if absent, so the two land in either order safely.
+window.SnapshotImage = SnapshotImage;
 
 // ---------- Detector Health — visual + audio detector status (cameras only) ----------
 // Surfaces an "online but unable to alert" camera: blinded/paused vision or a
@@ -255,7 +327,7 @@ const DriftMeter = React.memo(({ sec, max = 30 }) => {
   const lit = Math.min(n, Math.ceil((sec / max) * n));
   const color = sec < 10 ? '#10B981' : sec < 20 ? '#F59E0B' : '#DC2626';
   return (
-    <span className="inline-flex items-center gap-px h-3" aria-label={`Connection drift ${sec}s`}>
+    <span className="inline-flex items-center gap-px h-3" aria-label={`連線延遲 ${sec} 秒`}>
       {Array.from({length: n}).map((_, i) => (
         <span key={i} className="w-[3px] h-2.5 rounded-[1px] transition-colors" style={{
           background: i < lit ? color : 'rgba(100,116,139,0.25)',
@@ -297,31 +369,117 @@ function useOverlayTop(active) {
   };
 }
 
+// ---------- Shared overlay behaviour helpers (CMP-F1 / F3 / F6) ----------
+// These are deliberately three small helpers rather than one `useOverlayBehavior`
+// hook: the six overlays in this file have genuinely different lifecycle
+// semantics (window vs document listener, focus the heading vs the first
+// button vs let an autoFocus input win, keyed on `open` vs `node?.id`), and
+// collapsing them into a single hook would have meant restructuring each
+// component's effect. These helpers close the same three defects with no
+// change to any component's JSX shape, props or call signatures.
+
+// CMP-F1: every overlay effect used to list `onClose` in its dependency array,
+// but app.jsx recreates that prop on every render — so each ~20s poll and each
+// incoming WS alert tore the effect down and re-ran it. The cleanup path
+// "restored" focus to the element behind the modal and the re-run either
+// re-grabbed it or (CommandPalette / ShortcutsModal, which have no explicit
+// focus call) left focus on <body>, where stray keystrokes land on the global
+// single-key hotkeys (A = ack, 1-7 = page switch, M = mute). Holding the
+// callback in a ref lets the effect depend only on the open/close signal while
+// still invoking the latest prop. The logout dialog already did this by
+// construction (deps `[logoutConfirmOpen]`); this generalises that pattern.
+const useLatestRef = (value) => {
+  const ref = useRef(value);
+  useEffect(() => { ref.current = value; });
+  return ref;
+};
+
+// CMP-F3: every focus trap selected the first/last focusable element WITHOUT
+// excluding disabled ones. MuteDrawer's last button (解除所有節點延期) is
+// disabled whenever nothing is snoozed — the common case — so `last` was an
+// element that cannot take focus and Tab walked straight out of the
+// aria-modal into the page behind it. `:not([disabled])` keeps the trap
+// closed. `[href]` needs no filter (anchors are never disabled).
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"]):not([disabled])',
+].join(', ');
+
+// Shared Tab/Shift+Tab wrap used by all six traps. Returns nothing; callers
+// keep their own Escape handling (which is guarded by useOverlayTop).
+const trapTab = (e, container) => {
+  if (!container) return;
+  const focusable = container.querySelectorAll(FOCUSABLE_SELECTOR);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+};
+
+// CMP-F6: backdrops closed on `click`. A drag-select that STARTS inside the
+// panel (selecting a node id, an error message, a half-typed note) and ENDS
+// over the backdrop still fires `click` on the backdrop, because the click
+// target is the nearest common ancestor of press and release. The overlay
+// dismissed itself and discarded the operator's edits. Requiring the press to
+// have started on the backdrop too makes dismissal intentional.
+const useBackdropDismiss = (onClose) => {
+  const closeRef = useLatestRef(onClose);
+  const pressedBackdrop = useRef(false);
+  return {
+    onMouseDown: (e) => { pressedBackdrop.current = e.target === e.currentTarget; },
+    onClick: (e) => {
+      if (e.target !== e.currentTarget) return;
+      if (!pressedBackdrop.current) return;
+      pressedBackdrop.current = false;
+      if (typeof closeRef.current === 'function') closeRef.current();
+    },
+  };
+};
+
 // ---------- Status Strip ----------
 
 const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
   const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
-  const liveLabel = liveSec < 10 ? `Live · ${liveSec}s` : liveSec < 30 ? `Reconnecting… ${liveSec}s` : `Disconnected ${liveSec}s`;
+  // CMP-F17: the degraded/failed connection states — the two an operator most
+  // needs to read at a glance during a typhoon — were the only English strings
+  // in the status strip. Localised to zh-TW to match the rest of the UI.
+  const liveLabel = liveSec < 10 ? `Live · ${liveSec}s` : liveSec < 30 ? `重新連線中… ${liveSec}s` : `連線中斷 ${liveSec}s`;
   const tones = { ok: 'bg-sev-ok/15 text-sev-ok border-sev-ok/40', warn: 'bg-sev-warn/15 text-sev-warn border-sev-warn/40', critical: 'bg-sev-critical/15 text-sev-critical border-sev-critical/40' };
   const activeMutes = (muted ? 1 : 0) + (muteState?.nodes?.length || 0) + (muteState?.lightning ? 1 : 0);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const logoutDialogRef = useRef(null);
   const logoutTriggerRef = useRef(null);
-  const logoutConfirmBtnRef = useRef(null);
+  const logoutCancelBtnRef = useRef(null);
   const isLogoutTop = useOverlayTop(logoutConfirmOpen);
+  const logoutBackdrop = useBackdropDismiss(() => setLogoutConfirmOpen(false));
 
   // Focus trap for logout confirmation dialog. Captures the trigger element
   // on open so focus can be restored on close. Traps Tab/Shift+Tab within
-  // the dialog's focusable elements. On open, focus moves to the primary
-  // (destructive) button so keyboard users land directly on it. Escape closes
-  // — guarded by useOverlayTop so it only fires when this dialog is the
-  // topmost open overlay (see F4 / useOverlayTop above).
+  // the dialog's focusable elements. Escape closes — guarded by useOverlayTop
+  // so it only fires when this dialog is the topmost open overlay (see F4 /
+  // useOverlayTop above).
+  //
+  // CMP-F8: focus used to land on the destructive 登出 button. During a shift
+  // an operator queues keystrokes constantly; a single stray Enter after the
+  // dialog opened logged them out mid-incident. Focus now lands on 取消 — the
+  // safe, reversible action — so Enter dismisses instead of destroys. The
+  // destructive button is still one Tab away.
   useEffect(() => {
     if (!logoutConfirmOpen) return;
     logoutTriggerRef.current = document.activeElement;
-    if (logoutConfirmBtnRef.current) {
-      try { logoutConfirmBtnRef.current.focus(); } catch (_) {}
+    if (logoutCancelBtnRef.current) {
+      try { logoutCancelBtnRef.current.focus(); } catch (_) {}
     }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
@@ -330,19 +488,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
         setLogoutConfirmOpen(false);
         return;
       }
-      if (e.key === 'Tab' && logoutDialogRef.current) {
-        const focusable = logoutDialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      if (e.key === 'Tab') trapTab(e, logoutDialogRef.current);
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
@@ -371,9 +517,13 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
     const prev = prevUnackRef.current;
     prevUnackRef.current = unackCount;
     if (muted || !window.SDPRS_AUDIO) return;
-    // Operator-armed lightning suppression: skip the alert tone so the
-    // app.jsx `weather` WS handler owns the auto-mute during a strike
-    // (setMuted(true) on count>0, setMuted(false) on clear).
+    // API-F2 / SHL-1: manual lightning-storm mute — purely operator-armed via
+    // the toggle in MuteDrawer. No WS event or backend path ever flips this
+    // automatically: `weather` isn't in api.jsx's WS whitelist and no backend
+    // code emits it, so a comment here that used to describe an app.jsx
+    // `weather` handler "owning the auto-mute" was describing dead code that
+    // never ran. Skip the alert tone only while the operator has explicitly
+    // switched this on.
     if (muteState?.lightning) return;
     if (unackCount > prev) {
       const newest = (window.ALERTS || []).find(a => a.state === 'pending' && !(a.acknowledged_by || a.ackBy));
@@ -423,7 +573,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
           <span>{liveLabel}</span>
         </span>
         {unackCount > 0 && (
-          <button onClick={() => setPage('alerts')} className="inline-flex items-center gap-1.5 h-7 px-2 rounded bg-sev-critical text-white text-xs font-semibold tnum hover:bg-red-700 transition-colors whitespace-nowrap">
+          <button type="button" onClick={() => setPage('alerts')} className="inline-flex items-center gap-1.5 h-8 px-2 rounded bg-sev-critical text-white text-xs font-semibold tnum hover:bg-red-700 transition-colors whitespace-nowrap">
             <Icon.Bell size={12} strokeWidth={2.5}/>
             <span>未認領 {unackCount}</span>
             {!muted && audioReplayIn != null && audioReplayIn > 0 && (
@@ -438,7 +588,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
           is reachable (otherwise the strip stays empty rather than show zeros). */}
       <div className="flex-1 flex justify-center min-w-0">
         {window.WEATHER && window.WEATHER.available && (
-          <button onClick={() => setPage('weather')} className="hidden md:flex items-center gap-3 h-7 px-3 rounded border border-border-strong bg-surface-elevated hover:bg-surface-overlay transition-colors text-xs whitespace-nowrap">
+          <button type="button" onClick={() => setPage('weather')} className="hidden md:flex items-center gap-3 h-8 px-3 rounded border border-border-strong bg-surface-elevated hover:bg-surface-overlay transition-colors text-xs whitespace-nowrap">
             {window.WEATHER.typhoon && (
               <>
                 <span className="flex items-center gap-1.5 text-sev-warn">
@@ -478,21 +628,24 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
           horizontal scroll gesture instead of being clipped (F1). */}
       <div className="flex items-center gap-2 md:gap-1 min-w-0 overflow-x-auto scroll-thin">
         {operators && operators.length > 1 && <OperatorsCluster operators={operators} currentUser={window.SDPRS_USER || ''}/>}
-        <button onClick={onOpenCmdK} title="命令面板 (⌘K / Ctrl+K)" className="hidden md:flex flex-shrink-0 items-center gap-1 h-7 px-2 ml-1 rounded border border-border-subtle bg-surface-elevated hover:bg-surface-overlay text-xs text-ink-muted transition-colors">
+        <button type="button" onClick={onOpenCmdK} title="命令面板 (⌘K / Ctrl+K)" className="hidden md:flex flex-shrink-0 items-center gap-1 h-8 px-2 ml-1 rounded border border-border-subtle bg-surface-elevated hover:bg-surface-overlay text-xs text-ink-muted transition-colors">
           <Icon.Search size={12}/> <span>跳轉...</span> <Kbd>⌘K</Kbd>
         </button>
         {/* Touch targets bumped to 44×44 on mobile (F9); desktop keeps the
             original 32×32 visual size via the md: override. */}
-        <button onClick={onToggleFocus} title="夜深 / 專注模式 (Ctrl+.)"
+        {/* CMP-F18: focus mode and the theme toggle sat side by side rendering
+            the SAME Moon glyph, so the two buttons were indistinguishable.
+            Focus mode now uses MoonStar; the theme toggle keeps Moon/Sun. */}
+        <button type="button" onClick={onToggleFocus} title="夜深 / 專注模式 (Ctrl+.)"
           aria-pressed={!!focusMode}
           aria-label={focusMode ? '關閉專注模式' : '啟用專注模式（隱藏資訊級警報）'}
           className={`flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center transition-colors ${focusMode ? 'text-sev-info bg-sev-info/10 ring-1 ring-sev-info/60' : 'text-ink-muted hover:text-ink-primary hover:bg-surface-elevated'}`}>
-          <Icon.Moon size={16} aria-hidden="true"/>
+          <Icon.MoonStar size={16} aria-hidden="true"/>
         </button>
-        <button onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" aria-label="開啟鍵盤捷徑說明" className="flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
+        <button type="button" onClick={onOpenShortcuts} title="鍵盤捷徑 (?)" aria-label="開啟鍵盤捷徑說明" className="flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
           <Icon.Keyboard size={16} aria-hidden="true"/>
         </button>
-        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Theme (T)"
+        <button type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Theme (T)"
           aria-label={theme === 'dark' ? '切換為淺色主題' : '切換為深色主題'}
           className="flex-shrink-0 w-11 h-11 md:w-8 md:h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated transition-colors">
           {theme === 'dark' ? <Icon.Moon size={16} aria-hidden="true"/> : <Icon.Sun size={16} aria-hidden="true"/>}
@@ -502,15 +655,17 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             operator arm audio explicitly if the auto-listener somehow missed. */}
         {window.SDPRS_AUDIO && window.SDPRS_AUDIO.isAvailable() && (
           <button
+            type="button"
             onClick={() => { try { window.SDPRS_AUDIO.arm(); } catch (_) {} }}
             title={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效 (瀏覽器需要一次使用者互動)'}
             disabled={audioArmed}
-            className={`hidden md:inline-flex flex-shrink-0 items-center gap-1 h-6 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
+            className={`hidden md:inline-flex flex-shrink-0 items-center gap-1 h-8 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
           >
             {audioArmed ? '🔊 音效已啟用' : '🔇 點擊啟用音效'}
           </button>
         )}
         <button
+          type="button"
           onClick={onOpenMuteDrawer}
           title={`音效 (M) — ${activeMutes} 個來源已抑制`}
           aria-pressed={activeMutes > 0}
@@ -525,7 +680,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
           {activeMutes > 0 && <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sev-warn text-[9px] font-bold text-black flex items-center justify-center tnum">{activeMutes}</span>}
         </button>
         <div className="flex-shrink-0 w-px h-6 bg-border-subtle mx-1"></div>
-        <button onClick={() => setLogoutConfirmOpen(true)} className="flex-shrink-0 flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
+        <button type="button" onClick={() => setLogoutConfirmOpen(true)} className="flex-shrink-0 flex items-center gap-2 h-8 pl-1 pr-2 rounded hover:bg-surface-elevated transition-colors" title="點擊登出">
           <div className="w-6 h-6 rounded-full bg-gradient-to-br from-sev-info to-purple-500 flex items-center justify-center text-[10px] font-semibold text-white">
             {(window.SDPRS_USER || '?').slice(0, 2).toUpperCase()}
           </div>
@@ -537,12 +692,12 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
         </button>
       </div>
       {logoutConfirmOpen && (
-        <div ref={logoutDialogRef} role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title" className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-4" onClick={() => setLogoutConfirmOpen(false)}>
+        <div ref={logoutDialogRef} role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title" className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-4" {...logoutBackdrop}>
           <div className="bg-surface-elevated border border-border-strong rounded-lg p-5 max-w-xs w-full shadow-2xl" onClick={e => e.stopPropagation()}>
             <div id="logout-confirm-title" className="text-sm font-semibold text-ink-primary mb-3">確定要登出嗎？</div>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setLogoutConfirmOpen(false)} className="px-3 h-8 rounded text-sm text-ink-secondary hover:bg-surface-overlay">取消</button>
-              <button ref={logoutConfirmBtnRef} onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
+              <button ref={logoutCancelBtnRef} type="button" onClick={() => setLogoutConfirmOpen(false)} className="px-3 h-8 rounded text-sm text-ink-secondary hover:bg-surface-overlay">取消</button>
+              <button type="button" onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
             </div>
           </div>
         </div>
@@ -601,19 +756,7 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
         closeDrawer();
         return;
       }
-      if (e.key === 'Tab' && drawerRef.current) {
-        const focusable = drawerRef.current.querySelectorAll(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-        );
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey) {
-          if (document.activeElement === first) { e.preventDefault(); last.focus(); }
-        } else {
-          if (document.activeElement === last) { e.preventDefault(); first.focus(); }
-        }
-      }
+      if (e.key === 'Tab') trapTab(e, drawerRef.current);
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -639,6 +782,7 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
           return (
             <button
               key={item.id}
+              type="button"
               onClick={() => handleNavClick(item.id)}
               className={`w-full flex items-center gap-2.5 h-9 px-2.5 rounded text-sm transition-colors group relative ${active ? 'bg-surface-elevated text-ink-primary' : 'text-ink-secondary hover:bg-surface-elevated/60 hover:text-ink-primary'}`}
             >
@@ -658,8 +802,9 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
         <div className="text-[10px] uppercase tracking-widest text-ink-muted font-semibold px-1">密度</div>
         <div className="flex bg-surface-base border border-border-subtle rounded p-0.5">
           {['compact','comfortable'].map(d => (
-            <button key={d} onClick={() => setDensity(d)}
-              className={`flex-1 text-[11px] py-1 rounded transition-colors ${density === d ? 'bg-surface-overlay text-ink-primary' : 'text-ink-muted hover:text-ink-secondary'}`}>
+            <button key={d} type="button" onClick={() => setDensity(d)}
+              aria-pressed={density === d}
+              className={`flex-1 h-8 text-[11px] rounded transition-colors ${density === d ? 'bg-surface-overlay text-ink-primary' : 'text-ink-muted hover:text-ink-secondary'}`}>
               {d === 'compact' ? '緊湊' : '舒適'}
             </button>
           ))}
@@ -746,7 +891,7 @@ const Sparkline = React.memo(({ data, width = 240, height = 28 }) => {
         const h = Math.max(2, (v / max) * (height - 2));
         const isLast = i === data.length - 1;
         return (
-          <div key={i} className={`flex-1 ${surge && i >= data.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} alerts`}/>
+          <div key={i} className={`flex-1 ${surge && i >= data.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} 則警報`}/>
         );
       })}
     </div>
@@ -819,6 +964,18 @@ const ShortcutsModal = ({ open, onClose }) => {
   const dialogRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
+  // CMP-F1: hold onClose in a ref so the lifecycle effect below can depend on
+  // `open` alone.
+  const onCloseRef = useLatestRef(onClose);
+  const backdrop = useBackdropDismiss(onClose);
+
+  // CMP-F12: the search box kept whatever the previous operator typed. On a
+  // shared 24/7 console the next person pressing `?` saw a pre-filtered list
+  // (often "找不到符合的捷徑") and concluded the help was broken. Reset on open.
+  React.useEffect(() => {
+    if (open) setQ('');
+  }, [open]);
+
   React.useEffect(() => {
     if (!open) return;
     lastFocusedRef.current = document.activeElement;
@@ -826,22 +983,10 @@ const ShortcutsModal = ({ open, onClose }) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
         e.stopPropagation();
-        onClose();
+        onCloseRef.current && onCloseRef.current();
         return;
       }
-      if (e.key === 'Tab' && dialogRef.current) {
-        const focusable = dialogRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      if (e.key === 'Tab') trapTab(e, dialogRef.current);
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
@@ -850,14 +995,17 @@ const ShortcutsModal = ({ open, onClose }) => {
         try { lastFocusedRef.current.focus(); } catch (_) {}
       }
     };
-  }, [open, onClose]);
+    // CMP-F1: `onClose` deliberately omitted — app.jsx recreates it on every
+    // render, so including it re-ran this effect on every 20s poll and every
+    // WS alert, bouncing focus out of the modal mid-keystroke.
+  }, [open]);
   if (!open) return null;
   const matches = SHORTCUTS.filter(s =>
     !q || s.label.toLowerCase().includes(q.toLowerCase()) || s.keys.some(k => k.toLowerCase().includes(q.toLowerCase())) || s.cat.toLowerCase().includes(q.toLowerCase())
   );
   const byCat = matches.reduce((acc, s) => { (acc[s.cat] = acc[s.cat] || []).push(s); return acc; }, {});
   return (
-    <div className="fixed inset-0 z-[70] bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] bg-surface-base/80 backdrop-blur-sm flex items-center justify-center p-6" {...backdrop}>
       <div
         ref={dialogRef}
         role="dialog"
@@ -868,7 +1016,7 @@ const ShortcutsModal = ({ open, onClose }) => {
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
           <h2 className="text-base font-semibold flex items-center gap-2"><Icon.Keyboard size={18}/> 鍵盤捷徑</h2>
-          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button type="button" onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="w-8 h-8 -mr-1.5 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated"><Icon.X size={18}/></button>
         </div>
         <div className="px-5 pt-3 pb-2 border-b border-border-subtle">
           <div className="relative">
@@ -920,7 +1068,44 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   const lastFocusedRef = useRef(null);
   // Inline error for the "解除" unsnooze API call; keyed by node id.
   const [unsnoozeErr, setUnsnoozeErr] = useState(null);
+  // CMP-F7: which node ids currently have an in-flight 解除 request, plus a
+  // flag for 解除所有. The Set drives the visual disabled state; the ref is
+  // the actual double-submit guard (state updates are async — two clicks
+  // inside one React batch would both read the same stale state and both
+  // fire). Same ref-guard pattern already proven on the single-action paths.
+  const [unsnoozing, setUnsnoozing] = useState(() => new Set());
+  const [unsnoozingAll, setUnsnoozingAll] = useState(false);
+  const inFlightRef = useRef(new Set());
+  const allInFlightRef = useRef(false);
+  // CMP-F13: the test-audio confirmation used to be written straight into a
+  // DOM node via getElementById + an untracked setTimeout. If the operator
+  // closed the drawer inside the 1.5s window the timer fired against a
+  // detached node, and nothing ever cleared pending timers on unmount. Now
+  // it's ordinary React state with a tracked timer.
+  const [testFeedback, setTestFeedback] = useState('');
+  const testTimerRef = useRef(null);
   const isTop = useOverlayTop(open);
+  // CMP-F1: stable close handle so the lifecycle effect can depend on `open`.
+  const onCloseRef = useLatestRef(onClose);
+  const backdrop = useBackdropDismiss(onClose);
+
+  // CMP-F12: a failed 解除 left its red error line rendered; reopening the
+  // drawer (even hours later, even on a different shift) showed the stale
+  // failure as if it had just happened. Clear transient state on each open.
+  useEffect(() => {
+    if (!open) return;
+    setUnsnoozeErr(null);
+    setTestFeedback('');
+    setUnsnoozing(new Set());
+    setUnsnoozingAll(false);
+    inFlightRef.current = new Set();
+    allInFlightRef.current = false;
+  }, [open]);
+
+  // CMP-F13: clear any pending test-feedback timer on unmount.
+  useEffect(() => () => {
+    if (testTimerRef.current) clearTimeout(testTimerRef.current);
+  }, []);
   // No local countdown ticker: n.snoozeMin is already a whole-minute value
   // from api.jsx mapNode and only refreshes on the parent poll (~20s). A
   // sub-minute setInterval would just re-render without changing the number,
@@ -943,22 +1128,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
         e.stopPropagation();
-        onClose();
+        onCloseRef.current && onCloseRef.current();
         return;
       }
-      if (e.key === 'Tab' && drawerRef.current) {
-        const focusable = drawerRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      if (e.key === 'Tab') trapTab(e, drawerRef.current);
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -970,7 +1143,11 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
         try { el.focus(); } catch (_) {}
       }
     };
-  }, [open, onClose]);
+    // CMP-F1: `onClose` deliberately omitted from the deps — see the note on
+    // useLatestRef. With it, every poll tick re-ran this effect, which restored
+    // focus to the mute button behind the drawer and then re-focused the
+    // heading, so a half-typed interaction was interrupted every ~20s.
+  }, [open]);
   if (!open) return null;
   // Use prop-supplied nodes (React state from caller — always fresh).
   const nodeList = Array.isArray(nodes) ? nodes : [];
@@ -980,11 +1157,12 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // the visual "▶ 播放測試: …" pulse so operators see confirmation even when
   // the browser hasn't been armed yet.
   const playTest = (severity, label) => {
-    const node = document.getElementById('test-audio-feedback');
-    if (node) {
-      node.textContent = `▶ 播放測試: ${label}`;
-      setTimeout(() => { if (node) node.textContent = ''; }, 1500);
-    }
+    setTestFeedback(`▶ 播放測試: ${label}`);
+    if (testTimerRef.current) clearTimeout(testTimerRef.current);
+    testTimerRef.current = setTimeout(() => {
+      testTimerRef.current = null;
+      setTestFeedback('');
+    }, 1500);
     if (window.SDPRS_AUDIO) {
       try {
         if (!window.SDPRS_AUDIO.isArmed()) window.SDPRS_AUDIO.arm();
@@ -995,9 +1173,18 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // Unsnooze a single node via api.jsx. Only mutate local state after the
   // server confirms; otherwise the next poll (~20s) resurfaces the node and
   // the operator's action looks like it did nothing.
+  // CMP-F7: 解除 had no in-flight guard. A slow POST during a storm meant the
+  // operator clicked again, firing a second unsnooze for the same node; the
+  // second response (often a 404/409 for an already-unsnoozed node) then
+  // painted a red failure over an action that had actually succeeded.
   const unsnoozeOne = async (nid) => {
+    if (inFlightRef.current.has(nid) || allInFlightRef.current) return;
+    inFlightRef.current.add(nid);
+    setUnsnoozing(new Set(inFlightRef.current));
     setUnsnoozeErr(null);
     if (!window.SDPRS_API || typeof window.SDPRS_API.unsnoozeNode !== 'function') {
+      inFlightRef.current.delete(nid);
+      setUnsnoozing(new Set(inFlightRef.current));
       setUnsnoozeErr({ nid, msg: '解除功能尚未就緒' });
       return;
     }
@@ -1007,6 +1194,9 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     } catch (err) {
       console.error('unsnooze failed', err);
       setUnsnoozeErr({ nid, msg: '伺服器解除失敗，請重試' });
+    } finally {
+      inFlightRef.current.delete(nid);
+      setUnsnoozing(new Set(inFlightRef.current));
     }
   };
   // Unsnooze all snoozed nodes. Preserve global + lightning flags so an
@@ -1014,9 +1204,24 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
   // silently drop their intentional global mute. Errors on any node are
   // collected and surfaced without wiping the remaining flags.
   const unsnoozeAll = async () => {
-    setUnsnoozeErr(null);
+    // CMP-F7: same double-submit guard as unsnoozeOne. Without it a second
+    // click re-issued the whole batch while the first was still settling.
+    if (allInFlightRef.current || inFlightRef.current.size > 0) return;
     const targets = [...muteState.nodes];
-    if (window.SDPRS_API && typeof window.SDPRS_API.unsnoozeNode === 'function' && targets.length > 0) {
+    if (targets.length === 0) return;
+    // CMP-F18: the old `else` branch cleared muteState.nodes even when the
+    // unsnooze API was unavailable. That wiped snoozes the SERVER still holds,
+    // so the operator saw an empty list, believed every node was live again,
+    // and got no alert tone until the next poll re-surfaced them. Never clear
+    // state we could not confirm — say so instead.
+    if (!window.SDPRS_API || typeof window.SDPRS_API.unsnoozeNode !== 'function') {
+      setUnsnoozeErr({ nid: null, msg: '解除功能尚未就緒' });
+      return;
+    }
+    allInFlightRef.current = true;
+    setUnsnoozingAll(true);
+    setUnsnoozeErr(null);
+    try {
       const results = await Promise.allSettled(targets.map(nid => window.SDPRS_API.unsnoozeNode(nid)));
       // Only remove nodes whose API call actually succeeded — a blanket
       // clear on partial failure silently drops still-snoozed nodes from
@@ -1033,12 +1238,21 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
       if (failedCount > 0) {
         setUnsnoozeErr({ nid: null, msg: `${failedCount} 個節點解除失敗` });
       }
-    } else {
-      setMuteState(prev => ({ ...prev, nodes: [] }));
+    } catch (err) {
+      // Contract C: this is fired un-awaited from onClick, so anything thrown
+      // past the try block would surface as an unhandled promise rejection —
+      // invisible to the operator, who would just watch the button sit in
+      // 「解除中…」. allSettled never rejects, but setMuteState can throw if a
+      // consumer's reducer does; report it rather than swallow it silently.
+      console.error('unsnoozeAll failed', err);
+      setUnsnoozeErr({ nid: null, msg: '解除失敗，請重試' });
+    } finally {
+      allInFlightRef.current = false;
+      setUnsnoozingAll(false);
     }
   };
   return (
-    <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-surface-base/60 backdrop-blur-sm flex justify-end" {...backdrop}>
       <div
         ref={drawerRef}
         role="dialog"
@@ -1056,7 +1270,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
             <Icon.VolumeX size={18} className={activeCount > 0 ? 'text-sev-warn' : ''}/>
             音效抑制 / 音量
           </h2>
-          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button type="button" onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="w-8 h-8 -mr-1.5 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated"><Icon.X size={18}/></button>
         </div>
 
         <div className="p-5 space-y-4">
@@ -1078,12 +1292,13 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
               <div className="flex items-center justify-between mt-3 text-xs">
                 <span className="text-ink-muted">測試音效:</span>
                 <div className="flex gap-1">
-                  <button onClick={() => playTest('critical', '嚴重')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-critical/15">嚴重</button>
-                  <button onClick={() => playTest('warning', '警告')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-warn/15">警告</button>
-                  <button onClick={() => playTest('ack', '確認')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2 h-6 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-info/15">確認</button>
+                  <button type="button" onClick={() => playTest('critical', '嚴重')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2.5 h-8 bg-sev-critical/15 text-sev-critical border border-sev-critical/30 rounded text-[10px] font-medium hover:bg-sev-critical/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-critical/15">嚴重</button>
+                  <button type="button" onClick={() => playTest('warning', '警告')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2.5 h-8 bg-sev-warn/15 text-sev-warn border border-sev-warn/30 rounded text-[10px] font-medium hover:bg-sev-warn/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-warn/15">警告</button>
+                  <button type="button" onClick={() => playTest('ack', '確認')} disabled={muteState.global} title={muteState.global ? '已靜音 — 請先取消靜音' : undefined} className="px-2.5 h-8 bg-sev-info/15 text-sev-info border border-sev-info/30 rounded text-[10px] font-medium hover:bg-sev-info/25 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-info/15">確認</button>
                 </div>
               </div>
-              <div id="test-audio-feedback" className="text-[10px] text-sev-info font-mono tnum mt-1 h-4"></div>
+              {/* CMP-F13: React-rendered (was getElementById + textContent). */}
+              <div id="test-audio-feedback" role="status" aria-live="polite" className="text-[10px] text-sev-info font-mono tnum mt-1 h-4">{testFeedback}</div>
             </div>
           </div>
 
@@ -1105,12 +1320,14 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                 <div className="text-xs text-ink-muted mt-0.5">影響所有警報音 (操作確認音不受影響)</div>
               </div>
               <button
+                type="button"
+                aria-pressed={!!muteState.global}
                 onClick={() => {
                   const next = !muteState.global;
                   setMuteState(prev => ({ ...prev, global: next }));
                   if (window.SDPRS_AUDIO) { try { window.SDPRS_AUDIO.setMuted(next); } catch (_) {} }
                 }}
-                className={`px-2.5 h-6 rounded text-xs font-medium ${muteState.global ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
+                className={`px-3 h-8 rounded text-xs font-medium ${muteState.global ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
               >
                 {muteState.global ? '靜音中' : '正常'}
               </button>
@@ -1132,15 +1349,26 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                   // api.jsx mapNode — only render provenance when snoozedBy
                   // is truthy (never fake).
                   const remain = n?.snoozeMin;
-                  const snoozeAtText = n?.snoozedAt
-                    ? (() => {
-                        try {
-                          return new Date(n.snoozedAt).toLocaleTimeString('zh-TW', {
-                            hour: '2-digit', minute: '2-digit', hour12: false,
-                          });
-                        } catch (_) { return ''; }
-                      })()
-                    : '';
+                  // Contract A: `snoozedAt` is now epoch ms (it used to be a raw
+                  // string that skipped parseTs and rendered 8h off — SHL-3).
+                  // Epoch ms is absolute, so toLocaleTimeString lands on the
+                  // right Macau wall-clock time. A numeric string is accepted
+                  // too so a mid-migration payload can't produce "Invalid Date".
+                  const snoozeAtText = (() => {
+                    const raw = n?.snoozedAt;
+                    if (raw == null || raw === '') return '';
+                    const ms = typeof raw === 'number'
+                      ? raw
+                      : (/^\d+$/.test(String(raw)) ? Number(raw) : raw);
+                    try {
+                      const d = new Date(ms);
+                      if (isNaN(d.getTime())) return '';
+                      return d.toLocaleTimeString('zh-TW', {
+                        hour: '2-digit', minute: '2-digit', hour12: false,
+                      });
+                    } catch (_) { return ''; }
+                  })();
+                  const busy = unsnoozing.has(nid) || unsnoozingAll;
                   return (
                     <div key={nid} className="flex items-center gap-2 bg-surface-elevated border border-border-subtle rounded p-2.5">
                       <div className="flex-1">
@@ -1158,14 +1386,17 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                         )}
                       </div>
                       <button
+                        type="button"
                         onClick={() => unsnoozeOne(nid)}
-                        className="text-ink-muted hover:text-ink-primary text-xs px-2 h-6 rounded bg-surface-overlay"
-                      >解除</button>
+                        disabled={busy}
+                        aria-busy={busy}
+                        className="text-ink-muted hover:text-ink-primary text-xs px-3 h-8 rounded bg-surface-overlay disabled:opacity-40 disabled:cursor-not-allowed"
+                      >{unsnoozing.has(nid) ? '解除中…' : '解除'}</button>
                     </div>
                   );
                 })}
                 {unsnoozeErr && (
-                  <div className="text-[10px] text-sev-critical mt-1 px-1">
+                  <div role="status" aria-live="polite" className="text-[10px] text-sev-critical mt-1 px-1">
                     {unsnoozeErr.nid ? `${unsnoozeErr.nid}: ` : ''}{unsnoozeErr.msg}
                   </div>
                 )}
@@ -1173,25 +1404,37 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
             )}
           </div>
 
-          {/* Lightning */}
+          {/* Lightning — API-F2 / SHL-1: this used to be labelled and described
+              as an automatic weather-driven mute ("雷擊自動靜音" / "10km 內
+              偵測到雷擊時自動抑制" / "● 觸發中"), wired to a `weather` WS event
+              that is not in api.jsx's whitelist and that no backend code
+              ever emits — so it never once auto-triggered. The toggle itself
+              was always a real, working client-side mute (it genuinely skips
+              the alert tone in the effects above); only the copy lied about
+              *why* it turns on. Relabelled as the honest, purely
+              operator-armed manual mute it has always been. `nearestKm` is
+              kept as read-only reference context (real data from
+              window.WEATHER), not as evidence of automatic activation. */}
           <div>
-            <div className="text-[10px] uppercase tracking-widest text-ink-muted font-semibold mb-2">天氣觸發</div>
+            <div className="text-[10px] uppercase tracking-widest text-ink-muted font-semibold mb-2">雷擊靜音</div>
             <div className="flex items-center justify-between bg-surface-elevated border border-border-subtle rounded p-3">
               <div className="flex-1">
                 <div className="text-sm font-medium flex items-center gap-1.5">
                   <Icon.Zap size={12} className="text-sev-warn"/>
-                  雷擊自動靜音
+                  雷擊警報手動靜音
                 </div>
-                <div className="text-xs text-ink-muted mt-0.5">10km 內偵測到雷擊時自動抑制</div>
+                <div className="text-xs text-ink-muted mt-0.5">操作員手動開啟 — 雷擊期間暫停警報音效 (不會自動觸發)</div>
                 {muteState.lightning && (
                   <div className="text-[10px] text-sev-warn mt-1 font-mono tnum">
-                    ● 觸發中{nearestKm != null ? ` — 最近雷擊 ${nearestKm}km` : ''}
+                    ● 手動啟用中{nearestKm != null ? ` — 參考：最近雷擊 ${nearestKm}km` : ''}
                   </div>
                 )}
               </div>
               <button
+                type="button"
+                aria-pressed={!!muteState.lightning}
                 onClick={() => setMuteState(prev => ({ ...prev, lightning: !prev.lightning }))}
-                className={`px-2.5 h-6 rounded text-xs font-medium ${muteState.lightning ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
+                className={`px-3 h-8 rounded text-xs font-medium ${muteState.lightning ? 'bg-sev-warn text-black' : 'bg-surface-overlay text-ink-muted'}`}
               >
                 {muteState.lightning ? '啟用' : '停用'}
               </button>
@@ -1199,11 +1442,13 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
           </div>
 
           <button
+            type="button"
             onClick={unsnoozeAll}
-            disabled={muteState.nodes.length === 0}
+            disabled={muteState.nodes.length === 0 || unsnoozingAll || unsnoozing.size > 0}
+            aria-busy={unsnoozingAll}
             className="w-full mt-2 h-9 bg-sev-info hover:bg-blue-600 text-white rounded text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-sev-info"
           >
-            解除所有節點延期
+            {unsnoozingAll ? '解除中…' : '解除所有節點延期'}
           </button>
         </div>
       </div>
@@ -1244,7 +1489,7 @@ const FilterChip = ({ active, onClick, children, count, onClear }) => {
     onClear && onClear();
   };
   return (
-    <button onClick={onClick}
+    <button type="button" onClick={onClick}
       onKeyDown={onClear ? handleKeyDown : undefined}
       aria-pressed={!!active}
       className={`inline-flex items-center gap-1 px-2 h-6 rounded text-xs border transition-colors ${active ? 'bg-sev-info/15 text-sev-info border-sev-info/40' : 'bg-surface-elevated text-ink-secondary border-border-subtle hover:border-border-strong'}`}>
@@ -1281,14 +1526,22 @@ const OperatorsCluster = ({ operators, currentUser }) => {
     <div className="flex-shrink-0 flex items-center gap-1 h-6 px-1.5 rounded border border-border-subtle bg-surface-elevated">
       <span className="text-[10px] text-ink-muted">線上</span>
       <div className="flex -space-x-1">
-        {operators.map(op => (
-          <div key={op.id}
-            title={`${op.name} · ${op.status === 'active' ? '活躍' : `閒置 ${op.lastSeen}s`}`}
-            className={`relative w-5 h-5 rounded-full border-2 border-surface-panel flex items-center justify-center text-[9px] font-bold ${op.id === currentUser ? 'bg-gradient-to-br from-sev-info to-purple-500 text-white' : 'bg-gradient-to-br from-emerald-600 to-teal-500 text-white'}`}>
-            {op.initials}
-            <span className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-surface-panel ${op.status === 'active' ? 'bg-sev-ok' : 'bg-ink-muted'}`}></span>
-          </div>
-        ))}
+        {/* CMP-F10: the活躍/閒置 state was carried by dot colour alone. The
+            title already spelled it out for mouse users; the aria-label now
+            does the same for screen readers and the dot is marked decorative. */}
+        {operators.map(op => {
+          const statusText = op.status === 'active' ? '活躍' : `閒置 ${op.lastSeen}s`;
+          return (
+            <div key={op.id}
+              title={`${op.name} · ${statusText}`}
+              role="img"
+              aria-label={`${op.name} · ${statusText}`}
+              className={`relative w-5 h-5 rounded-full border-2 border-surface-panel flex items-center justify-center text-[9px] font-bold ${op.id === currentUser ? 'bg-gradient-to-br from-sev-info to-purple-500 text-white' : 'bg-gradient-to-br from-emerald-600 to-teal-500 text-white'}`}>
+              <span aria-hidden="true">{op.initials}</span>
+              <span aria-hidden="true" className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-surface-panel ${op.status === 'active' ? 'bg-sev-ok' : 'bg-ink-muted'}`}></span>
+            </div>
+          );
+        })}
       </div>
       <span className="text-[10px] font-mono tnum text-ink-secondary ml-0.5">{operators.length}</span>
     </div>
@@ -1300,8 +1553,8 @@ const OperatorsCluster = ({ operators, currentUser }) => {
 const StaleAckPill = ({ count, onClick }) => {
   if (!count) return null;
   return (
-    <button onClick={onClick}
-      className="inline-flex items-center gap-1.5 h-6 px-2 rounded border border-sev-warn/40 bg-sev-warn/10 text-sev-warn text-xs font-medium hover:bg-sev-warn/20 transition-colors whitespace-nowrap">
+    <button type="button" onClick={onClick}
+      className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded border border-sev-warn/40 bg-sev-warn/10 text-sev-warn text-xs font-medium hover:bg-sev-warn/20 transition-colors whitespace-nowrap">
       <Icon.Clock size={12}/> <span className="tnum">逾期認領 {count}</span>
     </button>
   );
@@ -1311,16 +1564,25 @@ const StaleAckPill = ({ count, onClick }) => {
 
 const NewAlertBanner = ({ count, onClick }) => {
   if (!count) return null;
+  // CMP-F18: `role="alert"` on the <button> overrode its button role, so
+  // screen readers announced the text but never that it was operable — and an
+  // element that is its own live region re-announces itself on every count
+  // change while focus sits on it. The announcement now lives in a separate
+  // visually-hidden live region (the same pattern app.jsx uses for toasts) and
+  // the button is left as a plain, properly-labelled button.
   return (
-    <button onClick={onClick}
-      role="alert"
-      aria-live="assertive"
-      aria-label={`${count} 個新警報 — 點擊或按上鍵跳轉`}
-      className="new-alert-banner fixed top-16 left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors">
-      <Icon.ArrowUp size={14} strokeWidth={2.5} aria-hidden="true"/>
-      <span className="text-sm font-semibold tnum" aria-hidden="true">{count} 新警報</span>
-      <Kbd aria-hidden="true">↑</Kbd>
-    </button>
+    <>
+      <div role="status" aria-live="assertive" aria-atomic="true" className="sr-only-live">
+        {`${count} 個新警報`}
+      </div>
+      <button type="button" onClick={onClick}
+        aria-label={`${count} 個新警報 — 點擊或按上鍵跳轉`}
+        className="new-alert-banner fixed top-16 left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 h-8 px-3 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors">
+        <Icon.ArrowUp size={14} strokeWidth={2.5} aria-hidden="true"/>
+        <span className="text-sm font-semibold tnum" aria-hidden="true">{count} 新警報</span>
+        <Kbd aria-hidden="true">↑</Kbd>
+      </button>
+    </>
   );
 };
 
@@ -1348,7 +1610,7 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
           <Icon.ClipboardList size={14}/>
           <span className="text-sm font-semibold">班次接班摘要 · {operator}</span>
         </div>
-        <button onClick={onDismiss} aria-label="關閉" title="關閉" className="text-ink-muted hover:text-ink-primary"><Icon.X size={14}/></button>
+        <button type="button" onClick={onDismiss} aria-label="關閉" title="關閉" className="w-8 h-8 -mr-1.5 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated"><Icon.X size={14}/></button>
       </div>
       <div className="p-4 space-y-3">
         <div>
@@ -1375,6 +1637,7 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
           <p className="text-ink-secondary leading-relaxed">{recent}</p>
         </div>
         <button
+          type="button"
           onClick={onViewHandover ?? (() => {})}
           className="w-full h-8 bg-sev-info text-white rounded text-xs font-semibold hover:bg-blue-600"
         >
@@ -1393,6 +1656,9 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const paletteRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
+  // CMP-F1: stable close handle so the lifecycle effect can depend on `open`.
+  const onCloseRef = useLatestRef(onClose);
+  const backdrop = useBackdropDismiss(onClose);
 
   React.useEffect(() => {
     if (open) { setQ(''); setHi(0); }
@@ -1408,22 +1674,10 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
       if (e.key === 'Escape') {
         if (!isTop()) return;
         e.stopPropagation();
-        onClose();
+        onCloseRef.current && onCloseRef.current();
         return;
       }
-      if (e.key === 'Tab' && paletteRef.current) {
-        const focusable = paletteRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      if (e.key === 'Tab') trapTab(e, paletteRef.current);
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
@@ -1432,7 +1686,13 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
         try { lastFocusedRef.current.focus(); } catch (_) {}
       }
     };
-  }, [open, onClose]);
+    // CMP-F1: `onClose` deliberately omitted from the deps. This palette has
+    // no explicit focus call (it relies on the input's autoFocus, which only
+    // fires on mount), so an effect re-run mid-session restored focus to the
+    // element BEHIND the palette and never took it back — the operator's next
+    // keystrokes went to the global single-key hotkeys instead of the search
+    // box. This was the worst instance of the bug.
+  }, [open]);
 
   if (!open) return null;
 
@@ -1458,19 +1718,35 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const fire = (it) => {
     if (it.kind === 'nav') onNav(it.id);
     else if (it.kind === 'alert') { onNav('alerts'); onSelectAlert(it.id); }
-    else if (it.kind === 'node') { onNav('status'); }
+    // CMP-F11: the chosen node id used to be thrown away — picking
+    // "節點: CAM-07" from the palette dumped the operator on the generic
+    // status page with no indication of which node they had asked for. There
+    // is no node-selection prop on this component (and adding one would change
+    // the public surface), so the id now rides the one channel that exists:
+    // `onCmd`, whose app.jsx handler ignores ids it doesn't recognise. That
+    // makes this change safe today and a one-line wire-up away from opening
+    // the node panel — see the handoff note in the fix report.
+    else if (it.kind === 'node') { onNav('status'); onCmd(`node:${it.id}`); }
     else if (it.kind === 'cmd') onCmd(it.id);
     onClose();
   };
 
   const onKey = (e) => {
+    // CMP-F2: IME guard. With a zh-TW input method, pressing Enter to COMMIT a
+    // Bopomofo/Cangjie composition also delivered a keydown here — firing the
+    // highlighted command and closing the palette while the operator was still
+    // typing the node name. Arrow keys were likewise stolen from candidate
+    // selection. `isComposing` is the spec property; `keyCode === 229` covers
+    // Firefox, which delivers keydown before the IME swallows the key. The
+    // app-level shortcut handler in app.jsx already guards exactly this way.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(matches.length - 1, h + 1)); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, h - 1)); }
     else if (e.key === 'Enter') { e.preventDefault(); matches[hi] && fire(matches[hi]); }
   };
 
   return (
-    <div className="fixed inset-0 z-[70] bg-surface-base/60 backdrop-blur-sm flex items-start justify-center pt-24" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] bg-surface-base/60 backdrop-blur-sm flex items-start justify-center pt-24" {...backdrop}>
       <div
         ref={paletteRef}
         role="dialog"
@@ -1481,6 +1757,9 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
       >
         <div className="flex items-center px-3 border-b border-border-subtle">
           <Icon.Search size={16} className="text-ink-muted"/>
+          {/* CMP-F18: aria-expanded was hardcoded "true"; it must track whether
+              the listbox actually has results, or a screen reader announces an
+              expanded popup over the empty 「找不到符合的項目」 state. */}
           <input
             autoFocus
             value={q}
@@ -1490,7 +1769,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
             aria-label="搜尋指令、警報和頁面"
             className="flex-1 h-11 px-3 bg-transparent text-sm placeholder-ink-muted focus:outline-none"
             role="combobox"
-            aria-expanded="true"
+            aria-expanded={matches.length > 0}
             aria-controls="cmdk-listbox"
             aria-autocomplete="list"
             aria-activedescendant={matches.length > 0 ? `cmd-item-${hi}` : undefined}
@@ -1511,6 +1790,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
               const selected = hi === i;
               return (
                 <button key={`${it.kind}-${it.id}-${i}`}
+                  type="button"
                   id={`cmd-item-${i}`}
                   role="option"
                   aria-selected={selected}
@@ -1526,7 +1806,16 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
                     {it.hint && <div className="text-[11px] text-ink-muted font-mono tnum truncate">{it.hint}</div>}
                   </div>
                   {it.sev && <SeverityBadge sev={it.sev} withLabel={false}/>}
-                  {it.kind === 'node' && it.status && <span className={`w-2 h-2 rounded-full bg-sev-${it.status === 'offline' || it.status === 'critical' ? 'critical' : it.status === 'warn' ? 'warn' : 'ok'}`}></span>}
+                  {/* CMP-F10: node status was a bare coloured dot — invisible to
+                      screen readers and unreadable for the ~8% of male operators
+                      with a red/green deficiency, on the exact signal that says
+                      "this camera is down". Dot kept, text label added. */}
+                  {it.kind === 'node' && it.status && (
+                    <span className={`inline-flex items-center gap-1 text-[10px] font-medium whitespace-nowrap ${nodeStatusTextCls(it.status)}`}>
+                      <span aria-hidden="true" className={`w-2 h-2 rounded-full ${nodeStatusDotCls(it.status)}`}></span>
+                      {nodeStatusLabel(it.status)}
+                    </span>
+                  )}
                   <span className="text-[10px] text-ink-dim uppercase font-mono tnum w-12 text-right flex-shrink-0">{it.kind}</span>
                 </button>
               );
@@ -1561,6 +1850,11 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(!!node);
+  // CMP-F1: stable close handle so the lifecycle effect below can key on the
+  // node identity alone. This was the last of the four overlays still listing
+  // `onClose` in its deps.
+  const onCloseRef = useLatestRef(onClose);
+  const backdrop = useBackdropDismiss(onClose);
   React.useEffect(() => {
     if (node) {
       setDraft({ location: node.location || '' });
@@ -1586,22 +1880,14 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
       if (e.key === 'Escape') {
         if (!isTop()) return;
         e.stopPropagation();
-        onClose();
+        onCloseRef.current && onCloseRef.current();
         return;
       }
-      if (e.key === 'Tab' && panelRef.current) {
-        const focusable = panelRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      // CMP-F3: shared disabled-aware trap. The old inline selector matched
+      // disabled buttons — and this panel's last focusable IS 儲存/取消, both
+      // disabled while a location save is in flight, so Tab escaped the
+      // aria-modal exactly during the slow operation the operator was watching.
+      if (e.key === 'Tab') trapTab(e, panelRef.current);
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -1613,7 +1899,13 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
         try { el.focus(); } catch (_) {}
       }
     };
-  }, [node?.id, onClose]);
+    // CMP-F1: `onClose` deliberately omitted — app.jsx recreates it on every
+    // render, so every ~20s poll and every incoming WS alert tore this effect
+    // down (restoring focus to the tile behind the panel) and re-ran it
+    // (yanking focus back to the heading). Mid-edit that meant the location
+    // input lost focus every poll tick and the operator's next characters went
+    // to the global single-key hotkeys instead.
+  }, [node?.id]);
 
   if (!node) return null;
   const nodeAlerts = openAlerts.filter(a => a.node === node.id);
@@ -1652,7 +1944,10 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-surface-base/40 flex justify-end" onClick={onClose}>
+    // CMP-F6: mousedown-anchored dismissal. Selecting the node id or a
+    // half-typed location and releasing the drag over the backdrop used to
+    // close the panel and throw the edit away.
+    <div className="fixed inset-0 z-50 bg-surface-base/40 flex justify-end" {...backdrop}>
       <div
         ref={panelRef}
         role="dialog"
@@ -1668,10 +1963,17 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
             className="flex items-center gap-2 focus:outline-none m-0 text-base font-normal"
           >
             <span className="font-mono text-base font-bold">{node.id}</span>
-            <span className={`w-2 h-2 rounded-full bg-sev-${node.status === 'offline' || node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok'}`}></span>
+            {/* CMP-F10: was a bare coloured dot whose class was built by string
+                interpolation — so an unmapped status fell through to green
+                「正常」, i.e. an unknown node read as healthy. Now a labelled
+                chip from the shared status map, which degrades to 「未知」. */}
+            <span className={`inline-flex items-center gap-1 text-[10px] font-medium whitespace-nowrap ${nodeStatusTextCls(node.status)}`}>
+              <span aria-hidden="true" className={`w-2 h-2 rounded-full ${nodeStatusDotCls(node.status)}`}></span>
+              {nodeStatusLabel(node.status)}
+            </span>
             <span className="text-sm text-ink-secondary">{node.name}</span>
           </h2>
-          <button onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="text-ink-muted hover:text-ink-primary"><Icon.X size={18}/></button>
+          <button type="button" onClick={onClose} aria-label="關閉" title="關閉 (Esc)" className="w-8 h-8 -mr-1.5 rounded flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-elevated"><Icon.X size={18}/></button>
         </div>
         <div className="p-4 space-y-4">
           {/* Snapshot — live JPEG (camera + fresh frame) or fallback icon */}
@@ -1686,14 +1988,16 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold">節點配置</div>
+              {/* CMP-F18: 20px-tall controls in a 24/7 console operated with
+                  gloves on during a typhoon. Bumped to 28px with real padding. */}
               {!editing ? (
-                <button onClick={() => setEditing(true)} className="text-[10px] text-sev-info hover:underline inline-flex items-center gap-1">
+                <button type="button" onClick={() => setEditing(true)} className="text-[10px] text-sev-info hover:underline inline-flex items-center gap-1 h-7 px-1.5 rounded">
                   <Icon.Edit3 size={10}/> 編輯
                 </button>
               ) : (
                 <div className="flex gap-1">
-                  <button onClick={cancelEdits} disabled={saving} className="text-[10px] text-ink-muted hover:text-ink-primary px-1.5 h-5 rounded bg-surface-elevated disabled:opacity-50">取消</button>
-                  <button onClick={saveEdits} disabled={saving} aria-busy={saving} className="text-[10px] text-white px-1.5 h-5 rounded bg-sev-info hover:bg-blue-600 disabled:opacity-50">{saving ? '儲存中…' : '儲存'}</button>
+                  <button type="button" onClick={cancelEdits} disabled={saving} className="text-[10px] text-ink-muted hover:text-ink-primary px-2.5 h-7 rounded bg-surface-elevated disabled:opacity-50">取消</button>
+                  <button type="button" onClick={saveEdits} disabled={saving} aria-busy={saving} className="text-[10px] text-white px-2.5 h-7 rounded bg-sev-info hover:bg-blue-600 disabled:opacity-50">{saving ? '儲存中…' : '儲存'}</button>
                 </div>
               )}
             </div>
@@ -1719,6 +2023,26 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                       setDraft({ ...(draft || {}), location: e.target.value });
                       if (locationError) setLocationError(null);
                     }}
+                    // CMP-F15: the editor had no keyboard commit and Escape
+                    // discarded the draft. Enter now saves (matching every other
+                    // single-field form in the console) and Escape leaves edit
+                    // mode via cancelEdits, which restores the saved value
+                    // instead of leaving a half-typed draft behind. IME-guarded
+                    // so committing a zh-TW composition with Enter doesn't
+                    // submit a half-typed location. stopPropagation keeps
+                    // Escape from also closing the whole panel — one Escape,
+                    // one effect.
+                    onKeyDown={e => {
+                      if (e.isComposing || e.keyCode === 229) return;
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (!saving) saveEdits();
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        cancelEdits();
+                      }
+                    }}
                     placeholder="例: 3F · 西側走廊"
                     aria-invalid={!!locationError}
                     aria-describedby={locationError ? 'node-location-error' : undefined}
@@ -1741,32 +2065,47 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
             </div>
           </div>
 
-          {/* Stats */}
+          {/* Stats
+              Contract A: `heartbeat` / `upload` are `number | null` — the old
+              `999` sentinel is gone. `null` means the node has NEVER reported,
+              which is not the same as "reported 0s ago". The previous code did
+              `node.heartbeat + 's'`, so a never-reported node rendered the
+              literal string 「nulls」, and `null > 30` is false so it was
+              painted calm white. Both age tiles now render 「從未回報」 in the
+              warn colour instead of inventing a number. */}
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="bg-surface-elevated rounded p-2">
               <div className="text-[10px] text-ink-muted">心跳</div>
-              <div className={`font-mono tnum ${node.heartbeat > 30 ? 'text-sev-critical' : 'text-ink-primary'}`}>{node.heartbeat > 60 ? Math.floor(node.heartbeat/60)+'m' : node.heartbeat+'s'}</div>
+              <div className={`font-mono tnum ${node.heartbeat == null ? 'text-sev-warn' : node.heartbeat > 30 ? 'text-sev-critical' : 'text-ink-primary'}`}>
+                {node.heartbeat == null ? '從未回報' : node.heartbeat > 60 ? Math.floor(node.heartbeat/60)+'m' : node.heartbeat+'s'}
+              </div>
             </div>
             <div className="bg-surface-elevated rounded p-2">
               <div className="text-[10px] text-ink-muted">上傳</div>
-              <div className={`font-mono tnum ${node.upload > 60 ? 'text-sev-warn' : 'text-ink-primary'}`}>{node.upload > 60 ? Math.floor(node.upload/60)+'m' : node.upload+'s'}</div>
+              <div className={`font-mono tnum ${node.upload == null ? 'text-sev-warn' : node.upload > 60 ? 'text-sev-warn' : 'text-ink-primary'}`}>
+                {node.upload == null ? '從未回報' : node.upload > 60 ? Math.floor(node.upload/60)+'m' : node.upload+'s'}
+              </div>
             </div>
             {node.type === 'camera' ? (
               <>
                 <div className="bg-surface-elevated rounded p-2">
                   <div className="text-[10px] text-ink-muted">串流</div>
-                  <div className="font-mono tnum">{node.bitrate}Mbps</div>
+                  {/* A missing bitrate rendered 「undefinedMbps」/「nullMbps」. */}
+                  <div className="font-mono tnum">{node.bitrate == null ? '—' : node.bitrate+'Mbps'}</div>
                 </div>
                 <div className="bg-surface-elevated rounded p-2">
                   <div className="text-[10px] text-ink-muted">溫度</div>
-                  <div className="font-mono tnum">{node.temp ? node.temp+'°C' : '—'}</div>
+                  {/* A genuine 0 °C is falsy — the old truthy check reported it
+                      as 「—」 (no reading) on the one metric where 0 matters. */}
+                  <div className="font-mono tnum">{node.temp == null ? '—' : node.temp+'°C'}</div>
                 </div>
               </>
             ) : (
               <>
                 <div className="bg-surface-elevated rounded p-2">
                   <div className="text-[10px] text-ink-muted">水位</div>
-                  <div className={`font-mono tnum ${node.level > 85 ? 'text-sev-critical' : 'text-ink-primary'}`}>{node.level}%</div>
+                  {/* A null level rendered 「%」 with no number at all. */}
+                  <div className={`font-mono tnum ${node.level == null ? 'text-ink-muted' : node.level > 85 ? 'text-sev-critical' : 'text-ink-primary'}`}>{node.level == null ? '—' : node.level+'%'}</div>
                 </div>
                 <div className="bg-surface-elevated rounded p-2">
                   <div className="text-[10px] text-ink-muted">循環</div>
@@ -1790,7 +2129,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
               <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1.5">作用中警報 ({nodeAlerts.length})</div>
               <div className="space-y-1">
                 {nodeAlerts.map(a => (
-                  <button key={a.id} onClick={() => onJumpAlert(a.id)}
+                  <button key={a.id} type="button" onClick={() => onJumpAlert(a.id)}
                     className={`w-full flex items-center gap-2 p-2 rounded border border-border-subtle bg-surface-elevated hover:border-sev-info text-left transition-colors sev-bar ${safeSevMeta(a.sev).bar} relative pl-3`}>
                     <SeverityBadge sev={a.sev} withLabel={false}/>
                     <span className="text-xs flex-1 truncate">{window.alertTypeLabel(a.type)}</span>
@@ -1814,6 +2153,12 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                 {items.map((h, i) => {
                   const alertId = h.alertId || h.id;
                   const clickable = !!(alertId && onSelectAlert);
+                  // CMP-F16: this list is live — a new event unshifts onto the
+                  // front, so index keys made React re-map every row's identity
+                  // and the operator's click could land on a row that had just
+                  // shifted underneath. Prefer the alert id; fall back to a
+                  // content-derived key, and only then to the index.
+                  const rowKey = alertId || `${h.t || ''}-${h.type || ''}-${i}`;
                   const rowCls = `flex items-center gap-2 p-2 rounded bg-surface-elevated text-xs w-full text-left ${clickable ? 'hover:bg-surface-overlay cursor-pointer' : ''}`;
                   const body = (
                     <>
@@ -1825,12 +2170,12 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
                   );
                   if (clickable) {
                     return (
-                      <button key={i} onClick={() => onSelectAlert(alertId)} className={rowCls}>
+                      <button key={rowKey} type="button" onClick={() => onSelectAlert(alertId)} className={rowCls}>
                         {body}
                       </button>
                     );
                   }
-                  return <div key={i} className={rowCls}>{body}</div>;
+                  return <div key={rowKey} className={rowCls}>{body}</div>;
                 })}
               </div>
             )}
@@ -1842,6 +2187,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
               jumps to the Status page where node config lives. */}
           <div>
             <button
+              type="button"
               onClick={() => {
                 onClose();
                 if (typeof onNavigate === 'function') onNavigate('status');
