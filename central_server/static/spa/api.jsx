@@ -324,6 +324,13 @@
       // does not send client_id yet — callers must treat null as
       // "not addressable" and disable the affordance rather than guess.
       clientId: n.client_id || null,
+      // The owning client PC's human-readable name (webcam_clients.name).
+      // DISPLAY ONLY — never send this anywhere; every admin call keys on
+      // clientId above. Null for pump/glass, for an older backend that does
+      // not send client_name, and for a camera whose client row is gone
+      // (server LEFT JOINs so such a row still lists). Consumers must fall
+      // back to clientId when this is null.
+      clientName: n.client_name || null,
       type,
       name,
       location: loc || '—',

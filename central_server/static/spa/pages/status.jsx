@@ -169,7 +169,15 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // webcam_cameras.client_id). The two ids look identical in shape
   // ("webcam_" + 8 hex) and never match, so sending n.id here is a silent,
   // permanent 404. Everything below addresses n.clientId, never n.id.
-  const [deleteTarget, setDeleteTarget] = useState_p(null); // { clientId, cameras: [{id,name}] } | null
+  //
+  // clientName rides along for DISPLAY ONLY: a destructive confirm has to name
+  // the client the way the operator named it (「Bench PC」), not as the opaque
+  // hex id they have never seen. It is nullable (older backend, or a camera
+  // whose client row is gone), so every read of it falls back to clientId —
+  // and clientId is still the ONLY thing ever sent to the API.
+  const [deleteTarget, setDeleteTarget] = useState_p(null); // { clientId, clientName, cameras: [{id,name}] } | null
+  // What to call the client in operator-facing copy. Never used as an id.
+  const clientLabel = (t) => (t && t.clientName) || (t && t.clientId) || '';
   const [deleteBusy, setDeleteBusy] = useState_p(false);
   // Every camera row that belongs to the same client PC. Deleting the client
   // takes ALL of them down, so the confirm dialog has to enumerate them from
@@ -211,7 +219,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
         setDeleteTarget(null);
         setToast({
           tone: 'success',
-          msg: `Webcam 用戶端 ${target.clientId} 已刪除（含 ${(target.cameras || []).length} 支攝影機）`,
+          msg: `Webcam 用戶端「${clientLabel(target)}」已刪除（含 ${(target.cameras || []).length} 支攝影機）`,
         });
         return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
       })
@@ -543,7 +551,12 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                               setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法刪除' });
                               return;
                             }
-                            setDeleteTarget({ clientId: n.clientId, cameras: camerasOfClient(n.clientId) });
+                            setDeleteTarget({
+                              clientId: n.clientId,
+                              // Display-only; null falls back to the id below.
+                              clientName: n.clientName || null,
+                              cameras: camerasOfClient(n.clientId),
+                            });
                           }}
                           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
                           className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -648,9 +661,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 camera that disappears with it, or this is a destructive
                 action with an unstated blast radius. */}
             <p className="text-xs text-ink-secondary mb-1">
-              確定要刪除？將移除 Webcam 用戶端
-              {' '}<span className="font-mono text-ink-primary">{deleteTarget.clientId}</span>
-              {' '}及其全部 {(deleteTarget.cameras || []).length} 支攝影機：
+              確定要刪除？將移除 Webcam 用戶端「
+              <span className={deleteTarget.clientName
+                ? 'text-ink-primary font-bold'
+                : 'font-mono text-ink-primary'}>{clientLabel(deleteTarget)}</span>
+              」及其全部 {(deleteTarget.cameras || []).length} 支攝影機：
             </p>
             <ul className="text-xs text-ink-secondary mb-2 max-h-32 overflow-y-auto pl-1">
               {(deleteTarget.cameras || []).map(c => (

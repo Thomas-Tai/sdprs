@@ -58,6 +58,15 @@ class NodeStatus(BaseModel):
     # client and sent the camera id instead — a guaranteed 404. Always None for
     # pump/glass nodes, which are their own "client".
     client_id: Optional[str] = None
+    # Webcam rows ONLY: the human-readable name the operator gave the owning
+    # CLIENT at creation (webcam_clients.name), joined in alongside client_id.
+    # `location` above carries the CAMERA's name; this is the PC's. The delete
+    # confirm dialog decommissions the whole client, so it must be able to say
+    # 「Bench PC」 instead of the opaque `webcam_aeb5adf8` — an operator
+    # confirming an irreversible action has to recognise what they are losing.
+    # Nullable by design: the join is a LEFT JOIN, so a camera whose client row
+    # has vanished still lists (with None here) rather than disappearing.
+    client_name: Optional[str] = None
     location: Optional[str] = None
     last_heartbeat: Optional[str] = None
     cpu_temp: Optional[float] = None
@@ -370,17 +379,28 @@ async def list_nodes(
     # Tolerant like the other DB reads in this function (get_snooze_provenance,
     # _last_pump_commands): a lookup failure degrades to "no webcam rows" and is
     # logged, it never 500s the node list.
+    #
+    # The owning client's display name is LEFT JOINed in as `client_name` (the
+    # camera's own name stays `name`, unaliased, so `location` below is
+    # untouched). LEFT, never INNER: a camera row whose webcam_clients row is
+    # missing — half-finished delete, hand-edited DB — must still appear in the
+    # node list with client_name None. An INNER JOIN would make it silently
+    # vanish from the dashboard while it kept uploading.
     webcam_rows: List[Dict[str, Any]] = []
+    _WEBCAM_ROWS_SQL = (
+        "SELECT c.node_id, c.client_id, c.name, c.status, c.last_upload, "
+        "w.name AS client_name "
+        "FROM webcam_cameras c "
+        "LEFT JOIN webcam_clients w ON c.client_id = w.node_id"
+    )
     try:
         from ..database import get_backend, get_db_cursor
         if get_backend() == "postgresql":
             from ..database import _pg_fetch_many_sync
-            webcam_rows = _pg_fetch_many_sync(
-                "SELECT node_id, client_id, name, status, last_upload FROM webcam_cameras", {})
+            webcam_rows = _pg_fetch_many_sync(_WEBCAM_ROWS_SQL, {})
         else:
             with get_db_cursor() as cursor:
-                cursor.execute(
-                    "SELECT node_id, client_id, name, status, last_upload FROM webcam_cameras")
+                cursor.execute(_WEBCAM_ROWS_SQL)
                 webcam_rows = [dict(r) for r in cursor.fetchall()]
     except Exception as e:
         logger.warning(f"Webcam camera lookup failed: {e}")
@@ -401,7 +421,11 @@ async def list_nodes(
             # The owning client PC — what the revoke-key / delete endpoints
             # take. See NodeStatus.client_id.
             client_id=wc.get("client_id"),
+            # The client PC's own display name (LEFT JOIN — may be None).
+            # What the delete confirm dialog shows the operator.
+            client_name=wc.get("client_name"),
             status=wc.get("status") or "OFFLINE",
+            # `name` here is the CAMERA's name, not the client's.
             location=wc.get("name"),
             last_heartbeat=last_upload,
             snapshot_timestamp=last_upload,

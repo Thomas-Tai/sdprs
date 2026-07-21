@@ -395,9 +395,12 @@ ${PRELUDE}
     // A webcam ROW is a CAMERA; the endpoint takes the owning CLIENT's id.
     // camA/camB share one client PC, camC belongs to a different one — that
     // split is what makes "the dialog lists the right cameras" falsifiable.
-    const camA = { id: 'webcam_cam00001', clientId: 'webcam_c11e9701', name: '櫃台電腦 前門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
-    const camB = { id: 'webcam_cam00002', clientId: 'webcam_c11e9701', name: '櫃台電腦 後門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
-    const camC = { id: 'webcam_cam00003', clientId: 'webcam_c0ffee11', name: '車道主機 車道', location: '車道', type: 'webcam', status: 'online', snoozeMin: 0 };
+    // clientName is the CLIENT PC's own name (webcam_clients.name) and is
+    // deliberately NOT a substring of any camera name here, so "the dialog
+    // shows the client's name" cannot pass by accidentally matching a camera.
+    const camA = { id: 'webcam_cam00001', clientId: 'webcam_c11e9701', clientName: 'Bench PC', name: '櫃台電腦 前門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const camB = { id: 'webcam_cam00002', clientId: 'webcam_c11e9701', clientName: 'Bench PC', name: '櫃台電腦 後門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const camC = { id: 'webcam_cam00003', clientId: 'webcam_c0ffee11', clientName: '車道主機 PC', name: '車道主機 車道', location: '車道', type: 'webcam', status: 'online', snoozeMin: 0 };
     const cameraNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, bitrate: 1.2, drops: 0, temp: 30 };
     ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
       nodes: [camA, camB, camC, cameraNode], onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
@@ -418,7 +421,12 @@ ${PRELUDE}
     // DECIDED SEMANTICS: delete decommissions the whole client PC. The dialog
     // must therefore name the CLIENT and enumerate EVERY camera that goes with
     // it — otherwise the operator clicks one row and silently loses two.
-    A('the dialog names the owning client, not the clicked camera id', !!dialog && dialog.textContent.indexOf('webcam_c11e9701') !== -1 && dialog.textContent.indexOf('webcam_c0ffee11') === -1, dialog && dialog.textContent);
+    // ...and it must name it the way the OPERATOR named it. An irreversible
+    // action identified only by 'webcam_c11e9701' asks for a confirmation the
+    // operator cannot actually give: that hex string is not on any label, any
+    // desk, or in any memory — the name they typed at creation is.
+    A('the dialog names the owning client by its NAME, not an opaque id', !!dialog && dialog.textContent.indexOf('Bench PC') !== -1, dialog && dialog.textContent);
+    A('the dialog names no OTHER client', !!dialog && dialog.textContent.indexOf('車道主機 PC') === -1 && dialog.textContent.indexOf('webcam_c0ffee11') === -1, dialog && dialog.textContent);
     A('the dialog states the camera count', !!dialog && dialog.textContent.indexOf('2 支攝影機') !== -1, dialog && dialog.textContent);
     A('the dialog lists ALL sibling cameras of that client', !!dialog && dialog.textContent.indexOf('櫃台電腦 前門') !== -1 && dialog.textContent.indexOf('櫃台電腦 後門') !== -1, dialog && dialog.textContent);
     A('the dialog does NOT list another client\\'s camera', !!dialog && dialog.textContent.indexOf('車道主機 車道') === -1, dialog && dialog.textContent);
@@ -439,7 +447,7 @@ ${PRELUDE}
     A('delete NEVER sends the camera row id', calls.indexOf('webcam_cam00001') === -1, JSON.stringify(calls));
     A('a successful delete triggers onRefresh', refreshCalls.length === 1, JSON.stringify(refreshCalls));
     A('the dialog closes after a successful delete', !container.querySelector('[role="dialog"]'));
-    A('a success toast names the deleted client', container.textContent.indexOf('webcam_c11e9701 已刪除') !== -1);
+    A('a success toast names the deleted client by NAME', container.textContent.indexOf('Webcam 用戶端「Bench PC」已刪除') !== -1, container.textContent.slice(0, 200));
 
     // --- 404 = already gone: refresh like a success, never an error toast ---
     mode = 'notfound'; calls.length = 0;
@@ -492,6 +500,29 @@ ${PRELUDE}
     A('a webcam row with no clientId disables the 刪除 button', !!orphanDel && orphanDel.disabled === true, orphanDel && orphanDel.title);
     click(orphanDel); await settle();
     A('a clientId-less row opens no confirm dialog and sends no DELETE', !container.querySelector('[role="dialog"]') && calls.length === 0, JSON.stringify(calls));
+
+    // --- clientId but NO clientName: fall back to the id, never blank out ---
+    // client_name is nullable on the wire: an older backend does not send it,
+    // and the server LEFT JOINs webcam_clients so a camera whose client row is
+    // gone still lists (with client_name null). The row must stay deletable and
+    // the dialog must still say WHAT it is deleting — a confirm reading
+    // 「用戶端「」」 or 「用戶端「undefined」」 is worse than the hex id.
+    mode = 'ok'; calls.length = 0;
+    ReactDOM.flushSync(() => root.render(null));
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [{ id: 'webcam_cam00009', clientId: 'webcam_nameless1', clientName: null, name: '無名主機 前門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 }],
+      onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
+    })));
+    await settle();
+    const namelessDel = Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === '刪除');
+    A('a webcam row with a clientId but no clientName keeps 刪除 enabled', !!namelessDel && namelessDel.disabled === false, namelessDel && namelessDel.title);
+    click(namelessDel); await settle();
+    const fbDialog = container.querySelector('[role="dialog"]');
+    A('a null clientName falls back to the client id in the dialog', !!fbDialog && fbDialog.textContent.indexOf('webcam_nameless1') !== -1, fbDialog && fbDialog.textContent);
+    A('the fallback dialog renders no undefined/null placeholder', !!fbDialog && fbDialog.textContent.indexOf('undefined') === -1 && fbDialog.textContent.indexOf('null') === -1, fbDialog && fbDialog.textContent);
+    click(byText('button', '確定刪除')); await settle();
+    A('the fallback path still deletes by clientId', calls.length === 1 && calls[0] === 'webcam_nameless1', JSON.stringify(calls));
+    A('the fallback success toast identifies the client by id', container.textContent.indexOf('Webcam 用戶端「webcam_nameless1」已刪除') !== -1, container.textContent.slice(0, 200));
   } catch (e) {
     results.push({ name: 'status webcam-delete suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }

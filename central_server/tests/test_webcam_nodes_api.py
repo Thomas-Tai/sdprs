@@ -275,6 +275,15 @@ async def test_node_list_client_id_drives_revoke_and_delete(client, monkeypatch)
     # ...and the two ids are genuinely different values of the same shape.
     assert all(n["client_id"] != n["node_id"] for n in webcam_rows)
 
+    # The client's HUMAN name rides along (webcam_clients.name, LEFT JOINed in)
+    # so the delete confirm dialog can say 「Bench PC」 instead of the opaque
+    # webcam_xxxxxxxx the operator has never seen. Display only — the id above
+    # is still what gets sent.
+    assert {n.get("client_name") for n in webcam_rows} == {"Bench PC"}
+    # ...and it must not be confused with the CAMERA's own name, which is what
+    # `location` carries.
+    assert sorted(n["location"] for n in webcam_rows) == ["Cam 1", "Cam 2"]
+
     # --- admin the CLIENT using only the row's own client_id ----------------
     row = webcam_rows[0]
     revoked = await client.post(f"/api/nodes/{row['client_id']}/revoke-key")
@@ -300,6 +309,77 @@ async def test_node_list_client_id_drives_revoke_and_delete(client, monkeypatch)
     assert [n for n in relisted.json() if n["node_type"] == "webcam"] == []
 
     assert [e["type"] for e in events] == ["node_deleted"]
+
+
+@pytest.mark.anyio
+async def test_node_list_carries_client_name_for_every_webcam_row(client, monkeypatch):
+    """Every webcam row names its owning client PC, and siblings agree.
+
+    The delete dialog decommissions the whole client, so it must be able to
+    show the name the operator typed at creation. Two clients here so a broken
+    join (e.g. a cross product, or reading the CAMERA's name into the field)
+    cannot pass by accident.
+    """
+    import central_server.api.nodes as nodes_api
+    from central_server.database import register_webcam_cameras
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    a_id = (await client.post("/api/nodes/webcam", json={"name": "櫃台電腦"})).json()["node_id"]
+    b_id = (await client.post("/api/nodes/webcam", json={"name": "車道主機"})).json()["node_id"]
+    register_webcam_cameras(a_id, [{"name": "前門"}, {"name": "後門"}])
+    register_webcam_cameras(b_id, [{"name": "車道"}])
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200
+    rows = [n for n in listed.json() if n["node_type"] == "webcam"]
+    assert len(rows) == 3
+
+    by_client = {}
+    for n in rows:
+        by_client.setdefault(n["client_id"], set()).add(n["client_name"])
+    assert by_client == {a_id: {"櫃台電腦"}, b_id: {"車道主機"}}
+
+
+@pytest.mark.anyio
+async def test_orphan_camera_still_lists_with_null_client_name(client, monkeypatch):
+    """LEFT JOIN, not INNER: a camera whose webcam_clients row is missing must
+    STILL appear in the node list, with client_name None.
+
+    An INNER JOIN would make such a row silently vanish from the dashboard
+    while it kept uploading — the operator would have no way to see, let alone
+    clean up, a camera that is still writing snapshots to disk.
+    """
+    import central_server.api.nodes as nodes_api
+    from central_server.database import get_db_cursor, register_webcam_cameras
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    orphan_client = (await client.post(
+        "/api/nodes/webcam", json={"name": "Vanishing PC"})).json()["node_id"]
+    keep_client = (await client.post(
+        "/api/nodes/webcam", json={"name": "Healthy PC"})).json()["node_id"]
+    orphan_cam = register_webcam_cameras(orphan_client, [{"name": "Orphan Cam"}])[0]["node_id"]
+    keep_cam = register_webcam_cameras(keep_client, [{"name": "Keep Cam"}])[0]["node_id"]
+
+    # Rip out ONLY the client row, leaving the camera behind (SQLite's FK
+    # cascade is inert here — no PRAGMA foreign_keys=ON — which is precisely
+    # how this state can occur in the field).
+    with get_db_cursor() as cursor:
+        cursor.execute("DELETE FROM webcam_clients WHERE node_id = ?", (orphan_client,))
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200
+    rows = {n["node_id"]: n for n in listed.json() if n["node_type"] == "webcam"}
+
+    assert orphan_cam in rows, f"orphan camera vanished from the node list: {list(rows)}"
+    assert rows[orphan_cam]["client_name"] is None
+    # The id is still there — the row stays addressable/diagnosable.
+    assert rows[orphan_cam]["client_id"] == orphan_client
+    assert rows[orphan_cam]["location"] == "Orphan Cam"
+
+    # The healthy sibling client is unaffected by the join.
+    assert rows[keep_cam]["client_name"] == "Healthy PC"
 
 
 @pytest.mark.anyio
