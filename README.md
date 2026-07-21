@@ -112,6 +112,36 @@ sdprs/
 
 ---
 
+## Webcam Client (Windows)
+
+讓任一 Windows 電腦透過 USB Webcam 推送畫面到 Dashboard。
+
+### 使用方式
+
+1. Dashboard → 系統狀態 → 「新增 Webcam Client」→ 複製 API Key
+2. 在目標電腦運行 `SDPRS_Webcam.exe`
+3. 填入 Server URL + API Key → 選擇攝影機 → 開始
+4. 程式最小化到 System Tray，自動推送 1Hz 快照
+5. Dashboard 上點「即時觀看」可觸發 H.264 HLS 串流
+
+### 開發
+
+```bash
+cd webcam_client
+pip install -r requirements.txt
+python -m webcam_client.main
+```
+
+### 打包
+
+```bash
+cd webcam_client
+pyinstaller build.spec
+# 產物: dist/SDPRS_Webcam.exe
+```
+
+---
+
 ## 授權
 
 MIT License
