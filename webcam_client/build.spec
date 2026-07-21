@@ -20,12 +20,18 @@ else:
     print('[build.spec] WARNING: ffmpeg not found on PATH; exe will require '
           'ffmpeg on the target PC PATH for live view (snapshots still work)')
 
+# Build the launcher (app.py), NOT the package module main.py. PyInstaller runs
+# the entry as __main__, which has no parent package -- main.py's relative
+# imports (`from .config import ...`) would then crash the exe at startup. app.py
+# imports the package absolutely. pathex includes the package's PARENT dir so
+# `import webcam_client` resolves and the whole package is collected (keeping
+# every submodule's relative imports valid).
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    ['app.py'],
+    pathex=[str(Path(SPECPATH).parent)],
     binaries=_binaries,
     datas=[],
-    hiddenimports=['cv2', 'numpy', 'httpx', 'pystray', 'PIL'],
+    hiddenimports=['webcam_client', 'cv2', 'numpy', 'httpx', 'pystray', 'PIL'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
