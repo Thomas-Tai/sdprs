@@ -2641,20 +2641,85 @@ git commit -m "feat(client): add HTTP long-poll control channel for stream comma
 
 ### Task 10: Client — GUI (Setup Wizard + System Tray)
 
+> **Revision 2026-07-21 (audit M2 / design-decision #4).** The first plan silently
+> dropped the spec's live camera preview (§173 item 6) and per-camera naming
+> (§173 item 5). Reinstated here as `gui/preview.py` with a **pure, unit-testable**
+> `resize_keep_aspect` core (headless — no Tk/camera), wired into the wizard as a
+> best-effort thumbnail + a name field per camera. GUI wiring itself is verifiable
+> only by `py_compile`/import (no display on the build box); the preview math and
+> config-building are the parts that get real tests.
+
 **Files:**
 - Create: `sdprs/webcam_client/gui/__init__.py`
+- Create: `sdprs/webcam_client/gui/preview.py`
 - Create: `sdprs/webcam_client/gui/setup_wizard.py`
 - Create: `sdprs/webcam_client/gui/tray_app.py`
+- Test: `sdprs/webcam_client/tests/test_gui_preview.py`
 
 **Interfaces:**
 - Consumes: `config.load_config`, `save_config`, `camera_manager.scan_cameras` (Task 7)
-- Produces: `run_setup_wizard() -> dict` (returns completed config)
+- Produces: `run_setup_wizard() -> dict` (returns completed config, with user-entered names)
+- Produces: `make_thumbnail(frame)`, `resize_keep_aspect(frame, max_size)`, `grab_preview_frame(idx)`
 - Produces: `TrayApp` class with `start()`, `stop()`, `set_status(str)`
 
 - [ ] **Step 1: Create gui/__init__.py**
 
 ```python
 # sdprs/webcam_client/gui/__init__.py
+```
+
+- [ ] **Step 1b: Create gui/preview.py (audit M2 — reinstated preview)**
+
+```python
+# sdprs/webcam_client/gui/preview.py
+import logging
+import os
+from typing import Optional
+
+import cv2
+import numpy as np
+
+logger = logging.getLogger("webcam_client.gui.preview")
+
+
+def resize_keep_aspect(frame: np.ndarray, max_size=(160, 120)) -> np.ndarray:
+    """Resize a frame to fit within max_size (w, h), preserving aspect ratio and
+    never upscaling. Pure + headless — the unit-tested core of the preview."""
+    h, w = frame.shape[:2]
+    max_w, max_h = max_size
+    scale = min(max_w / w, max_h / h, 1.0)
+    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+    return cv2.resize(frame, (new_w, new_h))
+
+
+def make_thumbnail(frame: Optional[np.ndarray], max_size=(160, 120)):
+    """Downscale a BGR frame to a Tk PhotoImage thumbnail. Returns None if the
+    frame is None or Tk/Pillow is unavailable — the wizard then simply omits the
+    preview and never blocks setup on a bad device."""
+    if frame is None:
+        return None
+    resized = resize_keep_aspect(frame, max_size)
+    try:
+        from PIL import Image, ImageTk
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        return ImageTk.PhotoImage(Image.fromarray(rgb))
+    except Exception as e:
+        logger.debug(f"thumbnail render skipped: {e}")
+        return None
+
+
+def grab_preview_frame(device_index: int) -> Optional[np.ndarray]:
+    """Open the camera, grab ONE frame, release. Returns None on any failure.
+    Requires hardware — not exercised by unit tests."""
+    backend = cv2.CAP_DSHOW if os.name == "nt" else 0
+    cap = cv2.VideoCapture(device_index, backend)
+    try:
+        if not cap.isOpened():
+            return None
+        ok, frame = cap.read()
+        return frame if ok else None
+    finally:
+        cap.release()
 ```
 
 - [ ] **Step 2: Create setup_wizard.py**
@@ -2670,6 +2735,7 @@ from typing import Optional
 import httpx
 
 from ..camera_manager import scan_cameras
+from .preview import make_thumbnail, grab_preview_frame
 
 logger = logging.getLogger("webcam_client.gui.wizard")
 
@@ -2722,10 +2788,23 @@ def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
             ttk.Label(cam_frame_inner, text="未偵測到攝影機").pack()
         for cam in cams:
             var = tk.BooleanVar(value=True)
-            cam_vars.append((cam, var))
-            ttk.Checkbutton(cam_frame_inner,
+            name_var = tk.StringVar(value=f"Webcam {cam['device_index']}")
+            cam_vars.append((cam, var, name_var))
+            row = ttk.Frame(cam_frame_inner)
+            row.pack(fill="x", anchor="w", pady=2)
+            ttk.Checkbutton(row,
                 text=f"Camera {cam['device_index']} ({cam['width']}x{cam['height']})",
-                variable=var).pack(anchor="w")
+                variable=var).pack(side="left")
+            ttk.Label(row, text="名稱:").pack(side="left", padx=(8, 2))
+            ttk.Entry(row, textvariable=name_var, width=16).pack(side="left")
+            # Spec §173 item 6: live preview thumbnail per camera. Best-effort — a
+            # frame grab may fail (camera busy); make_thumbnail(None) yields None so
+            # the wizard just omits the image and never blocks on a bad device.
+            thumb = make_thumbnail(grab_preview_frame(cam["device_index"]))
+            if thumb is not None:
+                lbl = ttk.Label(row, image=thumb)
+                lbl.image = thumb  # keep a ref so Tk doesn't GC the PhotoImage
+                lbl.pack(side="right")
         status_var.set(f"找到 {len(cams)} 支攝影機")
 
     ttk.Button(frame_cam, text="掃描攝影機", command=do_scan).pack(anchor="e", pady=5)
@@ -2740,9 +2819,10 @@ def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
         if not server_url or not api_key:
             messagebox.showerror("錯誤", "請填入 Server URL 和 API Key")
             return
-        selected = [{"device_index": c["device_index"], "name": f"Webcam {c['device_index']}",
+        selected = [{"device_index": c["device_index"],
+                     "name": nv.get().strip() or f"Webcam {c['device_index']}",
                      "resolution": [640, 480], "jpeg_quality": 40, "target_fps": 8}
-                    for c, v in cam_vars if v.get()]
+                    for c, v, nv in cam_vars if v.get()]
         if not selected:
             messagebox.showerror("錯誤", "請至少選擇一支攝影機")
             return
@@ -2854,12 +2934,57 @@ class TrayApp:
             self._icon.stop()
 ```
 
+- [ ] **Step 3b: Tests (the headless-testable core)**
+
+```python
+# sdprs/webcam_client/tests/test_gui_preview.py
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from webcam_client.gui.preview import resize_keep_aspect
+
+
+def test_resize_fits_within_bounds_and_keeps_aspect():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)  # 4:3 landscape
+    out = resize_keep_aspect(frame, (160, 120))
+    h, w = out.shape[:2]
+    assert w <= 160 and h <= 120
+    assert abs((w / h) - (640 / 480)) < 0.05  # aspect preserved
+
+
+def test_resize_never_upscales():
+    frame = np.zeros((60, 80, 3), dtype=np.uint8)  # already smaller
+    out = resize_keep_aspect(frame, (160, 120))
+    assert out.shape[:2] == (60, 80)
+
+
+def test_resize_tall_frame_bounded():
+    frame = np.zeros((640, 480, 3), dtype=np.uint8)  # portrait 3:4
+    out = resize_keep_aspect(frame, (160, 120))
+    h, w = out.shape[:2]
+    assert w <= 160 and h <= 120
+```
+
+Run per-file (the GUI modules — setup_wizard/tray_app — are verified only by
+`py_compile`/import; there is no display on the build box, so `run_setup_wizard()`
+and `TrayApp.start()` are NOT invoked in tests):
+```bash
+cd sdprs
+/c/Python314/python -m py_compile webcam_client/gui/preview.py webcam_client/gui/setup_wizard.py webcam_client/gui/tray_app.py
+/c/Python314/python -m pytest webcam_client/tests/test_gui_preview.py -q -p no:cacheprovider
+```
+Expected: py_compile clean; all preview tests PASS.
+
 - [ ] **Step 4: Commit**
 
 ```bash
 cd sdprs
-git add webcam_client/gui/
-git commit -m "feat(client): add setup wizard GUI and system tray app"
+git add webcam_client/gui/ webcam_client/tests/test_gui_preview.py
+git commit -m "feat(client): add setup wizard GUI (preview + naming) and system tray app"
 ```
 
 ---
