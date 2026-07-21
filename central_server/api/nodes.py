@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
@@ -28,6 +28,7 @@ from ..database import (
     delete_node as db_delete_node,
     create_webcam_client,
     revoke_webcam_key as db_revoke_webcam_key,
+    delete_webcam_client as db_delete_webcam_client,
 )
 from ..services.mqtt_service import get_mqtt_service
 from ..timeutil import utcnow
@@ -713,6 +714,57 @@ async def revoke_node_key(
     result = db_revoke_webcam_key(node_id)
     log_action(user, ACTION_WEBCAM_REVOKE_KEY, target_id=node_id, details={})
     return {"api_key": result["api_key"]}
+
+
+@router.delete("/nodes/webcam/{node_id}", status_code=204)
+async def delete_webcam_node(
+    node_id: str,
+    user: str = Depends(get_current_user),
+) -> Response:
+    """Decommission a webcam client: drop its credentials and all of its cameras.
+
+    Revoking the key (POST /nodes/{node_id}/revoke-key) only rotates the
+    secret — the client and its cameras stay in the node list forever. This
+    is the way to actually retire a webcam PC.
+
+    Path is `/nodes/webcam/{node_id}` rather than `/nodes/{node_id}` because
+    webcam clients live in `webcam_clients`, not `nodes`: the generic
+    DELETE /nodes/{node_id} would report 404 for every webcam client. The
+    extra segment also keeps the two routes unambiguous for the router.
+
+    Emits the EXISTING `node_deleted` WS event so open dashboards drop the
+    card immediately — a webcam card and an edge card are the same thing to
+    the SPA, so no new event type is warranted."""
+    from ..services.audit_service import log_action, ACTION_DELETE_NODE
+    from ..services import hls_service
+
+    existed = db_delete_webcam_client(node_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"Webcam client {node_id} not found")
+
+    log_action(user, ACTION_DELETE_NODE, target_id=node_id, details={"kind": "webcam"})
+
+    # Best-effort: drop any live viewer lease so the HLS service stops
+    # accounting for a node that no longer exists. Never fatal — the lease is
+    # in-memory and expires on its own.
+    try:
+        hls_service.release_lease(node_id)
+    except Exception as e:
+        logger.debug(f"release_lease({node_id}) after webcam delete failed: {e}")
+
+    # Fire-and-forget WS broadcast (same pattern as delete_node above).
+    try:
+        mqtt_svc = get_mqtt_service()
+        if mqtt_svc and getattr(mqtt_svc, "_loop", None) is not None:
+            from ..services.websocket_service import broadcast_from_sync
+            broadcast_from_sync(mqtt_svc._loop, {
+                "type": "node_deleted",
+                "data": {"node_id": node_id},
+            })
+    except Exception as e:
+        logger.debug(f"WS broadcast for node_deleted({node_id}) failed: {e}")
+
+    return Response(status_code=204)
 
 
 class SnoozeRequest(BaseModel):

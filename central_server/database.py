@@ -1380,33 +1380,97 @@ def revoke_webcam_key(node_id: str) -> dict:
     return {"api_key": new_key, "api_key_hash": new_hash}
 
 
+def delete_webcam_client(node_id: str) -> bool:
+    """Remove a webcam client and every camera registered under it.
+
+    Both DELETEs run in ONE transaction — a client row without its cameras
+    (or the reverse) is never observable.
+
+    The camera rows are deleted EXPLICITLY rather than leaning on the
+    `webcam_cameras.client_id` FK's ON DELETE CASCADE: SQLite only enforces
+    foreign keys when `PRAGMA foreign_keys=ON` is set per-connection, and
+    this process never sets it, so that cascade is inert on the SQLite
+    backend. Relying on it would leave orphaned camera rows that keep
+    showing up in the node list forever with no client to delete them.
+
+    Returns True if a webcam_clients row was removed, False if there was no
+    such client (caller maps that to 404)."""
+    if get_backend() == "postgresql":
+        import sqlalchemy
+        engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+        with engine.connect() as conn:
+            conn.execute(
+                sqlalchemy.text("DELETE FROM webcam_cameras WHERE client_id = :id"),
+                {"id": node_id},
+            )
+            result = conn.execute(
+                sqlalchemy.text("DELETE FROM webcam_clients WHERE node_id = :id"),
+                {"id": node_id},
+            )
+            conn.commit()
+            return result.rowcount > 0
+
+    with get_db_cursor() as cursor:
+        cursor.execute("DELETE FROM webcam_cameras WHERE client_id = ?", (node_id,))
+        cursor.execute("DELETE FROM webcam_clients WHERE node_id = ?", (node_id,))
+        # rowcount reflects the LAST statement — i.e. the client row.
+        return cursor.rowcount > 0
+
+
 def register_webcam_cameras(client_node_id: str, cameras: list) -> list:
-    """Register one or more cameras under a webcam client. Returns list of {node_id, name}."""
+    """Register one or more cameras under a webcam client. Returns list of {node_id, name}.
+
+    All rows are written inside ONE transaction. Previously each camera got
+    its own commit (a fresh `get_db_cursor()` / `_pg_execute_sync()` per
+    iteration), so a failure partway through a multi-camera batch left the
+    earlier cameras registered and the rest missing. The client sends its
+    whole camera list in one call and takes the returned node_ids as the
+    authoritative mapping, so a half-written batch means the caller gets an
+    exception while the server silently keeps orphan camera rows that no
+    client will ever claim. All-or-nothing is the only sane outcome here."""
+    if not cameras:
+        return []
+
     results = []
-    for cam in cameras:
-        cam_node_id = f"webcam_{secrets.token_hex(4)}"
-        resolution = cam.get("resolution", [640, 480])
-        if get_backend() == "postgresql":
-            _pg_execute_sync(
+    if get_backend() == "postgresql":
+        import sqlalchemy
+        engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+        # Single connection + single commit: leaving the block without
+        # reaching conn.commit() (i.e. on any exception) rolls the batch back.
+        with engine.connect() as conn:
+            for cam in cameras:
+                cam_node_id = f"webcam_{secrets.token_hex(4)}"
+                resolution = cam.get("resolution", [640, 480])
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO webcam_cameras (node_id, client_id, name, device_index, "
+                        "resolution_w, resolution_h, jpeg_quality, target_fps) "
+                        "VALUES (:nid, :cid, :name, :didx, :rw, :rh, :q, :fps)"
+                    ),
+                    {"nid": cam_node_id, "cid": client_node_id, "name": cam["name"],
+                     "didx": cam.get("device_index", 0), "rw": resolution[0],
+                     "rh": resolution[1], "q": cam.get("jpeg_quality", 40),
+                     "fps": cam.get("target_fps", 8)},
+                )
+                results.append({"node_id": cam_node_id, "name": cam["name"]})
+            conn.commit()
+        return results
+
+    # get_db_cursor() commits on clean exit and rolls back on exception, so
+    # hoisting it out of the loop is what makes the batch atomic.
+    with get_db_cursor() as cursor:
+        for cam in cameras:
+            cam_node_id = f"webcam_{secrets.token_hex(4)}"
+            resolution = cam.get("resolution", [640, 480])
+            cursor.execute(
                 "INSERT INTO webcam_cameras (node_id, client_id, name, device_index, "
                 "resolution_w, resolution_h, jpeg_quality, target_fps) "
-                "VALUES (:nid, :cid, :name, :didx, :rw, :rh, :q, :fps)",
-                {"nid": cam_node_id, "cid": client_node_id, "name": cam["name"],
-                 "didx": cam.get("device_index", 0), "rw": resolution[0],
-                 "rh": resolution[1], "q": cam.get("jpeg_quality", 40),
-                 "fps": cam.get("target_fps", 8)},
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cam_node_id, client_node_id, cam["name"], cam.get("device_index", 0),
+                 resolution[0], resolution[1],
+                 cam.get("jpeg_quality", 40), cam.get("target_fps", 8)),
             )
-        else:
-            with get_db_cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO webcam_cameras (node_id, client_id, name, device_index, "
-                    "resolution_w, resolution_h, jpeg_quality, target_fps) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (cam_node_id, client_node_id, cam["name"], cam.get("device_index", 0),
-                     resolution[0], resolution[1],
-                     cam.get("jpeg_quality", 40), cam.get("target_fps", 8)),
-                )
-        results.append({"node_id": cam_node_id, "name": cam["name"]})
+            results.append({"node_id": cam_node_id, "name": cam["name"]})
     return results
 
 
