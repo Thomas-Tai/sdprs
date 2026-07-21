@@ -45,6 +45,8 @@ EXPECTED_ALL_TYPES = frozenset({
     "node_status",
     "ping",
     "pump_status",
+    "webcam_stream_started",
+    "webcam_stream_stopped",
 })
 
 # Subset the SPA whitelists explicitly (onEvent dispatch set). new_alert is

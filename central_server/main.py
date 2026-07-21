@@ -28,6 +28,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .api import alerts, snapshots, stream, nodes, weather, audit as audit_api, handover
+from .api import webcam as webcam_api
 from .services.websocket_service import router as ws_router
 from .services.mqtt_service import init_mqtt_service, get_mqtt_service
 from .services.retention_service import setup_retention_scheduler
@@ -101,6 +102,8 @@ async def lifespan(app: FastAPI):
             logger.warning("STORAGE_DIR is deprecated; set STORAGE_PATH")
         retention_days = settings.RETENTION_DAYS
         setup_retention_scheduler(scheduler, db_path, storage_dir, retention_days)
+        from .services.hls_service import cleanup_stale_streams
+        scheduler.add_job(cleanup_stale_streams, "interval", minutes=5, id="hls_cleanup")
         scheduler.start()
         app.state.scheduler = scheduler
         logger.info("Retention scheduler started")
@@ -313,6 +316,7 @@ app.include_router(nodes.router, prefix="/api")
 app.include_router(weather.router, prefix="/api")
 app.include_router(audit_api.router, prefix="/api")
 app.include_router(handover.router, prefix="/api")
+app.include_router(webcam_api.router, prefix="/api")
 app.include_router(ws_router)
 
 

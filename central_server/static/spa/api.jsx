@@ -1139,6 +1139,7 @@
     'alert_updated', 'alert_acknowledged', 'alert_resolved',
     'node_status', 'pump_status', 'node_deleted',
     'auth_expired',
+    'webcam_stream_started', 'webcam_stream_stopped',
   ]);
   // A server that accepts the socket then closes it (auth-drop, upstream
   // proxy hiccup) would trigger a 1 req/s reconnect flood if we reset the

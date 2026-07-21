@@ -118,6 +118,12 @@ if PYDANTIC_AVAILABLE:
         # mediamtx Prometheus scrape (item 14) — empty = stream-health UI hidden
         MEDIAMTX_METRICS_URL: str = "http://localhost:9998/metrics"
 
+        # Webcam-client HLS relay (Task 3) — segment storage root, max .ts
+        # segments retained per node, and idle-stream cleanup threshold.
+        HLS_STORAGE_PATH: str = "./storage/hls"
+        HLS_MAX_SEGMENTS: int = 5
+        HLS_VIEWER_TIMEOUT_SECONDS: int = 300
+
         class Config:
             env_file = ".env"
             env_file_encoding = "utf-8"
