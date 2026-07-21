@@ -7,11 +7,16 @@ Endpoints the webcam *client PC* talks to (camera registration, HLS segment
 upload) plus the dashboard-facing stream control / HLS serve endpoints:
 
 - POST /api/webcam/cameras                     - register cameras (client API key)
+- POST /api/webcam/{node_id}/snapshot           - 1Hz JPEG ingest (client API key)
 - PUT  /api/webcam/{node_id}/hls/{filename}     - upload HLS segment/playlist (client API key)
 - GET  /api/webcam/{node_id}/hls/{filename}     - serve HLS segment/playlist (dashboard session)
 - POST /api/webcam/{node_id}/stream/start       - dashboard requests live view (dashboard session)
+- POST /api/webcam/{node_id}/stream/renew       - dashboard keeps lease alive (dashboard session)
 - POST /api/webcam/{node_id}/stream/stop        - dashboard leaves live view (dashboard session)
 - GET  /api/webcam/{node_id}/commands           - client long-polls for commands (client API key)
+
+Task 3b (2026-07-21 audit): viewer LEASE model replaces the raw viewer counter,
+and the 1Hz JPEG ingest endpoint shares the edge snapshot buffer.
 """
 import logging
 from typing import Any, Dict, List
@@ -19,10 +24,11 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from ..auth import get_current_user, verify_webcam_api_key, verify_node_id
-from ..database import register_webcam_cameras, get_webcam_cameras
+from ..auth import get_current_user, verify_webcam_api_key
+from ..database import register_webcam_cameras, get_webcam_cameras, touch_webcam_upload
 from ..services import hls_service
 from ..services.websocket_service import ws_manager
+from ..timeutil import utcnow
 
 logger = logging.getLogger("webcam_api")
 router = APIRouter(prefix="/webcam", tags=["webcam"])
@@ -49,7 +55,9 @@ async def upload_hls_segment(
     request: Request,
     client_node_id: str = Depends(verify_webcam_api_key),
 ):
-    verify_node_id(node_id)
+    # NO verify_node_id() here (audit H3): webcam node_ids are server-assigned
+    # at registration and can never be in ALLOWED_NODE_IDS, so the allowlist
+    # would 403 every webcam upload. Ownership is enforced below instead.
     if not filename.endswith((".ts", ".m3u8")):
         raise HTTPException(status_code=400, detail="Only .ts and .m3u8 files allowed")
     # Ownership is checked against the identity the dependency already
@@ -77,7 +85,9 @@ async def serve_hls_file(
     request: Request,
     user: str = Depends(get_current_user),
 ) -> Response:
-    verify_node_id(node_id)
+    # No verify_node_id() (audit H3): session-authenticated dashboard read of a
+    # server-assigned webcam node_id; the allowlist would 403 it. get_hls_file
+    # already confines reads to HLS_STORAGE_PATH via is_relative_to().
     data = hls_service.get_hls_file(node_id, filename)
     if data is None:
         raise HTTPException(status_code=404, detail="HLS file not found")
@@ -92,18 +102,64 @@ async def serve_hls_file(
     )
 
 
+@router.post("/{node_id}/snapshot", status_code=status.HTTP_204_NO_CONTENT)
+async def ingest_webcam_snapshot(
+    node_id: str,
+    request: Request,
+    client_node_id: str = Depends(verify_webcam_api_key),
+):
+    # 1Hz JPEG ingest (spec §303, fixes audit C1: the client's 1Hz path used to
+    # hit the edge route and 401 silently). NO verify_node_id() (audit H3):
+    # webcam node_ids are server-assigned at registration and can never be in
+    # ALLOWED_NODE_IDS. Ownership is enforced against the authenticated client.
+    if not any(c["node_id"] == node_id for c in get_webcam_cameras(client_node_id)):
+        raise HTTPException(status_code=403, detail="Camera not owned by this client")
+    jpeg_bytes = await request.body()
+    if not jpeg_bytes:
+        raise HTTPException(status_code=400, detail="Empty snapshot data")
+    if len(jpeg_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Snapshot too large (max 5 MB)")
+    # Share the SAME in-memory buffer the edge path uses, so the existing
+    # GET /api/edge/{node_id}/snapshot/latest read path serves webcams unchanged
+    # (spec §303 point 3). Webcam JPEGs come from cv2.imencode and carry no EXIF,
+    # so the edge path's _strip_exif is unnecessary here.
+    request.app.state.latest_snapshots[node_id] = {"jpeg": jpeg_bytes, "timestamp": utcnow()}
+    touch_webcam_upload(node_id)  # fixes C2; writes webcam_cameras only, never nodes (C3)
+    return None
+
+
 @router.post("/{node_id}/stream/start")
 async def start_webcam_stream(
     node_id: str,
     request: Request,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    verify_node_id(node_id)
-    count = hls_service.increment_viewer(node_id)
-    if count == 1:
+    # Lease semantics (audit H1/H2): arm the single per-node viewer lease. Only a
+    # 0->1 transition commands the client + broadcasts, so a second concurrent
+    # viewer does not re-issue stream_start. No verify_node_id() (audit H3).
+    fresh = hls_service.touch_lease(node_id)
+    if fresh:
         await hls_service.enqueue_command(node_id, "stream_start", {"fps": 8})
         await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
-    return {"message": "Stream start requested", "node_id": node_id, "viewers": count}
+    return {"message": "Stream start requested", "node_id": node_id,
+            "viewers": hls_service.get_viewer_count(node_id)}
+
+
+@router.post("/{node_id}/stream/renew")
+async def renew_webcam_stream(
+    node_id: str,
+    request: Request,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    # Dashboard calls this every 30s while a tile is live. If the lease had
+    # lapsed (network gap > LEASE_TTL) the cleanup scan already stopped the
+    # client, so a re-arm (fresh == True) re-issues stream_start to resume
+    # encoding. No verify_node_id() (audit H3).
+    fresh = hls_service.touch_lease(node_id)
+    if fresh:
+        await hls_service.enqueue_command(node_id, "stream_start", {"fps": 8})
+        await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
+    return {"node_id": node_id, "viewers": hls_service.get_viewer_count(node_id)}
 
 
 @router.post("/{node_id}/stream/stop")
@@ -112,12 +168,14 @@ async def stop_webcam_stream(
     request: Request,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    verify_node_id(node_id)
-    count = hls_service.decrement_viewer(node_id)
-    if count == 0:
+    # Explicit stop releases the lease immediately. Only command the client if a
+    # live lease actually existed. No verify_node_id() (audit H3).
+    was_live = hls_service.release_lease(node_id)
+    if was_live:
         await hls_service.enqueue_command(node_id, "stream_stop")
         await ws_manager.broadcast({"type": "webcam_stream_stopped", "data": {"node_id": node_id}})
-    return {"message": "Stream stop requested", "node_id": node_id, "viewers": count}
+    return {"message": "Stream stop requested", "node_id": node_id,
+            "viewers": hls_service.get_viewer_count(node_id)}
 
 
 @router.get("/{node_id}/commands")
@@ -127,7 +185,8 @@ async def poll_commands(
     timeout: float = 5.0,
     client_node_id: str = Depends(verify_webcam_api_key),
 ) -> Dict[str, Any]:
-    verify_node_id(node_id)
+    # No verify_node_id() (audit H3): server-assigned webcam node_id, ownership
+    # is enforced by the guard below.
     # Same ownership guard as upload_hls_segment (~line 59). Without it, any
     # valid webcam API key can long-poll ANY camera's command queue by name,
     # and since asyncio.Queue.get() is single-consumer FIFO, a rogue poller

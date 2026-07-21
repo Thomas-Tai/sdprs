@@ -103,7 +103,11 @@ async def lifespan(app: FastAPI):
         retention_days = settings.RETENTION_DAYS
         setup_retention_scheduler(scheduler, db_path, storage_dir, retention_days)
         from .services.hls_service import cleanup_stale_streams
-        scheduler.add_job(cleanup_stale_streams, "interval", minutes=5, id="hls_cleanup")
+        # cleanup_stale_streams is async now (Task 3b): it awaits enqueue_command +
+        # ws_manager.broadcast to force a real client stop on lease expiry.
+        # AsyncIOScheduler awaits it on the loop. 30s cadence matches the 90s lease
+        # TTL so an expired lease is enforced within one scan.
+        scheduler.add_job(cleanup_stale_streams, "interval", seconds=30, id="hls_cleanup")
         scheduler.start()
         app.state.scheduler = scheduler
         logger.info("Retention scheduler started")

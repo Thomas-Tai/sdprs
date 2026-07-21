@@ -11,6 +11,8 @@ Tests for:
 - POST /api/webcam/{node_id}/stream/stop
 - GET  /api/webcam/{node_id}/commands (long-poll)
 """
+import time
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 import sys
@@ -267,3 +269,108 @@ async def test_stream_stop_without_start_does_not_go_negative(authed_client):
     resp = await authed_client.post(f"/api/webcam/{cam_node_id}/stream/stop")
     assert resp.status_code == 200
     assert resp.json()["viewers"] == 0
+
+
+# ===== Task 3b: viewer lease model (replaces the raw viewer counter) =========
+
+
+async def _register_camera(client) -> str:
+    """Create a webcam client + one camera. Returns cam_node_id."""
+    resp = await client.post("/api/nodes/webcam", json={"name": "Lease PC"})
+    api_key = resp.json()["api_key"]
+    resp = await client.post(
+        "/api/webcam/cameras",
+        json={"cameras": [{"name": "Cam 1", "device_index": 0}]},
+        headers={"X-API-Key": api_key},
+    )
+    return resp.json()[0]["node_id"]
+
+
+@pytest.mark.anyio
+async def test_stream_start_is_idempotent_single_lease(authed_client):
+    """A second start while a lease is already live stays at viewers==1 and does
+    NOT enqueue a duplicate stream_start (0->1 transition only)."""
+    from central_server.services import hls_service
+
+    cam = await _register_camera(authed_client)
+
+    r1 = await authed_client.post(f"/api/webcam/{cam}/stream/start")
+    assert r1.status_code == 200
+    assert r1.json()["viewers"] == 1
+
+    r2 = await authed_client.post(f"/api/webcam/{cam}/stream/start")
+    assert r2.status_code == 200
+    assert r2.json()["viewers"] == 1  # single lease per node
+
+    # Exactly ONE stream_start command was enqueued.
+    first = await hls_service.dequeue_command(cam, timeout=0.5)
+    assert first is not None and first["command"] == "stream_start"
+    second = await hls_service.dequeue_command(cam, timeout=0.1)
+    assert second is None
+
+
+@pytest.mark.anyio
+async def test_stream_renew_extends_lease(authed_client):
+    """renew pushes the lease expiry forward so the cleanup scan still sees it
+    live."""
+    from central_server.services import hls_service
+
+    cam = await _register_camera(authed_client)
+    await authed_client.post(f"/api/webcam/{cam}/stream/start")
+
+    # Simulate the lease being close to expiry, then renew.
+    hls_service._stream_leases[cam] = time.time() + 2
+    resp = await authed_client.post(f"/api/webcam/{cam}/stream/renew")
+    assert resp.status_code == 200
+    assert resp.json()["viewers"] == 1
+    # Lease is now pushed well into the future (~LEASE_TTL_SECONDS).
+    assert hls_service._stream_leases[cam] > time.time() + 60
+
+
+@pytest.mark.anyio
+async def test_lease_expiry_forces_stream_stop(authed_client):
+    """LOAD-BEARING (H1/H2 regression guard): a lease past expiry ->
+    cleanup_stale_streams() MUST enqueue stream_stop to the client AND the client
+    can dequeue it. Without this, a forgotten browser tab pins a field PC's
+    uplink forever."""
+    from central_server.services import hls_service
+
+    cam = await _register_camera(authed_client)
+
+    # Arm the lease via the API (0->1 enqueues stream_start); drain that command.
+    resp = await authed_client.post(f"/api/webcam/{cam}/stream/start")
+    assert resp.json()["viewers"] == 1
+    first = await hls_service.dequeue_command(cam, timeout=0.5)
+    assert first is not None and first["command"] == "stream_start"
+
+    # Force the lease into the past, then run the (async) cleanup scan.
+    hls_service._stream_leases[cam] = time.time() - 1
+    await hls_service.cleanup_stale_streams()
+
+    # The client must be able to dequeue a REAL stream_stop.
+    cmd = await hls_service.dequeue_command(cam, timeout=0.1)
+    assert cmd is not None
+    assert cmd["command"] == "stream_stop"
+
+    # Lease is gone -> viewers back to 0.
+    assert hls_service.get_viewer_count(cam) == 0
+    assert hls_service.has_active_lease(cam) is False
+
+
+@pytest.mark.anyio
+async def test_stream_stop_releases_lease_immediately(authed_client):
+    """Explicit stop drops the lease at once (viewers 0 + stop enqueued)."""
+    from central_server.services import hls_service
+
+    cam = await _register_camera(authed_client)
+    await authed_client.post(f"/api/webcam/{cam}/stream/start")
+    # Drain the stream_start so the queue only holds what stop enqueues.
+    await hls_service.dequeue_command(cam, timeout=0.5)
+
+    resp = await authed_client.post(f"/api/webcam/{cam}/stream/stop")
+    assert resp.status_code == 200
+    assert resp.json()["viewers"] == 0
+    assert hls_service.has_active_lease(cam) is False
+
+    cmd = await hls_service.dequeue_command(cam, timeout=0.5)
+    assert cmd is not None and cmd["command"] == "stream_stop"

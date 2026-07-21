@@ -1440,3 +1440,27 @@ def get_webcam_camera_owner(cam_node_id: str, api_key_hash: str) -> Optional[dic
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def touch_webcam_upload(node_id: str) -> None:
+    """Stamp webcam_cameras.last_upload = now for a camera node (fixes audit C2:
+    the column existed but had no writer). Writes ONLY webcam_cameras and never
+    `nodes` -- reusing the edge `touch_node_upload` is what causes audit C3, as
+    that function INSERTs a node_type='glass' row into `nodes`, giving each webcam
+    a second identity. Never raises (data-quality column, not load-bearing for
+    ingest)."""
+    now = utcnow().isoformat()
+    try:
+        if get_backend() == "postgresql":
+            _pg_execute_sync(
+                "UPDATE webcam_cameras SET last_upload = :ts WHERE node_id = :nid",
+                {"ts": now, "nid": node_id},
+            )
+            return
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "UPDATE webcam_cameras SET last_upload = ? WHERE node_id = ?",
+                (now, node_id),
+            )
+    except Exception as e:
+        logger.debug(f"touch_webcam_upload failed for {node_id}: {e}")

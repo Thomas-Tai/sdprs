@@ -5,9 +5,9 @@ Smart Disaster Prevention Response System
 
 In-memory + on-disk state for the webcam-client HLS relay:
 - HLS segment/playlist storage under HLS_STORAGE_PATH/<node_id>/
-- viewer counts per camera node (drives stream start/stop commands)
+- per-node viewer LEASE (single lease per camera; drives stream start/stop)
 - per-node command queues for the long-poll GET .../commands endpoint
-- idle-stream cleanup (APScheduler job, see main.py)
+- idle-stream cleanup + lease-expiry enforcement (AsyncIOScheduler job, see main.py)
 """
 import asyncio
 import logging
@@ -20,9 +20,20 @@ from ..config import get_settings
 
 logger = logging.getLogger("hls_service")
 
-_viewer_count: Dict[str, int] = {}
+# --- Viewer lease model (fixes audit H1/H2) --------------------------------
+# The dashboard sends no per-viewer token, so start/renew/stop are per-node. We
+# model ONE lease per camera: "is anyone watching?" (0/1). Two operators viewing
+# the same camera share the lease; either one's renew keeps it alive; an explicit
+# stop from one releases it and the other's next 30s renew re-arms it (brief
+# re-start). The failure mode this MUST kill -- a forgotten tab pinning a field
+# PC's uplink forever -- is fixed because the lease expires without renews. Do
+# not silently "improve" this into per-viewer refcounting without updating spec.
+_stream_leases: Dict[str, float] = {}       # node_id -> lease expiry (epoch seconds)
+_stream_stopped_at: Dict[str, float] = {}   # node_id -> when we last forced/observed a stop
 _command_queues: Dict[str, asyncio.Queue] = {}
 _last_activity: Dict[str, float] = {}
+
+LEASE_TTL_SECONDS = 90   # spec §391: survives two missed 30s renews (one network blip)
 # Last-touch time for command queues specifically. get_command_queue() will
 # auto-create a queue for any node_id reaching the long-poll endpoint, and
 # that node_id may never call store_hls_segment (so it would never appear in
@@ -94,7 +105,8 @@ def cleanup_hls_dir(node_id: str) -> None:
     node_dir = base / node_id
     if node_dir.exists():
         shutil.rmtree(node_dir, ignore_errors=True)
-    _viewer_count.pop(node_id, None)
+    _stream_leases.pop(node_id, None)
+    _stream_stopped_at.pop(node_id, None)
     _last_activity.pop(node_id, None)
     # _command_queues must be dropped here too. get_command_queue() creates an
     # entry for ANY node_id that reaches the long-poll endpoint, so leaving it
@@ -103,19 +115,34 @@ def cleanup_hls_dir(node_id: str) -> None:
     _command_queue_activity.pop(node_id, None)
 
 
+def touch_lease(node_id: str) -> bool:
+    """Arm or extend the viewer lease (start/renew). Returns True on a 0->1
+    transition (no live lease before) so the caller enqueues stream_start +
+    broadcasts webcam_stream_started."""
+    now = time.time()
+    was_live = _stream_leases.get(node_id, 0.0) > now
+    _stream_leases[node_id] = now + LEASE_TTL_SECONDS
+    _stream_stopped_at.pop(node_id, None)
+    return not was_live
+
+
+def release_lease(node_id: str) -> bool:
+    """Explicit stop. Returns True if a live lease existed (caller enqueues
+    stream_stop + broadcasts webcam_stream_stopped)."""
+    now = time.time()
+    was_live = _stream_leases.pop(node_id, 0.0) > now
+    if was_live:
+        _stream_stopped_at[node_id] = now
+    return was_live
+
+
+def has_active_lease(node_id: str) -> bool:
+    return _stream_leases.get(node_id, 0.0) > time.time()
+
+
 def get_viewer_count(node_id: str) -> int:
-    return _viewer_count.get(node_id, 0)
-
-
-def increment_viewer(node_id: str) -> int:
-    _viewer_count[node_id] = _viewer_count.get(node_id, 0) + 1
-    return _viewer_count[node_id]
-
-
-def decrement_viewer(node_id: str) -> int:
-    count = max(0, _viewer_count.get(node_id, 0) - 1)
-    _viewer_count[node_id] = count
-    return count
+    # Single-lease-per-node model: 1 while a viewer lease is live, else 0.
+    return 1 if has_active_lease(node_id) else 0
 
 
 def get_command_queue(node_id: str) -> asyncio.Queue:
@@ -141,28 +168,51 @@ async def dequeue_command(node_id: str, timeout: float = 5.0) -> Optional[dict]:
         return None
 
 
-def cleanup_stale_streams() -> None:
+async def cleanup_stale_streams() -> None:
+    """Runs every 30s ON the event loop (AsyncIOScheduler async job). Because it
+    is async and single-threaded on the loop, it can `await enqueue_command` /
+    `ws_manager.broadcast` and mutate the module dicts with NO lock. Two duties
+    (spec §391 + §377):
+      1. Lease expiry -> a lease past expiry means every viewer left WITHOUT a
+         clean stop (closed tab / crash / lid). Force the stream down for real:
+         enqueue stream_stop to the CLIENT and broadcast webcam_stream_stopped,
+         then mark it for directory reclaim (fixes audit H2 -- the shipped
+         version merely deleted dirs and never commanded the client).
+      2. Directory reclaim -> 60s after a stop, or an orphan dir/queue idle past
+         HLS_VIEWER_TIMEOUT_SECONDS, drop the HLS dir + in-memory queue state.
+    """
+    from .websocket_service import ws_manager  # local import avoids an import cycle
     settings = get_settings()
-    timeout = settings.HLS_VIEWER_TIMEOUT_SECONDS
     now = time.time()
-    # Sweep both activity trackers (segment uploads AND command-queue
-    # touches), and _command_queues itself as a safety net -- a queue with
-    # no recorded activity at all (last_touch defaults to 0) is treated as
-    # immediately stale rather than pinned forever.
-    all_ids = set(_last_activity) | set(_command_queue_activity) | set(_command_queues)
-    stale = [
-        nid for nid in all_ids
-        if now - max(_last_activity.get(nid, 0), _command_queue_activity.get(nid, 0)) > timeout
-        and _viewer_count.get(nid, 0) == 0
-    ]
-    for nid in stale:
-        logger.info(f"Cleaning stale HLS dir for {nid}")
-        cleanup_hls_dir(nid)
+
+    # (1) Expire leases -> force a real stop.
+    for nid in [n for n, exp in list(_stream_leases.items()) if exp <= now]:
+        _stream_leases.pop(nid, None)
+        _stream_stopped_at[nid] = now
+        logger.info(f"Viewer lease expired for {nid}; forcing stream stop")
+        await enqueue_command(nid, "stream_stop")
+        await ws_manager.broadcast({"type": "webcam_stream_stopped", "data": {"node_id": nid}})
+
+    # (2) Reclaim directories / queue state (no active lease only).
+    DIR_GRACE = 60
+    orphan_grace = settings.HLS_VIEWER_TIMEOUT_SECONDS
+    candidates = (set(_stream_stopped_at) | set(_last_activity)
+                  | set(_command_queue_activity) | set(_command_queues))
+    for nid in candidates:
+        if has_active_lease(nid):
+            continue
+        stopped_at = _stream_stopped_at.get(nid, 0.0)
+        last_act = max(_last_activity.get(nid, 0.0), _command_queue_activity.get(nid, 0.0))
+        recently_stopped = bool(stopped_at) and (now - stopped_at) > DIR_GRACE
+        idle_orphan = bool(last_act) and (now - last_act) > orphan_grace
+        if recently_stopped or idle_orphan:
+            logger.info(f"Reclaiming HLS state for {nid}")
+            cleanup_hls_dir(nid)
 
 
 __all__ = [
     "get_hls_dir", "store_hls_segment", "get_hls_file", "cleanup_hls_dir",
-    "get_viewer_count", "increment_viewer", "decrement_viewer",
+    "get_viewer_count", "touch_lease", "release_lease", "has_active_lease",
     "get_command_queue", "enqueue_command", "dequeue_command",
     "cleanup_stale_streams",
 ]
