@@ -3321,21 +3321,37 @@ unchanged.
 **Files:**
 - Modify: `sdprs/README.md` (add webcam client section)
 
-- [ ] **Step 1: Run full server test suite**
+> **Env reconciliation (this machine).** The original Steps 1-2 used whole-directory pytest
+> with a bare `python`. BOTH break here: the `[Cloud]` bracket path breaks whole-directory
+> pytest COLLECTION, and there is no `python`/`python3` alias (Python is `/c/Python314/python`).
+> Run each test file in its own invocation via the loops below.
 
-Run: `cd sdprs && python -m pytest central_server/tests/ -v`
-Expected: All PASS (existing + new tests)
+- [ ] **Step 1: Run full server test suite (per-file)**
 
-- [ ] **Step 2: Run client test suite**
+```bash
+cd sdprs
+for f in central_server/tests/test_*.py; do
+  echo "=== $f ==="; /c/Python314/python -m pytest "$f" -q -p no:cacheprovider || break
+done
+```
+Expected: every file PASSES (existing + all new webcam tests). If the loop breaks, fix or
+report the first failing file before proceeding — do not continue past a red suite.
 
-Run: `cd sdprs && python -m pytest webcam_client/tests/ -v`
-Expected: All PASS
+- [ ] **Step 2: Run client test suite (per-file)**
+
+```bash
+cd sdprs
+for f in webcam_client/tests/test_*.py; do
+  echo "=== $f ==="; /c/Python314/python -m pytest "$f" -q -p no:cacheprovider || break
+done
+```
+Expected: every file PASSES.
 
 - [ ] **Step 3: Manual E2E test (with real webcam)**
 
 1. Start server: `cd sdprs/central_server && uvicorn main:app --reload`
 2. Open Dashboard → Status → 新增 Webcam Client → copy API Key
-3. Run client: `cd sdprs && python -m webcam_client.main`
+3. Run client: `cd sdprs && /c/Python314/python -m webcam_client.main`
 4. Paste server URL + API Key → select camera → Start
 5. Verify: Dashboard Monitor Wall shows 1Hz JPEG from webcam with "Webcam" badge
 6. Click "▶ 即時" → verify HLS stream starts (may take 5-10s)
