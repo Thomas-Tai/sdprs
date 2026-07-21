@@ -2197,6 +2197,13 @@ git commit -m "feat(client): add config module and camera manager with motion de
 
 ### Task 8: Client — Push Engine (1Hz JPEG + HLS Mode)
 
+> **Revision 2026-07-21 (audit C1).** The 1Hz path now targets the webcam ingest
+> route `POST /api/webcam/{node_id}/snapshot` (NOT `/api/edge/...`, which is gated by
+> the global `EDGE_API_KEY` and 401s the per-client webcam key), and every push calls
+> `raise_for_status()` and logs failures at WARNING — spec §303/§322. This is the
+> client half of the contract Task 3b implements on the server; the two are
+> file-disjoint and build in parallel against the same frozen contract.
+
 **Files:**
 - Create: `sdprs/webcam_client/push_engine.py`
 - Create: `sdprs/webcam_client/hls_encoder.py`
@@ -2420,11 +2427,16 @@ class PushEngine(threading.Thread):
         try:
             small = cv2.resize(frame, self._resolution)
             _, jpeg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
-            url = f"{self._server_url}/api/edge/{self._node_id}/snapshot"
-            self._client.post(url, content=jpeg.tobytes(),
-                            headers={"Content-Type": "image/jpeg"})
+            # Webcam ingest route (spec §303). NOT /api/edge/... — that path is gated
+            # by the global EDGE_API_KEY and would 401 the per-client webcam key.
+            url = f"{self._server_url}/api/webcam/{self._node_id}/snapshot"
+            resp = self._client.post(url, content=jpeg.tobytes(),
+                                     headers={"Content-Type": "image/jpeg"})
+            # httpx does NOT raise on 4xx without this. Spec §322: a silent 401 leaves
+            # the tray green and the dashboard tile permanently blank — surface it.
+            resp.raise_for_status()
         except Exception as e:
-            logger.debug(f"Snapshot push failed: {e}")
+            logger.warning(f"Snapshot push to {self._node_id} failed: {e}")
 
     def _upload_segments(self) -> None:
         if not self._encoder:
@@ -2433,9 +2445,10 @@ class PushEngine(threading.Thread):
             segments = self._encoder.get_new_segments()
             for filename, data in segments:
                 url = f"{self._server_url}/api/webcam/{self._node_id}/hls/{filename}"
-                self._client.put(url, content=data)
+                resp = self._client.put(url, content=data)
+                resp.raise_for_status()
         except Exception as e:
-            logger.debug(f"HLS upload failed: {e}")
+            logger.warning(f"HLS upload for {self._node_id} failed: {e}")
 ```
 
 - [ ] **Step 3: Write test for push engine logic**
@@ -2468,12 +2481,34 @@ def test_set_streaming_flag():
     with patch.object(engine, "_stop_encoder"):
         engine.set_streaming(False)
         assert engine._streaming is False
+
+
+def test_push_snapshot_uses_webcam_endpoint_and_raises(monkeypatch):
+    # C1 client-side guard: normal-mode frames go to /api/webcam/.../snapshot
+    # (never /api/edge), and a 4xx must surface via raise_for_status(), not be
+    # swallowed. This is the regression that made the whole feature fail silently.
+    import numpy as np
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+    mock_resp = MagicMock()
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+    engine._client = mock_client
+    engine._push_snapshot(np.zeros((480, 640, 3), dtype=np.uint8))
+    posted_url = mock_client.post.call_args[0][0]
+    assert "/api/webcam/webcam_01/snapshot" in posted_url
+    assert "/api/edge/" not in posted_url
+    mock_resp.raise_for_status.assert_called_once()
 ```
 
 - [ ] **Step 4: Run tests**
 
-Run: `cd sdprs && python -m pytest webcam_client/tests/ -v`
-Expected: All PASS
+Run per-file (no `python` alias; whole-dir pytest hits the `[Cloud]` trap):
+```bash
+cd sdprs
+/c/Python314/python -m pytest webcam_client/tests/test_push_engine.py -q -p no:cacheprovider
+```
+Expected: All PASS (including `test_push_snapshot_uses_webcam_endpoint_and_raises`).
 
 - [ ] **Step 5: Commit**
 
