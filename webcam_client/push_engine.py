@@ -26,10 +26,21 @@ class PushEngine(threading.Thread):
         self._motion_threshold = camera_config.get("motion_threshold", 25)
 
         self._stop_event = threading.Event()
+        self._paused = threading.Event()
         self._streaming = False
         self._stream_lock = threading.Lock()
         self._encoder: Optional[HlsEncoder] = None
         self._client: Optional[httpx.Client] = None
+
+    def set_paused(self, enabled: bool) -> None:
+        """Local, tray-driven pause. When paused the run loop keeps the camera
+        warm and motion state fresh but uploads nothing (no snapshot, no encoder
+        write, no HLS upload). An active encoder / httpx client stay intact so
+        resume returns to normal push without re-initialising anything."""
+        if enabled:
+            self._paused.set()
+        else:
+            self._paused.clear()
 
     def set_streaming(self, enabled: bool) -> None:
         with self._stream_lock:
@@ -81,6 +92,14 @@ class PushEngine(threading.Thread):
                 motion = compute_motion(frame, prev_frame, self._motion_threshold)
                 prev_frame = frame
                 now = time.time()
+
+                # Paused (tray "暫停推送"): keep reading frames so prev_frame /
+                # motion state stay current — resume must not see a stale delta —
+                # but UPLOAD NOTHING. Skip snapshot, encoder write and HLS upload.
+                # The encoder and httpx client are deliberately left untouched.
+                if self._paused.is_set():
+                    time.sleep(0.1)
+                    continue
 
                 with self._stream_lock:
                     streaming = self._streaming

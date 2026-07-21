@@ -2,7 +2,6 @@
 import logging
 import signal
 import sys
-import threading
 import time
 
 from .config import load_config, save_config, is_first_run
@@ -68,14 +67,21 @@ def main():
     control = ControlChannel(server_url, api_key, node_ids, on_command)
     control.start()
 
-    # Tray app
-    paused = threading.Event()
+    # Tray app — pause/resume are real: fan out to every engine so the
+    # "暫停推送" menu item actually stops uploads instead of lying.
+    def _pause_all():
+        for engine in engines:
+            engine.set_paused(True)
+
+    def _resume_all():
+        for engine in engines:
+            engine.set_paused(False)
 
     tray = TrayApp(
         on_open_settings=lambda: _open_settings(config),
         on_quit=lambda: _shutdown(engines, control),
-        on_pause=lambda: paused.set(),
-        on_resume=lambda: paused.clear(),
+        on_pause=_pause_all,
+        on_resume=_resume_all,
     )
     tray.start()
     tray.set_status(True)

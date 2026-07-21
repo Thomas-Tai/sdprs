@@ -68,6 +68,70 @@ def test_push_snapshot_swallows_http_error():
     mock_resp.raise_for_status.assert_called_once()
 
 
+def test_set_paused_flag():
+    # set_paused toggles the internal Event; default is un-paused.
+    config = {"node_id": "webcam_01", "device_index": 0}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+    assert engine._paused.is_set() is False
+    engine.set_paused(True)
+    assert engine._paused.is_set() is True
+    engine.set_paused(False)
+    assert engine._paused.is_set() is False
+
+
+def test_paused_run_loop_uploads_nothing():
+    # The tray "暫停推送" pause must be a REAL no-op-upload: with set_paused(True)
+    # the run loop still reads frames (keeps motion state fresh) but calls neither
+    # _push_snapshot nor _upload_segments. Regression for the dead pause Event that
+    # let snapshots keep uploading while the operator thought pushing was stopped.
+    import numpy as np
+    config = {"node_id": "webcam_01", "device_index": 0,
+              "resolution": [640, 480], "target_fps": 8}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def read_once():
+        # One frame, then stop so run() returns after a single iteration.
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: read_once()
+
+    engine.set_paused(True)
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot") as mock_push, \
+         patch.object(engine, "_upload_segments") as mock_upload:
+        engine.run()
+
+    assert fake_cap.read.called          # still reads frames while paused
+    assert not mock_push.called          # ...but uploads NOTHING
+    assert not mock_upload.called
+
+
+def test_unpaused_run_loop_pushes_snapshot():
+    # Same harness, NOT paused: proves the "not called" above is caused by the
+    # pause, not by the test rig — an identical single-frame iteration DOES push.
+    import numpy as np
+    config = {"node_id": "webcam_01", "device_index": 0,
+              "resolution": [640, 480], "target_fps": 8}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def read_once():
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: read_once()
+
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot") as mock_push:
+        engine.run()
+
+    assert mock_push.called               # first frame (motion=1.0) pushes
+
+
 def test_streaming_path_resizes_before_write():
     # Regression for the un-resized streaming write: a camera that ignores the
     # requested resolution delivers mis-sized frames. The streaming path MUST
