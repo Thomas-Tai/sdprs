@@ -26,7 +26,6 @@ class HlsEncoder:
         with self._lock:
             if self.is_running:
                 return True
-            self._output_dir.mkdir(parents=True, exist_ok=True)
             cmd = [
                 "ffmpeg", "-y",
                 "-f", "rawvideo",
@@ -46,6 +45,11 @@ class HlsEncoder:
                 str(self._output_dir / "playlist.m3u8"),
             ]
             try:
+                # mkdir is inside the try so an unwritable output dir (OSError) is
+                # caught here and returns False, rather than propagating up through
+                # _start_encoder -> set_streaming -> on_command and killing the
+                # control-channel thread (completes Fix 4's intent).
+                self._output_dir.mkdir(parents=True, exist_ok=True)
                 self._process = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
