@@ -13,6 +13,56 @@ from .preview import make_thumbnail, grab_preview_frame
 logger = logging.getLogger("webcam_client.gui.wizard")
 
 
+def normalize_server_url(raw: str) -> str:
+    """Make a user-typed server URL usable before it is joined with a path.
+
+    - Default to ``http://`` when the scheme is omitted. A schemeless URL made
+      ``httpx`` raise ``UnsupportedProtocol``, which is NOT an ``httpx.ConnectError``
+      and so escaped ``on_start`` as an unhandled Tk-callback exception — in a
+      windowed (console=False) exe that is swallowed and the button "does nothing".
+    - Strip a trailing slash so ``f"{url}/api/..."`` never becomes ``//api/...``,
+      which the server routes as 404 (``push_engine`` rstrips; the wizard did not).
+    """
+    url = (raw or "").strip()
+    if url and "://" not in url:
+        url = "http://" + url
+    return url.rstrip("/")
+
+
+def register_cameras(server_url: str, api_key: str, selected: list):
+    """POST the selected cameras to the server.
+
+    Returns ``(cameras_with_node_ids, None)`` on success or ``(None, message)``
+    on ANY failure. It NEVER raises: the caller runs inside a Tk callback, where
+    an unhandled exception is dumped to stderr (invisible in a windowed exe) and
+    the Start button silently appears to do nothing.
+    """
+    try:
+        resp = httpx.post(
+            f"{server_url}/api/webcam/cameras",
+            json={"cameras": selected},
+            headers={"X-API-Key": api_key},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as e:
+        # Covers ConnectError, ConnectTimeout, ReadTimeout, UnsupportedProtocol,
+        # ... — every httpx transport/request error, not just ConnectError.
+        return None, f"無法連線到伺服器：{e}"
+    if resp.status_code == 401:
+        return None, "API Key 無效"
+    if resp.status_code != 201:
+        return None, f"伺服器回應：{resp.status_code}"
+    try:
+        registered = resp.json()
+    except Exception:
+        return None, "伺服器回應格式錯誤（非 JSON）"
+    cams = [dict(c) for c in selected]
+    for i, cam in enumerate(cams):
+        if i < len(registered):
+            cam["node_id"] = registered[i].get("node_id")
+    return cams, None
+
+
 def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
     result = {"config": None}
     root = tk.Tk()
@@ -87,7 +137,7 @@ def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
     frame_btn.pack(fill="x")
 
     def on_start():
-        server_url = url_var.get().strip()
+        server_url = normalize_server_url(url_var.get())
         api_key = key_var.get().strip()
         if not server_url or not api_key:
             messagebox.showerror("錯誤", "請填入 Server URL 和 API Key")
@@ -99,29 +149,20 @@ def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
         if not selected:
             messagebox.showerror("錯誤", "請至少選擇一支攝影機")
             return
-        # Validate connection
-        try:
-            resp = httpx.post(f"{server_url}/api/webcam/cameras",
-                json={"cameras": selected},
-                headers={"X-API-Key": api_key}, timeout=10.0)
-            if resp.status_code == 401:
-                messagebox.showerror("錯誤", "API Key 無效")
-                return
-            if resp.status_code != 201:
-                messagebox.showerror("錯誤", f"伺服器回應: {resp.status_code}")
-                return
-            registered = resp.json()
-            for i, cam in enumerate(selected):
-                if i < len(registered):
-                    cam["node_id"] = registered[i]["node_id"]
-        except httpx.ConnectError:
-            messagebox.showerror("錯誤", "無法連線到伺服器")
+        # register_cameras never raises: every failure comes back as a message so
+        # the operator always gets feedback instead of a silent no-op.
+        status_var.set("連線中...")
+        root.update()
+        cams, err = register_cameras(server_url, api_key, selected)
+        status_var.set("")
+        if err:
+            messagebox.showerror("錯誤", err)
             return
 
         result["config"] = {
             "server_url": server_url,
             "api_key": api_key,
-            "cameras": selected,
+            "cameras": cams,
             "motion_threshold": 25,
             "heartbeat_interval": 30,
         }
