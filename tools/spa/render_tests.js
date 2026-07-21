@@ -274,7 +274,18 @@ ${PRELUDE}
     A('the once-only warning copy is shown next to the key', container.textContent.indexOf('僅顯示一次') !== -1);
     A('the created key is never rendered into a title attribute', container.innerHTML.indexOf('title="sk-webcam') === -1);
 
-    let closeBtn = byText('button', '已複製，關閉');
+    // --- 複製 button copies the created key to the clipboard ---
+    const copied = [];
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: (t) => { copied.push(t); return Promise.resolve(); } }, configurable: true });
+    const copyBtn = byText('button', '複製');
+    A('a 複製 button is shown next to the created key', !!copyBtn);
+    click(copyBtn);
+    await settle();
+    A('clicking 複製 writes the exact created key to the clipboard', copied.length === 1 && copied[0] === 'sk-webcam-TESTKEYVALUE-DO-NOT-LOG', JSON.stringify(copied));
+    A('a success toast confirms the copy', container.textContent.indexOf('已複製') !== -1);
+
+    let closeBtn = byText('button', '關閉');
     click(closeBtn);
     await settle();
     A('closing the created-key panel triggers onRefresh', refreshCalls.length === 1, JSON.stringify(refreshCalls));
@@ -321,7 +332,15 @@ ${PRELUDE}
     A('the rotated key is NOT put in the auto-dismissing toast element', !toastEl || toastEl.textContent.indexOf('sk-webcam-ROTATED') === -1);
     A('the rotated key is never rendered into a title attribute', container.innerHTML.indexOf('title="sk-webcam-ROTATED') === -1);
 
-    closeBtn = byText('button', '已複製，關閉');
+    // --- 複製 button copies the rotated key ---
+    copied.length = 0;
+    const revokeCopyBtn = byText('button', '複製');
+    A('a 複製 button is shown next to the rotated key', !!revokeCopyBtn);
+    click(revokeCopyBtn);
+    await settle();
+    A('clicking 複製 writes the exact rotated key to the clipboard', copied.length === 1 && copied[0] === 'sk-webcam-ROTATED-NEW-KEY', JSON.stringify(copied));
+
+    closeBtn = byText('button', '關閉');
     click(closeBtn);
     await settle();
     A('closing the revoke panel does not also call onRefresh (revoke != create)', refreshCalls.length === 1, JSON.stringify(refreshCalls));

@@ -2,6 +2,34 @@
 
 const { useState: useState_p, useMemo: useMemo_p } = React;
 
+// Copy-to-clipboard for the "shown once" API keys. Prefer the async Clipboard
+// API (needs a secure context — https or localhost), and fall back to a hidden
+// <textarea> + execCommand('copy') so it still works when the dashboard is
+// served over plain http on a LAN. Returns a Promise<boolean> for success so
+// the caller can toast success vs. "copy failed, select manually".
+function fallbackCopyText(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(() => true, () => fallbackCopyText(text));
+  }
+  return Promise.resolve(fallbackCopyText(text));
+}
+
 // Per-row snooze control. Local `busy` state guards against double-fire on
 // slow VPN; onKeyDown must stopPropagation so Enter/Space on the focused
 // button doesn't also bubble to the surrounding row's keyboard handler
@@ -610,15 +638,22 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
             ) : (
               <>
                 <p className="text-xs text-sev-warn font-bold mb-2">⚠ API Key 僅顯示一次，請立即複製</p>
-                <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3">
-                  <code className="text-xs text-ink-primary break-all select-all">{createdKey.api_key}</code>
+                <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
+                  <code className="text-xs text-ink-primary break-all select-all flex-1">{createdKey.api_key}</code>
+                  <button
+                    onClick={() => copyToClipboard(createdKey.api_key).then(ok =>
+                      setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
+                    className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
+                  >
+                    複製
+                  </button>
                 </div>
                 <p className="text-xs text-ink-muted mb-3">Node ID: {createdKey.node_id}</p>
                 <button
                   onClick={() => { setShowAddModal(false); onRefresh && onRefresh(); }}
                   className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
                 >
-                  已複製，關閉
+                  關閉
                 </button>
               </>
             )}
@@ -634,15 +669,22 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">API Key 已重新產生</h3>
             <p className="text-xs text-sev-warn font-bold mb-2">⚠ 新 Key 僅顯示一次，請立即複製，並更新 {revokedKey.name || revokedKey.nodeId} 的用戶端設定</p>
-            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3">
-              <code className="text-xs text-ink-primary break-all select-all">{revokedKey.apiKey}</code>
+            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
+              <code className="text-xs text-ink-primary break-all select-all flex-1">{revokedKey.apiKey}</code>
+              <button
+                onClick={() => copyToClipboard(revokedKey.apiKey).then(ok =>
+                  setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
+                className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
+              >
+                複製
+              </button>
             </div>
             <p className="text-xs text-ink-muted mb-3">Node ID: {revokedKey.nodeId}</p>
             <button
               onClick={() => setRevokedKey(null)}
               className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
             >
-              已複製，關閉
+              關閉
             </button>
           </div>
         </div>
