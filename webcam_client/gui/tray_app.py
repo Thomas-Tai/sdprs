@@ -14,9 +14,12 @@ except ImportError:
 
 
 def _create_icon(color: str = "green") -> "Image.Image":
-    img = Image.new("RGB", (64, 64), "transparent")
+    # Transparent background needs RGBA + a (0,0,0,0) fill. "transparent" is NOT
+    # a valid color for Image.new and raises ValueError, which crashed startup
+    # the moment the tray icon was built.
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    c = (0, 200, 0) if color == "green" else (220, 50, 50)
+    c = (0, 200, 0, 255) if color == "green" else (220, 50, 50, 255)
     draw.ellipse([8, 8, 56, 56], fill=c)
     return img
 
