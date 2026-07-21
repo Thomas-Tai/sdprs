@@ -1526,8 +1526,11 @@ git commit -m "feat(dashboard): add hls.js vendor, HlsPlayer component, webcam A
 - Modify: `sdprs/central_server/api/nodes.py` (include webcam cameras in `GET /api/nodes`)
 - Modify: `sdprs/central_server/static/spa/api.jsx` (`mapNode` — recognise `webcam`)
 - Modify: `sdprs/central_server/static/spa/pages/monitor.jsx` (badge + live button)
+- Modify: `sdprs/central_server/static/spa/pages/status.jsx` (類型/溫度/電源 columns + type
+  filter made webcam-aware — see Step 0c; folded in from the Task 6 review follow-up, as no
+  other task owns this file's webcam-blindness and it only surfaces once `mapNode` emits `webcam`)
 - Modify: `sdprs/central_server/static/spa/app.jsx` (route the two webcam WS events)
-- Modify: `sdprs/tools/spa/render_tests.js` (badge render assertions)
+- Modify: `sdprs/tools/spa/render_tests.js` (badge render assertions — monitor.jsx AND status.jsx)
 - Test: `sdprs/central_server/tests/test_webcam_node_list.py`
 
 **Interfaces:**
@@ -1609,6 +1612,82 @@ Then replace the `type === 'camera'` tests in this function with `cameraLike` fo
 staleness downgrade (~line 282) and the `up` computation (~line 303). Leave the
 visual/audio-health degradation check keyed to `type === 'camera'` only — a webcam client
 reports neither, so `'unknown'` must not be read as degraded.
+
+> **C3 double-render — already fixed upstream, do not re-guard in code.** The original
+> Task 12 text warned Step 0a would double-render a webcam (once as an auto-created
+> `glass` `nodes` row, once as a `webcam_cameras` row). That root cause was closed by
+> Task 3b (`1b228cb`): webcam ingest now stamps `webcam_cameras` via `touch_webcam_upload`
+> and never calls `touch_node_upload`, so a webcam node_id is never inserted into the
+> `nodes` table. Registration writes `webcam_cameras` only. The two lists are therefore
+> disjoint by node_id and Step 0a's plain `append` is safe. No dedup pass is required;
+> if a future audit finds a webcam id in BOTH tables, that is a NEW regression to fix at
+> the writer, not to paper over here.
+
+- [ ] **Step 0c: Make `status.jsx` webcam-aware (folded in from the Task 6 review)**
+
+`sdprs/central_server/static/spa/pages/status.jsx` was written before webcam existed and is
+blind to `n.type === 'webcam'` in five places — each falls through to a pump/edge branch and
+renders a webcam row as something it is not. This file is in NO other task's scope, and the
+blindness only becomes visible once Step 0b makes `mapNode` emit `'webcam'`, so it lands
+here. Fix all five (do NOT touch the shipped Task 6 create/revoke modal or the action column):
+
+1. **Type filter is unreachable for webcam.** `cycleType` (~line 176) cycles only
+   `all → camera → pump → all`, so a webcam can never be filtered to. Extend the cycle and
+   update the state comment (~line 140) to `// all | camera | pump | webcam`:
+   ```javascript
+   const cycleType = () => setTypeFilter(t =>
+     t === 'all' ? 'camera' : t === 'camera' ? 'pump' : t === 'pump' ? 'webcam' : 'all');
+   ```
+
+2. **Filter label mislabels webcam as 抽水站.** `typeLabel` (~line 185) is a binary
+   `camera ? '攝影機' : '抽水站'`, so `webcam` reads 「抽水站」. Make it explicit:
+   ```javascript
+   const typeLabel = typeFilter === 'all' ? '全部'
+     : typeFilter === 'camera' ? '攝影機'
+     : typeFilter === 'webcam' ? 'Webcam'
+     : '抽水站';
+   ```
+
+3. **類型 column renders a webcam as a pump (the headline bug).** ~line 306-307 the icon and
+   label are a binary `camera ? Camera/'攝影機' : Pump/'抽水站'`, so a webcam gets the pump
+   icon and the label 「抽水站」. Add `const isWebcam = n.type === 'webcam';` near the top of
+   the `.map` callback (alongside `pumpLevelMissing`), then make the cell three-way:
+   ```javascript
+   {isWebcam ? <Icon.Camera size={12}/> : n.type === 'camera' ? <Icon.Camera size={12}/> : <Icon.Pump size={12}/>}
+   {isWebcam ? 'Webcam' : n.type === 'camera' ? '攝影機' : '抽水站'}
+   ```
+   Use only an `Icon.*` glyph that is actually exported — `Icon.Camera` is the safe fallback;
+   an unexported name renders blank. The pump-relay badge (~line 311) is already gated
+   `n.type === 'pump'`, so it stays off for webcam — leave it.
+
+4. **溫度/水位 column tells a water-level lie for webcam.** ~line 354 the branch is
+   `n.type === 'camera' ? <temp> : <water-level>`. A webcam (`type !== 'camera'`) falls into
+   the pump water-level branch and, with `n.level == null`, renders the amber 「—」 titled
+   「水位資料未上傳」 — implying a broken water sensor on a device that has none. Route webcam
+   into its own arm before the pump branch, showing a plain muted 「—」 (a webcam reports no
+   temperature):
+   ```javascript
+   {n.type === 'camera' ? (
+     <span className={n.temp > 50 ? 'text-sev-warn' : n.temp != null ? 'text-ink-secondary' : 'text-ink-muted'}>{n.temp != null ? n.temp+'°C' : '—'}</span>
+   ) : isWebcam ? (
+     <span className="text-ink-muted" title="網路攝影機無此感測">—</span>
+   ) : n.level == null ? (
+     /* ...existing pump water-level branches unchanged... */
+   ```
+
+5. **電源 column claims PoE for a webcam.** ~line 376 the branch is `n.type === 'pump' ?
+   <voltage/power> : 'PoE'`. A webcam client is a mains-powered PC, not a PoE edge cam, so
+   「PoE」 is wrong. Route webcam to a neutral muted 「—」:
+   ```javascript
+   {n.type === 'pump' ? (
+     /* ...existing pump voltage/power badge unchanged... */
+   ) : isWebcam ? (
+     <span className="text-ink-muted text-[10px] font-mono">—</span>
+   ) : <span className="text-ink-muted text-[10px] font-mono">PoE</span>}
+   ```
+
+The bitrate column (~line 347, `n.type === 'camera' ? <bitrate> : '—'`) already shows a
+neutral 「—」 for webcam (no bitrate in 1Hz mode) — leave it.
 
 - [ ] **Step 1: Add webcam badge and live button to NodeCard**
 
@@ -1740,10 +1819,17 @@ cd sdprs
 /c/Python314/python -m pytest central_server/tests/test_ws_event_contract.py -q -p no:cacheprovider
 ```
 
-**5c — SPA render assertions.** Add cases to `sdprs/tools/spa/render_tests.js` covering:
-a node with `node_type: 'webcam'` renders the `Webcam` badge; a node with
-`node_type: 'glass'` renders `Edge Cam` and NOT the webcam badge; the live button is
-absent for non-webcam nodes. Then:
+**5c — SPA render assertions.** Add cases to `sdprs/tools/spa/render_tests.js` covering
+BOTH pages that now change:
+- *monitor.jsx (NodeCard):* a node with `node_type: 'webcam'` renders the `Webcam` badge;
+  a node with `node_type: 'glass'` renders `Edge Cam` and NOT the webcam badge; the live
+  button is absent for non-webcam nodes.
+- *status.jsx (StatusPage table):* a `webcam` row's 類型 cell shows `Webcam` and NOT
+  「抽水站」 (the Step 0c headline-bug guard); its 電源 cell is NOT `PoE`; and its 溫度/水位
+  cell does NOT carry the 「水位資料未上傳」 title. These three assertions are what prove the
+  webcam-blindness fix is real and did not silently regress to the pump branch.
+
+Then:
 
 ```bash
 cd sdprs/tools/spa && npm run check
@@ -1762,7 +1848,7 @@ connected), and `● LIVE ✕` returns to snapshot mode.
 
 ```bash
 cd sdprs
-git add central_server/api/nodes.py central_server/static/spa/api.jsx central_server/static/spa/pages/monitor.jsx central_server/static/spa/app.jsx central_server/tests/test_webcam_node_list.py tools/spa/render_tests.js
+git add central_server/api/nodes.py central_server/static/spa/api.jsx central_server/static/spa/pages/monitor.jsx central_server/static/spa/pages/status.jsx central_server/static/spa/app.jsx central_server/tests/test_webcam_node_list.py tools/spa/render_tests.js
 git commit -m "feat(dashboard): surface webcam nodes end-to-end with badge and live view"
 ```
 
