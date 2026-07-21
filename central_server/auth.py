@@ -222,10 +222,31 @@ async def verify_api_key_or_session(
     )
 
 
+# ===== Webcam API Key Authentication =====
+
+async def verify_webcam_api_key(request: Request) -> str:
+    """Verify X-API-Key against webcam_clients table. Returns client node_id."""
+    api_key = request.headers.get("X-API-Key")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key required",
+        )
+    from .database import get_webcam_client_by_key
+    client = get_webcam_client_by_key(api_key)
+    if client is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid webcam API key",
+        )
+    return client["node_id"]
+
+
 __all__ = [
     "verify_api_key",
     "verify_node_id",
     "verify_api_key_or_session",
+    "verify_webcam_api_key",
     "get_current_user",
     "authenticate_user",
 ]

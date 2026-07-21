@@ -11,9 +11,11 @@ The public API (init_db, get_db, insert_event, etc.) is identical in both modes.
 Callers do not need to know which backend is active.
 """
 
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -261,6 +263,32 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
 
     # Don't insert default row - empty means SMG Macau only
 
+    # Webcam client registry (one key per client PC, multiple cameras)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS webcam_clients (
+            node_id      TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            api_key_hash TEXT NOT NULL,
+            created_at   DATETIME,
+            status       TEXT DEFAULT 'OFFLINE'
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS webcam_cameras (
+            node_id       TEXT PRIMARY KEY,
+            client_id     TEXT NOT NULL REFERENCES webcam_clients(node_id),
+            name          TEXT NOT NULL,
+            device_index  INTEGER,
+            resolution_w  INTEGER DEFAULT 640,
+            resolution_h  INTEGER DEFAULT 480,
+            jpeg_quality  INTEGER DEFAULT 40,
+            target_fps    INTEGER DEFAULT 8,
+            status        TEXT DEFAULT 'OFFLINE',
+            last_upload   DATETIME,
+            FOREIGN KEY (client_id) REFERENCES webcam_clients(node_id) ON DELETE CASCADE
+        );
+    """)
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);")
@@ -374,6 +402,31 @@ def _create_tables_postgresql(conn):
     # every startup, so an unconditional UPDATE ... = NULL would wipe the
     # operator's configured location on each restart (data-loss bug). New
     # installs are already empty (columns DEFAULT NULL, no default row).
+
+    # Webcam client registry (one key per client PC, multiple cameras)
+    conn.execute(sqlalchemy.text("""
+        CREATE TABLE IF NOT EXISTS webcam_clients (
+            node_id      TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            api_key_hash TEXT NOT NULL,
+            created_at   TIMESTAMP,
+            status       TEXT DEFAULT 'OFFLINE'
+        );
+    """))
+    conn.execute(sqlalchemy.text("""
+        CREATE TABLE IF NOT EXISTS webcam_cameras (
+            node_id       TEXT PRIMARY KEY,
+            client_id     TEXT NOT NULL REFERENCES webcam_clients(node_id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            device_index  INTEGER,
+            resolution_w  INTEGER DEFAULT 640,
+            resolution_h  INTEGER DEFAULT 480,
+            jpeg_quality  INTEGER DEFAULT 40,
+            target_fps    INTEGER DEFAULT 8,
+            status        TEXT DEFAULT 'OFFLINE',
+            last_upload   TIMESTAMP
+        );
+    """))
 
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_events_node_timestamp ON events(node_id, timestamp);"))
@@ -1249,3 +1302,141 @@ def _pg_fetch_many_sync(query: str, params: dict) -> List[Dict[str, Any]]:
     with engine.connect() as conn:
         result = conn.execute(sqlalchemy.text(query), params)
         return [dict(r) for r in result.mappings().fetchall()]
+
+
+def _pg_execute_sync(query: str, params: dict) -> None:
+    """Synchronous PostgreSQL write (INSERT/UPDATE/DELETE) via SQLAlchemy."""
+    import sqlalchemy
+    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text(query), params)
+        conn.commit()
+
+
+# =============================================================================
+# Webcam Client Operations  (unified SQLite / PostgreSQL)
+# =============================================================================
+
+def create_webcam_client(name: str) -> dict:
+    """Register a new webcam client PC. Returns {node_id, api_key, api_key_hash}."""
+    node_id = f"webcam_{secrets.token_hex(4)}"
+    api_key = f"sk-webcam-{secrets.token_urlsafe(32)}"
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    now = utcnow().isoformat()
+    if get_backend() == "postgresql":
+        _pg_execute_sync(
+            "INSERT INTO webcam_clients (node_id, name, api_key_hash, created_at, status) "
+            "VALUES (:node_id, :name, :hash, :now, 'OFFLINE')",
+            {"node_id": node_id, "name": name, "hash": api_key_hash, "now": now},
+        )
+    else:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO webcam_clients (node_id, name, api_key_hash, created_at, status) "
+                "VALUES (?, ?, ?, ?, 'OFFLINE')",
+                (node_id, name, api_key_hash, now),
+            )
+    return {"node_id": node_id, "api_key": api_key, "api_key_hash": api_key_hash}
+
+
+def get_webcam_client_by_key(api_key: str) -> Optional[dict]:
+    """Look up a webcam client by its raw API key (hashed for comparison)."""
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT node_id, name, status FROM webcam_clients WHERE api_key_hash = :h",
+            {"h": api_key_hash},
+        )
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT node_id, name, status FROM webcam_clients WHERE api_key_hash = ?",
+            (api_key_hash,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def revoke_webcam_key(node_id: str) -> dict:
+    """Rotate the API key for a webcam client. Returns new {api_key, api_key_hash}."""
+    new_key = f"sk-webcam-{secrets.token_urlsafe(32)}"
+    new_hash = hashlib.sha256(new_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        _pg_execute_sync(
+            "UPDATE webcam_clients SET api_key_hash = :h WHERE node_id = :id",
+            {"h": new_hash, "id": node_id},
+        )
+    else:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "UPDATE webcam_clients SET api_key_hash = ? WHERE node_id = ?",
+                (new_hash, node_id),
+            )
+    return {"api_key": new_key, "api_key_hash": new_hash}
+
+
+def register_webcam_cameras(client_node_id: str, cameras: list) -> list:
+    """Register one or more cameras under a webcam client. Returns list of {node_id, name}."""
+    results = []
+    for cam in cameras:
+        cam_node_id = f"webcam_{secrets.token_hex(4)}"
+        resolution = cam.get("resolution", [640, 480])
+        if get_backend() == "postgresql":
+            _pg_execute_sync(
+                "INSERT INTO webcam_cameras (node_id, client_id, name, device_index, "
+                "resolution_w, resolution_h, jpeg_quality, target_fps) "
+                "VALUES (:nid, :cid, :name, :didx, :rw, :rh, :q, :fps)",
+                {"nid": cam_node_id, "cid": client_node_id, "name": cam["name"],
+                 "didx": cam.get("device_index", 0), "rw": resolution[0],
+                 "rh": resolution[1], "q": cam.get("jpeg_quality", 40),
+                 "fps": cam.get("target_fps", 8)},
+            )
+        else:
+            with get_db_cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO webcam_cameras (node_id, client_id, name, device_index, "
+                    "resolution_w, resolution_h, jpeg_quality, target_fps) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (cam_node_id, client_node_id, cam["name"], cam.get("device_index", 0),
+                     resolution[0], resolution[1],
+                     cam.get("jpeg_quality", 40), cam.get("target_fps", 8)),
+                )
+        results.append({"node_id": cam_node_id, "name": cam["name"]})
+    return results
+
+
+def get_webcam_cameras(client_node_id: str) -> list:
+    """List all cameras registered under a webcam client."""
+    if get_backend() == "postgresql":
+        return _pg_fetch_many_sync(
+            "SELECT node_id, name, device_index, status FROM webcam_cameras WHERE client_id = :cid",
+            {"cid": client_node_id},
+        )
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT node_id, name, device_index, status FROM webcam_cameras WHERE client_id = ?",
+            (client_node_id,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def get_webcam_camera_owner(cam_node_id: str, api_key_hash: str) -> Optional[dict]:
+    """Verify a camera belongs to the client identified by api_key_hash.
+
+    Returns {node_id, client_id} if ownership is confirmed, else None.
+    """
+    if get_backend() == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT wc.node_id, wc.client_id FROM webcam_cameras wc "
+            "JOIN webcam_clients wcl ON wc.client_id = wcl.node_id "
+            "WHERE wc.node_id = :nid AND wcl.api_key_hash = :h",
+            {"nid": cam_node_id, "h": api_key_hash},
+        )
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT wc.node_id, wc.client_id FROM webcam_cameras wc "
+            "JOIN webcam_clients wcl ON wc.client_id = wcl.node_id "
+            "WHERE wc.node_id = ? AND wcl.api_key_hash = ?",
+            (cam_node_id, api_key_hash),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
