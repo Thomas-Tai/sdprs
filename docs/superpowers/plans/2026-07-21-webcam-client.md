@@ -1003,6 +1003,318 @@ git commit -m "feat(server): add webcam router with HLS, stream control, and com
 
 ---
 
+### Task 3b: Server — Webcam JPEG Ingest + Viewer Lease Model
+
+> **New task (2026-07-21 audit).** Closes C1 (1Hz path 401s silently), C2
+> (`last_upload` has no writer), C3 (dual `nodes`/`webcam_cameras` registry),
+> H1 (viewer count never decrements), H2 (5-min auto-stop absent / never
+> commands the client), and H3 (`verify_node_id` allowlist breaks every webcam
+> endpoint). Derives from spec §303 (1Hz JPEG ingest) and §391 (lease model).
+> All files are under `central_server/` — file-disjoint from the client track.
+
+**Files:**
+- Modify: `sdprs/central_server/database.py` (add `touch_webcam_upload`)
+- Modify: `sdprs/central_server/services/hls_service.py` (lease model + async cleanup)
+- Modify: `sdprs/central_server/api/webcam.py` (ingest endpoint, `stream/renew`,
+  rewrite `stream/start`+`stream/stop` to lease semantics, remove `verify_node_id`)
+- Modify: `sdprs/central_server/main.py` (cleanup job → async, 30s interval)
+- Modify: `sdprs/central_server/tests/test_webcam_api.py` (update stream tests to lease model)
+- Test: `sdprs/central_server/tests/test_webcam_ingest.py` (new)
+
+**Interfaces:**
+- Produces: `POST /api/webcam/{node_id}/snapshot` (X-API-Key) → 204
+- Produces: `POST /api/webcam/{node_id}/stream/renew` (session) → 200
+- Modifies: `stream/start`, `stream/stop` → lease semantics (no longer a raw counter)
+- Produces (DB): `touch_webcam_upload(node_id)`
+- Produces (service): `touch_lease`, `release_lease`, `has_active_lease`,
+  `get_viewer_count` (now 0/1), async `cleanup_stale_streams`
+
+**Frozen contract (shared with client Task 8 — do not diverge):** the 1Hz path is
+`POST /api/webcam/{node_id}/snapshot`, `X-API-Key` header, raw JPEG body, `204` on
+success. NOT the edge route. The client calls `raise_for_status()` (Task 8).
+
+- [ ] **Step 1: `database.py` — add the `last_upload` writer (fixes C2/C3)**
+
+The `webcam_cameras.last_upload` column exists but nothing writes it. Add a writer
+that stamps ONLY `webcam_cameras` — it must NOT touch `nodes`. (Reusing the edge
+`touch_node_upload` is what causes C3: that function `INSERT`s a `node_type='glass'`
+row into `nodes`, giving each webcam a second identity.)
+
+```python
+def touch_webcam_upload(node_id: str) -> None:
+    """Stamp webcam_cameras.last_upload = now for a camera node. Writes ONLY
+    webcam_cameras (never nodes -- see audit C3). Never raises (data-quality
+    column, not load-bearing for ingest)."""
+    now = utcnow().isoformat()
+    try:
+        if get_backend() == "postgresql":
+            _pg_execute_sync(
+                "UPDATE webcam_cameras SET last_upload = :ts WHERE node_id = :nid",
+                {"ts": now, "nid": node_id},
+            )
+            return
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "UPDATE webcam_cameras SET last_upload = ? WHERE node_id = ?",
+                (now, node_id),
+            )
+    except Exception as e:
+        logger.debug(f"touch_webcam_upload failed for {node_id}: {e}")
+```
+
+Match the exact backend-dispatch idiom already used by `register_webcam_cameras`
+(`get_backend()`, `_pg_execute_sync`, `get_db_cursor`). Export it if the module
+uses an `__all__`.
+
+- [ ] **Step 2: `hls_service.py` — replace the counter with a lease model (fixes H1/H2)**
+
+Delete `_viewer_count`, `increment_viewer`, `decrement_viewer`. Add:
+
+```python
+_stream_leases: Dict[str, float] = {}       # node_id -> lease expiry (epoch seconds)
+_stream_stopped_at: Dict[str, float] = {}   # node_id -> when we last forced/observed a stop
+
+LEASE_TTL_SECONDS = 90   # spec §391: survives two missed 30s renews (one network blip)
+
+
+def touch_lease(node_id: str) -> bool:
+    """Arm or extend the viewer lease (start/renew). Returns True on a 0->1
+    transition (no live lease before) so the caller enqueues stream_start +
+    broadcasts webcam_stream_started."""
+    now = time.time()
+    was_live = _stream_leases.get(node_id, 0.0) > now
+    _stream_leases[node_id] = now + LEASE_TTL_SECONDS
+    _stream_stopped_at.pop(node_id, None)
+    return not was_live
+
+
+def release_lease(node_id: str) -> bool:
+    """Explicit stop. Returns True if a live lease existed (caller enqueues
+    stream_stop + broadcasts webcam_stream_stopped)."""
+    now = time.time()
+    was_live = _stream_leases.pop(node_id, 0.0) > now
+    if was_live:
+        _stream_stopped_at[node_id] = now
+    return was_live
+
+
+def has_active_lease(node_id: str) -> bool:
+    return _stream_leases.get(node_id, 0.0) > time.time()
+
+
+def get_viewer_count(node_id: str) -> int:
+    # Single-lease-per-node model: 1 while a viewer lease is live, else 0.
+    return 1 if has_active_lease(node_id) else 0
+```
+
+> **Design note — single lease per node.** The dashboard sends no per-viewer token,
+> so start/renew/stop are per-node. We model ONE lease per camera: "is anyone
+> watching?" (0/1). Two operators viewing the same camera share the lease; either
+> one's renew keeps it alive; an explicit ✕ from one releases it and the other's
+> next 30s renew re-arms it (brief re-start). This is deliberately simple and
+> correct for the realistic case (usually one operator per camera); the failure
+> mode it MUST kill — a forgotten tab pinning a field PC's uplink forever — is
+> fixed because the lease expires without renews. Record this tradeoff; do not
+> silently "improve" it into per-viewer refcounting without updating the spec.
+
+Rewrite `cleanup_hls_dir` to drop the new dicts instead of `_viewer_count`:
+
+```python
+def cleanup_hls_dir(node_id: str) -> None:
+    ...  # unchanged dir removal
+    _stream_leases.pop(node_id, None)
+    _stream_stopped_at.pop(node_id, None)
+    _last_activity.pop(node_id, None)
+    _command_queues.pop(node_id, None)
+    _command_queue_activity.pop(node_id, None)
+```
+
+- [ ] **Step 3: `hls_service.py` — make `cleanup_stale_streams` async and command the client (fixes H2)**
+
+`main.py` uses `AsyncIOScheduler`, which runs an `async def` job ON the event loop.
+Making the job async is what lets it `await enqueue_command` / `ws_manager.broadcast`
+and mutate the module dicts with NO lock — everything is single-threaded on the loop
+(this also retires the "dict mutation from a scheduler thread" race noted in the
+Task 3 roll-up). The critical fix over the shipped version: **on lease expiry it
+must enqueue `stream_stop` to the client and broadcast — not merely delete dirs.**
+
+```python
+async def cleanup_stale_streams() -> None:
+    """Runs every 30s ON the event loop (AsyncIOScheduler async job). Two duties
+    (spec §391 + §377):
+      1. Lease expiry -> a lease past expiry means every viewer left WITHOUT a
+         clean stop (closed tab / crash / lid). Force the stream down for real:
+         enqueue stream_stop to the CLIENT and broadcast webcam_stream_stopped,
+         then mark it for directory reclaim.
+      2. Directory reclaim -> 60s after a stop, or an orphan dir/queue idle past
+         HLS_VIEWER_TIMEOUT_SECONDS, drop the HLS dir + in-memory queue state.
+    """
+    from .websocket_service import ws_manager  # local import avoids an import cycle
+    settings = get_settings()
+    now = time.time()
+
+    # (1) Expire leases -> force a real stop.
+    for nid in [n for n, exp in list(_stream_leases.items()) if exp <= now]:
+        _stream_leases.pop(nid, None)
+        _stream_stopped_at[nid] = now
+        logger.info(f"Viewer lease expired for {nid}; forcing stream stop")
+        await enqueue_command(nid, "stream_stop")
+        await ws_manager.broadcast({"type": "webcam_stream_stopped", "data": {"node_id": nid}})
+
+    # (2) Reclaim directories / queue state (no active lease only).
+    DIR_GRACE = 60
+    orphan_grace = settings.HLS_VIEWER_TIMEOUT_SECONDS
+    candidates = (set(_stream_stopped_at) | set(_last_activity)
+                  | set(_command_queue_activity) | set(_command_queues))
+    for nid in candidates:
+        if has_active_lease(nid):
+            continue
+        stopped_at = _stream_stopped_at.get(nid, 0.0)
+        last_act = max(_last_activity.get(nid, 0.0), _command_queue_activity.get(nid, 0.0))
+        recently_stopped = bool(stopped_at) and (now - stopped_at) > DIR_GRACE
+        idle_orphan = bool(last_act) and (now - last_act) > orphan_grace
+        if recently_stopped or idle_orphan:
+            logger.info(f"Reclaiming HLS state for {nid}")
+            cleanup_hls_dir(nid)
+```
+
+Update `__all__`: drop `increment_viewer`/`decrement_viewer`, add `touch_lease`,
+`release_lease`, `has_active_lease`. The reclaim predicate in duty (2) is a
+reference — finalize its exact thresholds with the tests in Step 6.
+
+- [ ] **Step 4: `webcam.py` — add the ingest endpoint, add `stream/renew`, rewrite start/stop, remove `verify_node_id` (fixes C1/H3)**
+
+Add the ingest route (writes the SHARED frame buffer + `last_upload`):
+
+```python
+from ..timeutil import utcnow
+from ..database import register_webcam_cameras, get_webcam_cameras, touch_webcam_upload
+
+@router.post("/{node_id}/snapshot", status_code=status.HTTP_204_NO_CONTENT)
+async def ingest_webcam_snapshot(
+    node_id: str,
+    request: Request,
+    client_node_id: str = Depends(verify_webcam_api_key),
+):
+    # NO verify_node_id() here: webcam node_ids are server-assigned at
+    # registration and can never be in ALLOWED_NODE_IDS (spec §303 / audit H3).
+    # Ownership is enforced against the authenticated client instead.
+    if not any(c["node_id"] == node_id for c in get_webcam_cameras(client_node_id)):
+        raise HTTPException(status_code=403, detail="Camera not owned by this client")
+    jpeg_bytes = await request.body()
+    if not jpeg_bytes:
+        raise HTTPException(status_code=400, detail="Empty snapshot data")
+    if len(jpeg_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Snapshot too large (max 5 MB)")
+    # Share the SAME in-memory buffer the edge path uses, so the existing
+    # GET /api/edge/{node_id}/snapshot/latest read path serves webcams unchanged
+    # (spec §303 point 3). Webcam JPEGs come from cv2.imencode and carry no EXIF,
+    # so the edge path's _strip_exif is unnecessary here.
+    request.app.state.latest_snapshots[node_id] = {"jpeg": jpeg_bytes, "timestamp": utcnow()}
+    touch_webcam_upload(node_id)  # fixes C2; writes webcam_cameras only, never nodes (C3)
+    return None
+```
+
+Rewrite `stream/start` + `stream/stop` and add `stream/renew` to lease semantics,
+and **remove every `verify_node_id(node_id)` call in this file** (H3 — it 403s every
+webcam endpoint on allowlisted deployments; ownership is already enforced by
+`get_webcam_cameras` on the client endpoints and by session auth on the dashboard
+endpoints):
+
+```python
+@router.post("/{node_id}/stream/start")
+async def start_webcam_stream(node_id, request, user=Depends(get_current_user)):
+    fresh = hls_service.touch_lease(node_id)
+    if fresh:  # 0 -> 1
+        await hls_service.enqueue_command(node_id, "stream_start", {"fps": 8})
+        await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
+    return {"message": "Stream start requested", "node_id": node_id,
+            "viewers": hls_service.get_viewer_count(node_id)}
+
+
+@router.post("/{node_id}/stream/renew")
+async def renew_webcam_stream(node_id, request, user=Depends(get_current_user)):
+    # Dashboard calls this every 30s while a tile is live. If the lease had
+    # lapsed (network gap > 90s) the scan already stopped the client, so a
+    # re-arm (fresh == True) re-issues stream_start to resume encoding.
+    fresh = hls_service.touch_lease(node_id)
+    if fresh:
+        await hls_service.enqueue_command(node_id, "stream_start", {"fps": 8})
+        await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
+    return {"node_id": node_id, "viewers": hls_service.get_viewer_count(node_id)}
+
+
+@router.post("/{node_id}/stream/stop")
+async def stop_webcam_stream(node_id, request, user=Depends(get_current_user)):
+    was_live = hls_service.release_lease(node_id)
+    if was_live:
+        await hls_service.enqueue_command(node_id, "stream_stop")
+        await ws_manager.broadcast({"type": "webcam_stream_stopped", "data": {"node_id": node_id}})
+    return {"message": "Stream stop requested", "node_id": node_id,
+            "viewers": hls_service.get_viewer_count(node_id)}
+```
+
+Also drop `verify_node_id(node_id)` from `upload_hls_segment`, `serve_hls_file`, and
+`poll_commands`, and remove the now-unused `verify_node_id` import. No new WS event
+types are introduced (`webcam_stream_started/stopped` are already whitelisted +
+frozen from Task 3), so this task needs no `api.jsx`/`app.jsx`/contract-test change.
+
+- [ ] **Step 5: `main.py` — async cleanup at 30s**
+
+Line ~106: change the job registration to 30 seconds. `cleanup_stale_streams` is
+now `async def`; `AsyncIOScheduler` will await it on the loop.
+
+```python
+scheduler.add_job(cleanup_stale_streams, "interval", seconds=30, id="hls_cleanup")
+```
+
+- [ ] **Step 6: Tests**
+
+New `central_server/tests/test_webcam_ingest.py` (async, `@pytest.mark.anyio`,
+`AsyncClient` + `ASGITransport`; call `init_db()` explicitly in the fixture —
+ASGITransport does NOT run lifespan). Cover:
+1. Ingest with a valid client key for an OWNED camera → 204; the frame is then
+   readable via `GET /api/edge/{node_id}/snapshot/latest` (proves the shared buffer);
+   `webcam_cameras.last_upload` is now non-null (proves C2 writer).
+2. Ingest for a node_id NOT owned by the key → 403.
+3. Ingest with NO/invalid key → 401 (verify_webcam_api_key).
+4. Ingest does NOT create a `nodes` row for the camera (proves C3 stays fixed).
+5. Empty body → 400; >5 MB → 413.
+
+Lease behavior (extend `test_webcam_api.py` or a new `test_webcam_lease.py`):
+6. `stream/start` → viewers 1 + a `stream_start` command is enqueued; a SECOND
+   start → still 1, no duplicate broadcast (0→1 only).
+7. `stream/renew` extends the lease (monkeypatch `time.time`/`LEASE_TTL` so the
+   scan sees it still live).
+8. **Lease expiry → `cleanup_stale_streams()` enqueues `stream_stop` AND the client
+   can dequeue it** (this is the H1/H2 regression guard — the single most important
+   assertion in this task). Drive it by setting the lease expiry into the past, then
+   `await cleanup_stale_streams()`, then `dequeue_command(nid, timeout=0.1)` returns
+   `{"command": "stream_stop", ...}`.
+9. `stream/stop` releases the lease immediately (viewers 0 + stop enqueued).
+
+Also update the existing Task 3 stream tests in `test_webcam_api.py` that asserted
+counter semantics.
+
+- [ ] **Step 7: Run tests (per-file, this machine)**
+```bash
+cd sdprs
+/c/Python314/python -m pytest central_server/tests/test_webcam_ingest.py -q -p no:cacheprovider
+/c/Python314/python -m pytest central_server/tests/test_webcam_api.py -q -p no:cacheprovider
+/c/Python314/python -m pytest central_server/tests/test_ws_event_contract.py -q -p no:cacheprovider
+```
+Expected: all PASS. Also `py_compile` every modified `.py` first.
+
+- [ ] **Step 8: Commit** (stage explicit pathspecs only — a client-track agent may
+  be committing in parallel)
+```bash
+cd sdprs
+git add central_server/database.py central_server/services/hls_service.py central_server/api/webcam.py central_server/main.py central_server/tests/test_webcam_ingest.py central_server/tests/test_webcam_api.py
+git commit -m "feat(server): webcam JPEG ingest + viewer lease model (fixes C1/C2/C3/H1/H2/H3)"
+```
+
+---
+
 ### Task 4: Dashboard — hls.js Vendor + API Functions + HlsPlayer Component
 
 **Files:**
