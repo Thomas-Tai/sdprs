@@ -1,11 +1,31 @@
 # sdprs/webcam_client/hls_encoder.py
 import logging
+import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("webcam_client.hls_encoder")
+
+
+def _resolve_ffmpeg() -> str:
+    """Return the ffmpeg executable to invoke.
+
+    A onefile PyInstaller build may bundle ffmpeg.exe so the packaged app is
+    fully standalone (live view works with no separate ffmpeg install). At
+    runtime the bootloader unpacks bundled binaries into ``sys._MEIPASS`` —
+    prefer an ffmpeg there, by ABSOLUTE path, so the target PC needs nothing on
+    PATH. Fall back to the bare command name for dev runs, or a build made
+    without ffmpeg, letting the OS resolve it from PATH as before.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidate = os.path.join(base, "ffmpeg.exe")
+        if os.path.exists(candidate):
+            return candidate
+    return "ffmpeg"
 
 
 class HlsEncoder:
@@ -27,7 +47,7 @@ class HlsEncoder:
             if self.is_running:
                 return True
             cmd = [
-                "ffmpeg", "-y",
+                _resolve_ffmpeg(), "-y",
                 "-f", "rawvideo",
                 "-vcodec", "rawvideo",
                 "-s", f"{self._width}x{self._height}",

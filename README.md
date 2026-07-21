@@ -150,13 +150,21 @@ pip install -r requirements.txt
 python -m webcam_client.main
 ```
 
-### 打包
+### 打包（單一 exe，內含即時串流）
+
+在**已安裝 ffmpeg 且在 PATH** 的機器上打包，`build.spec` 會自動將 ffmpeg 一併打包進 exe，
+產物為完全獨立的單一檔案：複製到任何 Windows x64 電腦即可運行（含即時串流），
+目標電腦**無需安裝 Python 或 ffmpeg**。
 
 ```bash
 cd webcam_client
+pip install -r requirements.txt
 pyinstaller build.spec
-# 產物: dist/SDPRS_Webcam.exe
+# 產物: dist/SDPRS_Webcam.exe（單檔；建議使用 static ffmpeg 版本，單一自足的 ffmpeg.exe）
 ```
+
+若打包機沒有 ffmpeg，仍會產生 exe，但目標電腦需自行在 PATH 安裝 ffmpeg 才能使用即時串流（1Hz 快照不受影響）。
+exe 未經簽章且經 UPX 壓縮，首次執行時 SmartScreen / 防毒可能警告，選「仍要執行」即可。
 
 ---
 
