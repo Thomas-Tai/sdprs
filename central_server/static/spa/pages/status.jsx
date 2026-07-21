@@ -137,7 +137,7 @@ const StreamRowButton = ({ node, onDone, onError }) => {
 };
 
 const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
-  const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump
+  const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump | webcam
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
   const [locationFilter, setLocationFilter] = useState_p('all');
   // Local toast (success/error feedback for snooze etc.). Auto-dismissed after 3s.
@@ -173,7 +173,8 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   }), [typeFilter, statusFilter, locationFilter, nodes]);
   // Cycle through preset values for the chip dropdowns (real dropdown UI is
   // a bigger design decision — keep the click surface working with cycling).
-  const cycleType = () => setTypeFilter(t => t === 'all' ? 'camera' : t === 'camera' ? 'pump' : 'all');
+  const cycleType = () => setTypeFilter(t =>
+    t === 'all' ? 'camera' : t === 'camera' ? 'pump' : t === 'pump' ? 'webcam' : 'all');
   const cycleStatus = () => setStatusFilter(s => {
     const order = ['all', 'online', 'warn', 'critical', 'offline'];
     return order[(order.indexOf(s) + 1) % order.length];
@@ -182,7 +183,10 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
     const i = locations.indexOf(l);
     return locations[(i + 1) % locations.length];
   });
-  const typeLabel = typeFilter === 'all' ? '全部' : typeFilter === 'camera' ? '攝影機' : '抽水站';
+  const typeLabel = typeFilter === 'all' ? '全部'
+    : typeFilter === 'camera' ? '攝影機'
+    : typeFilter === 'webcam' ? 'Webcam'
+    : '抽水站';
   const statusLabel = statusFilter === 'all' ? '全部' : statusFilter === 'online' ? '正常' : statusFilter === 'warn' ? '警告' : statusFilter === 'critical' ? '嚴重' : '離線';
   const locationLabel = locationFilter === 'all' ? '全部' : locationFilter;
   const filtersActive = typeFilter !== 'all' || statusFilter !== 'all' || locationFilter !== 'all';
@@ -275,6 +279,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               // down / not yet reported) should not read as green — downgrade
               // the badge tone locally so the row doesn't lie about health.
               const pumpLevelMissing = n.type === 'pump' && n.level == null;
+              const isWebcam = n.type === 'webcam';
               let tone = n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok';
               if (tone === 'ok' && pumpLevelMissing) tone = 'warn';
               // Contract A: heartbeat/upload are `number | null`. Relational
@@ -303,8 +308,8 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                   </td>
                   <td className="px-3 py-2 text-ink-secondary">
                     <span className="inline-flex items-center gap-1.5">
-                      {n.type === 'camera' ? <Icon.Camera size={12}/> : <Icon.Pump size={12}/>}
-                      {n.type === 'camera' ? '攝影機' : '抽水站'}
+                      {isWebcam ? <Icon.Camera size={12}/> : n.type === 'camera' ? <Icon.Camera size={12}/> : <Icon.Pump size={12}/>}
+                      {isWebcam ? 'Webcam' : n.type === 'camera' ? '攝影機' : '抽水站'}
                       {/* MSP-F1: surface the actual relay state — distinct
                           from `status` (derived from water level) — the fact
                           that explains "why didn't my ON command run". */}
@@ -355,6 +360,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     {n.type === 'camera' ? (
                       // MSP-F21: truthy check treated a genuine 0°C reading as "no data".
                       <span className={n.temp > 50 ? 'text-sev-warn' : n.temp != null ? 'text-ink-secondary' : 'text-ink-muted'}>{n.temp != null ? n.temp+'°C' : '—'}</span>
+                    ) : isWebcam ? (
+                      // A webcam client is a mains PC with no temperature or
+                      // water sensor — a plain muted 「—」, never the amber
+                      // 「水位資料未上傳」 lie of the pump branch below.
+                      <span className="text-ink-muted" title="網路攝影機無此感測">—</span>
                     ) : n.level == null ? (
                       // No water_level reading — do not render 0%/blank% which
                       // would look like a real reading. Amber "—" makes the gap
@@ -380,6 +390,8 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                         <span className={n.voltage != null && n.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.voltage != null ? n.voltage + 'V' : '—'}</span>
                         <span className={`text-[10px] px-1 rounded ml-1 ${n.power==='mains'?'bg-sev-ok/15 text-sev-ok':n.power==='ups'?'bg-sev-warn/15 text-sev-warn':'bg-sev-critical/15 text-sev-critical'}`}>{n.power==='mains'?'市電':n.power==='ups'?'UPS':'電池'}</span>
                       </span>
+                    ) : isWebcam ? (
+                      <span className="text-ink-muted text-[10px] font-mono">—</span>
                     ) : <span className="text-ink-muted text-[10px] font-mono">PoE</span>}
                   </td>
                   <td className="px-3 py-2 text-right pr-4">

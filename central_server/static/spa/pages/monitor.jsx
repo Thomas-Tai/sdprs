@@ -66,6 +66,10 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // and instead only freezes once we know the age (offline always freezes).
   const frozen = node.status === 'offline' || node.upload > 60;
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
+  const isWebcam = node.type === 'webcam';
+  // Live-view state for webcam tiles: off → loading (stream spinning up) → live
+  // (HlsPlayer mounted). Non-webcam tiles never leave 'off'.
+  const [liveMode, setLiveMode] = useState_p('off'); // 'off' | 'loading' | 'live'
   return (
     <div
       role="button"
@@ -88,8 +92,19 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         )}
         {/* Type indicator */}
         <div className="absolute z-10 top-2 right-2 bg-black/60 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
-          {node.type === 'camera' ? 'CAM' : 'PUMP'}
+          {node.type === 'camera' ? 'CAM' : node.type === 'webcam' ? 'WEB' : 'PUMP'}
         </div>
+        {/* Source badge — webcam client (blue) vs edge cam (grey). */}
+        {isWebcam && (
+          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
+            Webcam
+          </span>
+        )}
+        {!isWebcam && node.type === 'camera' && (
+          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
+            Edge Cam
+          </span>
+        )}
         {/* Snooze indicator */}
         {node.snoozeMin > 0 && (
           <div className="absolute z-10 top-7 right-2 bg-sev-warn/90 text-black text-[10px] font-mono font-bold px-1.5 py-0.5 rounded flex items-center gap-1 tnum">
@@ -100,7 +115,11 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             ticker + <img>/icon-fallback logic lives in SnapshotImage — shared
             with the big monitor-wall view (app.jsx) and the node side panel
             (components.jsx) so all three refresh at the same 1 Hz cadence. */}
-        <SnapshotImage node={node}/>
+        {isWebcam && liveMode === 'live' ? (
+          <HlsPlayer nodeId={node.id} onFallback={() => setLiveMode('off')} />
+        ) : (
+          <SnapshotImage node={node}/>
+        )}
         {/* Frozen overlay */}
         {frozen && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
@@ -134,6 +153,39 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             {frozen ? <span className="text-white/35">--:--:--</span> : <ClockDisplay />}
           </div>
         </div>
+        {/* Live-view controls (webcam only): off → loading → live. */}
+        {isWebcam && liveMode === 'off' && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setLiveMode('loading');
+              const api = window.SDPRS_API;
+              api.startWebcamStream(node.id)
+                .then(() => setTimeout(() => setLiveMode('live'), 3000))
+                .catch(() => setLiveMode('off'));
+            }}
+            className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
+          >
+            ▶ 即時
+          </button>
+        )}
+        {isWebcam && liveMode === 'loading' && (
+          <div className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-surface-overlay/80 text-ink-secondary text-[10px]">
+            連線中...
+          </div>
+        )}
+        {isWebcam && liveMode === 'live' && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              window.SDPRS_API.stopWebcamStream(node.id).catch(() => {});
+              setLiveMode('off');
+            }}
+            className="absolute top-1 right-1 z-20 px-2 py-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
+          >
+            ● LIVE ✕
+          </button>
+        )}
       </div>
       {/* Stats */}
       <div className="p-2 grid grid-cols-3 gap-1 text-[10px] font-mono tnum bg-surface-panel">

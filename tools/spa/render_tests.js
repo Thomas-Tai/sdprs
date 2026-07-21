@@ -338,6 +338,76 @@ ${PRELUDE}
 })();
 `;
 
+// ---------------------------------------- monitor.jsx: webcam tile (Task 5) --
+// NodeCard keys its source badge + live button off node.type === 'webcam' (the
+// value Step 0b makes mapNode emit). A webcam tile shows the blue "Webcam"
+// badge and a ▶ 即時 live button; an edge cam (mapped type 'camera') shows the
+// grey "Edge Cam" badge and NEVER the webcam badge or the live button — proof
+// the badge is reachable and not dead code, which is why Tasks 5 and 12 merged.
+const TEST_MONITOR = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    window.SDPRS_API = { startWebcamStream: () => Promise.resolve({}), stopWebcamStream: () => Promise.resolve({}) };
+    const base = { status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: null };
+    const render = (node) => ReactDOM.flushSync(() => root.render(
+      React.createElement(NodeCard, { node, onSelect: () => {}, nodeAlerts: [] })));
+
+    // --- webcam node ---
+    render(Object.assign({}, base, { id: 'webcam_ab12', name: '櫃台電腦', type: 'webcam' }));
+    A('webcam tile renders the Webcam badge', container.textContent.indexOf('Webcam') !== -1);
+    const liveBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf('即時') !== -1);
+    A('webcam tile renders the ▶ 即時 live button', !!liveBtn);
+    A('webcam tile does NOT render the Edge Cam badge', container.textContent.indexOf('Edge Cam') === -1);
+
+    // --- edge cam (glass -> mapped type 'camera') ---
+    ReactDOM.flushSync(() => root.render(null));
+    render(Object.assign({}, base, { id: 'CAM-1', name: '西灣橋', type: 'camera', temp: 30, visualHealth: 'ok', audioHealth: 'ok' }));
+    A('edge cam renders the Edge Cam badge', container.textContent.indexOf('Edge Cam') !== -1);
+    A('edge cam does NOT render the Webcam badge', container.textContent.indexOf('Webcam') === -1);
+    A('edge cam (non-webcam) has NO live button', Array.from(container.querySelectorAll('button')).every(b => b.textContent.indexOf('即時') === -1));
+  } catch (e) {
+    results.push({ name: 'monitor webcam-tile suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// ------------------------------------ status.jsx: webcam columns (Task 5) ---
+// Step 0c headline-bug guard: a webcam row must not be rendered as a pump. Its
+// 類型 cell shows "Webcam" (never 「抽水站」), its 電源 cell is not "PoE", and its
+// 溫度/水位 cell carries no 「水位資料未上傳」 water-sensor lie. The camera row is
+// asserted unchanged so the webcam routing is proven not to have leaked.
+const TEST_STATUS_WEBCAM_COLUMNS = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    window.SDPRS_API = {};
+    const webcamNode = { id: 'webcam_ab12cd34', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const cameraNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, bitrate: 1.2, drops: 0, temp: 30 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [webcamNode, cameraNode], onSelectNode: () => {}, onRefresh: () => {},
+    })));
+    await settle();
+
+    const rows = Array.from(container.querySelectorAll('tr'));
+    const webcamTr = rows.find(r => r.textContent.indexOf('webcam_ab12cd34') !== -1);
+    A('webcam row renders in the status table', !!webcamTr);
+    A('類型 cell shows Webcam and NOT 抽水站', !!webcamTr && webcamTr.textContent.indexOf('Webcam') !== -1 && webcamTr.textContent.indexOf('抽水站') === -1);
+    A('電源 cell is not PoE for a webcam', !!webcamTr && webcamTr.textContent.indexOf('PoE') === -1);
+    A('溫度/水位 cell carries no 水位資料未上傳 title', !!webcamTr && !webcamTr.querySelector('[title="水位資料未上傳"]'));
+
+    // Contrast: the edge cam is still 攝影機 and still shows PoE — routing did not leak.
+    const cameraTr = rows.find(r => r.textContent.indexOf('CAM-1') !== -1);
+    A('camera row still labelled 攝影機', !!cameraTr && cameraTr.textContent.indexOf('攝影機') !== -1);
+    A('camera row still shows PoE', !!cameraTr && cameraTr.textContent.indexOf('PoE') !== -1);
+  } catch (e) {
+    results.push({ name: 'status webcam-columns suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ----------------------------------------------- components.jsx: CMP-F11 ----
 const TEST_PALETTE = `
 window.__TEST_PROMISE = (async () => {
@@ -481,6 +551,8 @@ const SUITES = [
   { name: 'MSP-F6 / MSP-F5 / API-F9   pumps.jsx',    deps: ['icons.jsx', 'data.jsx'], target: 'pages/pumps.jsx', test: TEST_PUMPS },
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
   { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },
+  { name: 'Task 5                      monitor.jsx (webcam tile)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR },
+  { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },

@@ -351,6 +351,49 @@ async def list_nodes(
             last_pump_command=_last_cmds.get(nid),
         ))
 
+    # Task 5 (Step 0a): surface registered webcam cameras as nodes. Webcam
+    # ingest stamps webcam_cameras.last_upload via touch_webcam_upload and never
+    # writes the `nodes` table (audit C3 closed by Task 3b), so these rows are
+    # disjoint by node_id from `result` above and a plain append is safe — no
+    # dedup pass required.
+    #
+    # Tolerant like the other DB reads in this function (get_snooze_provenance,
+    # _last_pump_commands): a lookup failure degrades to "no webcam rows" and is
+    # logged, it never 500s the node list.
+    webcam_rows: List[Dict[str, Any]] = []
+    try:
+        from ..database import get_backend, get_db_cursor
+        if get_backend() == "postgresql":
+            from ..database import _pg_fetch_many_sync
+            webcam_rows = _pg_fetch_many_sync(
+                "SELECT node_id, name, status, last_upload FROM webcam_cameras", {})
+        else:
+            with get_db_cursor() as cursor:
+                cursor.execute("SELECT node_id, name, status, last_upload FROM webcam_cameras")
+                webcam_rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.warning(f"Webcam camera lookup failed: {e}")
+        webcam_rows = []
+
+    for wc in webcam_rows:
+        last_upload = wc.get("last_upload")
+        is_stale = False
+        if last_upload:
+            try:
+                age = (now - datetime.fromisoformat(last_upload)).total_seconds()
+                is_stale = age > STALE_THRESHOLD_SECONDS
+            except (TypeError, ValueError):
+                pass
+        result.append(NodeStatus(
+            node_id=wc["node_id"],
+            node_type="webcam",
+            status=wc.get("status") or "OFFLINE",
+            location=wc.get("name"),
+            last_heartbeat=last_upload,
+            snapshot_timestamp=last_upload,
+            is_stale=is_stale,
+        ))
+
     logger.debug(f"Returning {len(result)} nodes")
     return result
 

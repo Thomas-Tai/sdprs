@@ -645,7 +645,8 @@ function App({ initialError = null }) {
         // emit + a whitelist entry + this branch, as one deliberate change.
         if (type === 'alert_updated' || type === 'alert_acknowledged' || type === 'alert_resolved') {
           scheduleRefresh();
-        } else if (type === 'node_status' || type === 'pump_status' || type === 'node_deleted') {
+        } else if (type === 'node_status' || type === 'pump_status' || type === 'node_deleted' ||
+                   type === 'webcam_stream_started' || type === 'webcam_stream_stopped') {
           scheduleRefresh();
         }
       },

@@ -259,7 +259,15 @@
   }
 
   function mapNode(n) {
-    const type = n.node_type === 'pump' ? 'pump' : 'camera';
+    const type = n.node_type === 'pump' ? 'pump'
+               : n.node_type === 'webcam' ? 'webcam'
+               : 'camera';
+    // Webcams are camera-like for freshness purposes: their "upload" age comes
+    // from snapshot_timestamp (not the heartbeat), and staleness downgrades them
+    // to warn. Introducing 'webcam' as a THIRD type would silently exclude them
+    // from both rules, because every such check below was written as
+    // `type === 'camera'`.
+    const cameraLike = (type === 'camera' || type === 'webcam');
     const loc = n.location || '';
     let floor = '', area = '', name = n.node_id;
     if (loc.includes('·')) {
@@ -279,7 +287,7 @@
     if (offline) status = 'offline';
     else if (type === 'pump' && level != null) {
       status = level >= 85 ? 'critical' : level >= 70 ? 'warn' : 'online';
-    } else if (type === 'camera' && n.is_stale) {
+    } else if (cameraLike && n.is_stale) {
       status = 'warn';
     }
     // A camera that is online but cannot reliably alert — blinded/paused vision
@@ -300,7 +308,7 @@
     // must render as 「—」, not be papered over with the heartbeat age.
     // Pumps have no snapshot concept at all, so their "upload" age is
     // simply their heartbeat age (unchanged).
-    const up = type === 'camera'
+    const up = cameraLike
       ? (n.snapshot_timestamp ? secsSince(n.snapshot_timestamp) : null)
       : hb;
     const ss = n.stream_status || {};
