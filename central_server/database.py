@@ -295,6 +295,9 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_operator_actions_ts ON operator_actions(timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_operator_actions_target ON operator_actions(action_type, target_id);")
+    # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
+    # looks up by api_key_hash — index it so that lookup is not a full scan.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);")
 
 
 def _create_tables_postgresql(conn):
@@ -434,6 +437,9 @@ def _create_tables_postgresql(conn):
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_pump_readings_node_ts ON pump_readings(node_id, timestamp);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_operator_actions_ts ON operator_actions(timestamp);"))
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_operator_actions_target ON operator_actions(action_type, target_id);"))
+    # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
+    # looks up by api_key_hash — index it so that lookup is not a full scan.
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);"))
 
 
 # =============================================================================
