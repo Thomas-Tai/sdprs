@@ -18,6 +18,9 @@ build/
 *.egg
 *.manifest
 *.spec
+# webcam_client/build.spec is a hand-authored PyInstaller config (source, not a
+# generated artifact) — re-include it past the broad *.spec rule above.
+!webcam_client/build.spec
 pip-log.txt
 pip-delete-this-directory.txt
 
