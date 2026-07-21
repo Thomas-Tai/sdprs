@@ -194,6 +194,9 @@ else:
         WEATHER_REFRESH_SECONDS: int
         WEATHER_CACHE_STALE_SECONDS: int
         MEDIAMTX_METRICS_URL: str
+        HLS_STORAGE_PATH: str
+        HLS_MAX_SEGMENTS: int
+        HLS_VIEWER_TIMEOUT_SECONDS: int
 
         def __init__(self):
             self.DASHBOARD_USER = _get_env_str("DASHBOARD_USER", required=True)
@@ -224,6 +227,9 @@ else:
             self.WEATHER_REFRESH_SECONDS = _get_env_int("WEATHER_REFRESH_SECONDS", 600)
             self.WEATHER_CACHE_STALE_SECONDS = _get_env_int("WEATHER_CACHE_STALE_SECONDS", 3600)
             self.MEDIAMTX_METRICS_URL = _get_env_str("MEDIAMTX_METRICS_URL", "http://localhost:9998/metrics")
+            self.HLS_STORAGE_PATH = _get_env_str("HLS_STORAGE_PATH", "./storage/hls")
+            self.HLS_MAX_SEGMENTS = _get_env_int("HLS_MAX_SEGMENTS", 5)
+            self.HLS_VIEWER_TIMEOUT_SECONDS = _get_env_int("HLS_VIEWER_TIMEOUT_SECONDS", 300)
 
 
 @lru_cache()

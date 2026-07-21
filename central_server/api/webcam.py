@@ -14,7 +14,7 @@ upload) plus the dashboard-facing stream control / HLS serve endpoints:
 - GET  /api/webcam/{node_id}/commands           - client long-polls for commands (client API key)
 """
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
@@ -63,7 +63,10 @@ async def upload_hls_segment(
         raise HTTPException(status_code=400, detail="Empty segment data")
     if len(data) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Segment too large (max 5 MB)")
-    hls_service.store_hls_segment(node_id, filename, data)
+    try:
+        hls_service.store_hls_segment(node_id, filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return None
 
 
@@ -99,7 +102,7 @@ async def start_webcam_stream(
     count = hls_service.increment_viewer(node_id)
     if count == 1:
         await hls_service.enqueue_command(node_id, "stream_start", {"fps": 8})
-    await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
+        await ws_manager.broadcast({"type": "webcam_stream_started", "data": {"node_id": node_id}})
     return {"message": "Stream start requested", "node_id": node_id, "viewers": count}
 
 
@@ -125,6 +128,13 @@ async def poll_commands(
     client_node_id: str = Depends(verify_webcam_api_key),
 ) -> Dict[str, Any]:
     verify_node_id(node_id)
+    # Same ownership guard as upload_hls_segment (~line 59). Without it, any
+    # valid webcam API key can long-poll ANY camera's command queue by name,
+    # and since asyncio.Queue.get() is single-consumer FIFO, a rogue poller
+    # racing the legitimate client would silently steal the stream_start/stop
+    # meant for it.
+    if not any(c["node_id"] == node_id for c in get_webcam_cameras(client_node_id)):
+        raise HTTPException(status_code=403, detail="Camera not owned by this client")
     timeout = min(max(timeout, 1.0), 30.0)
     cmd = await hls_service.dequeue_command(node_id, timeout=timeout)
     if cmd is None:

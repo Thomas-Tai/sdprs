@@ -160,6 +160,53 @@ async def test_upload_hls_rejects_unowned_camera(authed_client):
 
 
 @pytest.mark.anyio
+async def test_poll_commands_rejects_unowned_camera(authed_client):
+    """A client's API key must not be able to long-poll the command queue of
+    a camera node_id registered to a DIFFERENT client. Without this check,
+    asyncio.Queue.get() is single-consumer FIFO, so a rogue poller racing the
+    legitimate client would silently steal the command meant for it."""
+    # Client A registers a camera.
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Owner PC"})
+    owner_key = resp.json()["api_key"]
+    resp = await authed_client.post("/api/webcam/cameras",
+        json={"cameras": [{"name": "Cam 1", "device_index": 0}]},
+        headers={"X-API-Key": owner_key})
+    cam_node_id = resp.json()[0]["node_id"]
+
+    # Client B (different API key) tries to poll Client A's camera queue.
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Intruder PC"})
+    intruder_key = resp.json()["api_key"]
+
+    resp = await authed_client.get(
+        f"/api/webcam/{cam_node_id}/commands?timeout=1",
+        headers={"X-API-Key": intruder_key})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_upload_hls_rejects_path_traversal_filename(authed_client):
+    """A filename containing backslash-separated ".." segments must not be
+    able to escape the node's HLS directory. Starlette's single-segment
+    route match only excludes "/", and on Windows pathlib treats "\\" as a
+    separator, so filename="..\\..\\evil.ts" would otherwise write outside
+    HLS_STORAGE_PATH/<node_id>/."""
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Traversal PC"})
+    api_key = resp.json()["api_key"]
+    headers = {"X-API-Key": api_key}
+    resp = await authed_client.post("/api/webcam/cameras",
+        json={"cameras": [{"name": "Cam 1", "device_index": 0}]},
+        headers=headers)
+    cam_node_id = resp.json()[0]["node_id"]
+
+    traversal_filename = "..\\..\\evil.ts"
+    resp = await authed_client.put(
+        f"/api/webcam/{cam_node_id}/hls/{traversal_filename}",
+        content=b"\x00" * 10,
+        headers=headers)
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
 async def test_upload_hls_rejects_empty_body(authed_client):
     resp = await authed_client.post("/api/nodes/webcam", json={"name": "Empty Test PC"})
     api_key = resp.json()["api_key"]

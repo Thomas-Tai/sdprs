@@ -23,6 +23,12 @@ logger = logging.getLogger("hls_service")
 _viewer_count: Dict[str, int] = {}
 _command_queues: Dict[str, asyncio.Queue] = {}
 _last_activity: Dict[str, float] = {}
+# Last-touch time for command queues specifically. get_command_queue() will
+# auto-create a queue for any node_id reaching the long-poll endpoint, and
+# that node_id may never call store_hls_segment (so it would never appear in
+# _last_activity). Tracking this separately means every queue we create has
+# a reclamation path, not just ones that also upload segments.
+_command_queue_activity: Dict[str, float] = {}
 
 
 def get_hls_dir(node_id: str) -> Path:
@@ -35,8 +41,17 @@ def get_hls_dir(node_id: str) -> Path:
 
 
 def store_hls_segment(node_id: str, filename: str, data: bytes) -> None:
+    settings = get_settings()
+    base = Path(settings.HLS_STORAGE_PATH).resolve()
     node_dir = get_hls_dir(node_id)
-    target = node_dir / filename
+    target = (node_dir / filename).resolve()
+    # Mirror the containment check get_hls_file() already does on the read
+    # side. filename is fully client-controlled and only gated by extension
+    # in the router; on Windows pathlib treats "\" as a separator while
+    # Starlette's single-segment route match only excludes "/", so
+    # filename="..\\..\\evil.ts" would otherwise escape the node directory.
+    if not target.is_relative_to(base):
+        raise ValueError(f"Refusing to write outside HLS storage root: {filename!r}")
     target.write_bytes(data)
     _last_activity[node_id] = time.time()
     if filename.endswith(".ts"):
@@ -85,6 +100,7 @@ def cleanup_hls_dir(node_id: str) -> None:
     # entry for ANY node_id that reaches the long-poll endpoint, so leaving it
     # behind lets caller-supplied ids accumulate without bound.
     _command_queues.pop(node_id, None)
+    _command_queue_activity.pop(node_id, None)
 
 
 def get_viewer_count(node_id: str) -> int:
@@ -103,6 +119,10 @@ def decrement_viewer(node_id: str) -> int:
 
 
 def get_command_queue(node_id: str) -> asyncio.Queue:
+    # Touch last-activity on every access (not just creation) so a client
+    # that keeps long-polling never looks stale, while one that stops
+    # entirely becomes reclaimable by cleanup_stale_streams below.
+    _command_queue_activity[node_id] = time.time()
     if node_id not in _command_queues:
         _command_queues[node_id] = asyncio.Queue()
     return _command_queues[node_id]
@@ -125,8 +145,16 @@ def cleanup_stale_streams() -> None:
     settings = get_settings()
     timeout = settings.HLS_VIEWER_TIMEOUT_SECONDS
     now = time.time()
-    stale = [nid for nid, ts in _last_activity.items()
-             if now - ts > 60 and _viewer_count.get(nid, 0) == 0]
+    # Sweep both activity trackers (segment uploads AND command-queue
+    # touches), and _command_queues itself as a safety net -- a queue with
+    # no recorded activity at all (last_touch defaults to 0) is treated as
+    # immediately stale rather than pinned forever.
+    all_ids = set(_last_activity) | set(_command_queue_activity) | set(_command_queues)
+    stale = [
+        nid for nid in all_ids
+        if now - max(_last_activity.get(nid, 0), _command_queue_activity.get(nid, 0)) > timeout
+        and _viewer_count.get(nid, 0) == 0
+    ]
     for nid in stale:
         logger.info(f"Cleaning stale HLS dir for {nid}")
         cleanup_hls_dir(nid)
