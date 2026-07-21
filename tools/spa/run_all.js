@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const CHECKS = [
+  { name: 'vendor integrity', script: 'check_vendor.js', blocking: true },
   { name: 'scope invariant', script: 'scope_probe.js', blocking: true },
   { name: 'syntax',          script: 'check_spa_syntax.js', blocking: true },
   { name: 'undefined refs',  script: 'check_spa_refs.js', blocking: true },

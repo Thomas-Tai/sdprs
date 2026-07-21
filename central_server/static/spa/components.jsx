@@ -2226,7 +2226,64 @@ const VolumeSlider = ({ value, onChange, onVolumeChange }) => {
   );
 };
 
+// ---------- HLS Player (webcam stream) ----------
+
+const HlsPlayer = ({ nodeId, onFallback }) => {
+  const videoRef = React.useRef(null);
+  const hlsRef = React.useRef(null);
+  const retryCount = React.useRef(0);
+
+  React.useEffect(() => {
+    const video = videoRef.current;
+    if (!video || typeof Hls === 'undefined') return;
+
+    const hls = new Hls({
+      liveDurationInfinity: true,
+      maxBufferLength: 5,
+      maxMaxBufferLength: 10,
+    });
+    hlsRef.current = hls;
+
+    hls.loadSource(`/api/webcam/${nodeId}/hls/playlist.m3u8`);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+      retryCount.current = 0;
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        retryCount.current += 1;
+        if (retryCount.current >= 3) {
+          hls.destroy();
+          hlsRef.current = null;
+          if (onFallback) onFallback();
+        } else {
+          hls.recoverMediaError();
+        }
+      }
+    });
+
+    return () => {
+      hls.destroy();
+      hlsRef.current = null;
+    };
+  }, [nodeId]);
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      muted
+      playsInline
+      className="absolute inset-0 w-full h-full object-cover"
+    />
+  );
+};
+
 Object.assign(window, {
   OperatorsCluster, StaleAckPill, NewAlertBanner, ShiftBanner,
   CommandPalette, NodeSidePanel, VolumeSlider,
+  HlsPlayer,
 });

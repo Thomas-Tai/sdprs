@@ -5,6 +5,7 @@
   "description": "Offline static gates + jsdom render tests for the no-build SDPRS dashboard SPA. Developer tooling only — the SPA itself still has NO build step.",
   "scripts": {
     "check": "node run_all.js",
+    "vendor": "node check_vendor.js",
     "syntax": "node check_spa_syntax.js",
     "refs": "node check_spa_refs.js",
     "classes": "node check_spa_classes.js",

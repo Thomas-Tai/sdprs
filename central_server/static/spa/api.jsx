@@ -1130,6 +1130,23 @@
   // parseTs, per THE ONE RULE, not a raw new Date()).
   const extendSession = () => apiFetch('/api/session/extend', { method: 'POST' });
 
+  // Webcam streaming — MQTT-driven HLS stream lifecycle on an edge node
+  // (distinct from startStream/stopStream above, which target the older
+  // RTSP/mediamtx pipeline). createWebcamClient/revokeWebcamKey manage the
+  // per-node webcam client credential issued by /api/nodes/webcam.
+  async function startWebcamStream(nodeId) {
+    return apiFetch(`/api/webcam/${nodeId}/stream/start`, jsonBody('POST', {}));
+  }
+  async function stopWebcamStream(nodeId) {
+    return apiFetch(`/api/webcam/${nodeId}/stream/stop`, jsonBody('POST', {}));
+  }
+  async function createWebcamClient(name) {
+    return apiFetch('/api/nodes/webcam', jsonBody('POST', { name }));
+  }
+  async function revokeWebcamKey(nodeId) {
+    return apiFetch(`/api/nodes/${nodeId}/revoke-key`, jsonBody('POST', {}));
+  }
+
   // ---- websocket ---------------------------------------------------------
 
   // Backend event types dispatched to `onEvent(type, data)`. `new_alert` is
@@ -1237,6 +1254,7 @@
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
     startStream, stopStream, getStreamHealth,
+    startWebcamStream, stopWebcamStream, createWebcamClient, revokeWebcamKey,
     extendSession,
     openSocket,
   };

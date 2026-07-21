@@ -53,7 +53,7 @@ const KNOWN = new Set([
   'getComputedStyle','scrollTo','open','close','btoa','atob','Element','Node',
   'HTMLElement','SVGElement','Text','Range','Selection','ClipboardItem',
   // Libraries loaded via <script> before the SPA files
-  'React','ReactDOM','Babel','tailwind','process','module','require','exports',
+  'React','ReactDOM','Babel','tailwind','Hls','process','module','require','exports',
 ]);
 
 const parse = (src) => parser.parse(src, {
