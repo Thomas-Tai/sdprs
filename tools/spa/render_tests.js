@@ -202,6 +202,142 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------------- status.jsx: webcam client admin ---
+// Task 6: "新增 Webcam Client" (create) + row-level revoke-key. Both hand back
+// a plaintext API key that must be shown exactly once, be easy to copy, and
+// never leak into a log/URL/attribute or the 3s-auto-dismissing toast. This
+// suite mounts the FULL StatusPage (not just a sub-component) since the
+// create button lives in the page header and the revoke button lives in a
+// table row keyed off node.type === 'webcam'.
+const TEST_STATUS_WEBCAM = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    // "Never log the key": patch console for the whole flow and check at the
+    // end that neither generated key value was ever handed to it.
+    const loggedStrs = [];
+    const origLog = console.log, origWarn = console.warn, origErr = console.error;
+    console.log = function () { loggedStrs.push(Array.prototype.slice.call(arguments).map(String).join(' ')); };
+    console.warn = function () { loggedStrs.push(Array.prototype.slice.call(arguments).map(String).join(' ')); };
+    console.error = function () { loggedStrs.push(Array.prototype.slice.call(arguments).map(String).join(' ')); };
+
+    const calls = { create: [], revoke: [] };
+    const confirmMsgs = [];
+    let createResult = null;
+    let createShouldFail = false;
+    let revokeResult = null;
+    let revokeShouldFail = false;
+    window.SDPRS_API = {
+      createWebcamClient: (name) => {
+        calls.create.push(name);
+        return createShouldFail ? Promise.reject(new Error('建立失敗：名稱重複')) : Promise.resolve(createResult);
+      },
+      revokeWebcamKey: (nodeId) => {
+        calls.revoke.push(nodeId);
+        return revokeShouldFail ? Promise.reject(new Error('撤銷失敗：節點不存在')) : Promise.resolve(revokeResult);
+      },
+    };
+
+    const refreshCalls = [];
+    const webcamNode = { id: 'webcam_ab12cd34', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const cameraNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, bitrate: 1.2, drops: 0 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [webcamNode, cameraNode], onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
+    })));
+    await settle();
+
+    // --- header button opens the create modal ---
+    const addBtn = byText('button', '+ 新增 Webcam Client');
+    A('add button renders in the header', !!addBtn);
+    click(addBtn);
+    await settle();
+    let nameInput = container.querySelector('input[placeholder="輸入名稱..."]');
+    A('modal opens with a name field', !!nameInput);
+    let createBtn = byText('button', '建立');
+    A('create button starts disabled with an empty name', !!createBtn && createBtn.disabled === true);
+
+    setInput(nameInput, '櫃台電腦');
+    await settle();
+    createBtn = byText('button', '建立');
+    A('create button enables once a name is entered', createBtn.disabled === false);
+
+    createResult = { node_id: 'webcam_zz99', api_key: 'sk-webcam-TESTKEYVALUE-DO-NOT-LOG' };
+    click(createBtn);
+    await settle();
+    A('createWebcamClient is called with the trimmed name', calls.create[0] === '櫃台電腦', JSON.stringify(calls.create));
+
+    let keyCode = Array.from(container.querySelectorAll('code')).find(c => c.textContent.indexOf('sk-webcam-TESTKEYVALUE') !== -1);
+    A('the created key is rendered exactly once, in a select-all block', !!keyCode && keyCode.className.indexOf('select-all') !== -1);
+    A('the once-only warning copy is shown next to the key', container.textContent.indexOf('僅顯示一次') !== -1);
+    A('the created key is never rendered into a title attribute', container.innerHTML.indexOf('title="sk-webcam') === -1);
+
+    let closeBtn = byText('button', '已複製，關閉');
+    click(closeBtn);
+    await settle();
+    A('closing the created-key panel triggers onRefresh', refreshCalls.length === 1, JSON.stringify(refreshCalls));
+    A('modal is gone after close', !container.querySelector('input[placeholder="輸入名稱..."]') && container.textContent.indexOf('僅顯示一次') === -1);
+
+    // --- create failure: a toast, never a silent no-op, never an echoed key ---
+    click(byText('button', '+ 新增 Webcam Client'));
+    await settle();
+    setInput(container.querySelector('input[placeholder="輸入名稱..."]'), '重複名稱');
+    await settle();
+    createShouldFail = true;
+    click(byText('button', '建立'));
+    await settle();
+    A('create failure surfaces the backend error message via toast', container.textContent.indexOf('建立失敗：名稱重複') !== -1);
+    createShouldFail = false;
+    const openBackdrop = container.querySelector('.fixed.inset-0');
+    if (openBackdrop) { click(openBackdrop); await settle(); }
+
+    // --- revoke: cancelling the confirm must NOT call the API ---
+    window.confirm = (msg) => { confirmMsgs.push(msg); return false; };
+    let revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
+    A('revoke button renders for the webcam-type row', !!revokeBtn);
+    const revokeBtnCount = Array.from(container.querySelectorAll('button')).filter(b => b.title === '撤銷並重新產生 API Key').length;
+    A('exactly one revoke button exists (the camera row does not get one)', revokeBtnCount === 1, revokeBtnCount);
+    click(revokeBtn);
+    await settle();
+    A('the confirm dialog names revocation and immediate expiry', !!confirmMsgs[0] && confirmMsgs[0].indexOf('撤銷') !== -1 && confirmMsgs[0].indexOf('失效') !== -1, JSON.stringify(confirmMsgs));
+    A('cancelling the confirm does not call revokeWebcamKey', calls.revoke.length === 0, JSON.stringify(calls.revoke));
+
+    // --- revoke: confirmed, success shows a PERSISTENT modal, not the 3s toast ---
+    window.confirm = () => true;
+    revokeResult = { api_key: 'sk-webcam-ROTATED-NEW-KEY' };
+    revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
+    click(revokeBtn);
+    await settle();
+    A('confirmed revoke calls revokeWebcamKey(nodeId)', calls.revoke[0] === 'webcam_ab12cd34', JSON.stringify(calls.revoke));
+    const newKeyCode = Array.from(container.querySelectorAll('code')).find(c => c.textContent.indexOf('sk-webcam-ROTATED-NEW-KEY') !== -1);
+    A('the rotated key is rendered exactly once, in a select-all block', !!newKeyCode && newKeyCode.className.indexOf('select-all') !== -1);
+    const toastEl = container.querySelector('.fixed.top-16.right-4');
+    A('the rotated key is NOT put in the auto-dismissing toast element', !toastEl || toastEl.textContent.indexOf('sk-webcam-ROTATED') === -1);
+    A('the rotated key is never rendered into a title attribute', container.innerHTML.indexOf('title="sk-webcam-ROTATED') === -1);
+
+    closeBtn = byText('button', '已複製，關閉');
+    click(closeBtn);
+    await settle();
+    A('closing the revoke panel does not also call onRefresh (revoke != create)', refreshCalls.length === 1, JSON.stringify(refreshCalls));
+    A('revoke modal is gone after close', container.textContent.indexOf('sk-webcam-ROTATED-NEW-KEY') === -1);
+
+    // --- revoke failure: toast, no key echoed ---
+    window.confirm = () => true;
+    revokeShouldFail = true;
+    revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
+    click(revokeBtn);
+    await settle();
+    A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗：節點不存在') !== -1);
+
+    console.log = origLog; console.warn = origWarn; console.error = origErr;
+    const leaked = loggedStrs.some(s => s.indexOf('TESTKEYVALUE') !== -1 || s.indexOf('ROTATED-NEW-KEY') !== -1);
+    A('the API key value is never passed to console.log/warn/error', !leaked, JSON.stringify(loggedStrs).slice(0, 300));
+  } catch (e) {
+    results.push({ name: 'status webcam-admin suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ----------------------------------------------- components.jsx: CMP-F11 ----
 const TEST_PALETTE = `
 window.__TEST_PROMISE = (async () => {
@@ -344,6 +480,7 @@ ${PRELUDE}
 const SUITES = [
   { name: 'MSP-F6 / MSP-F5 / API-F9   pumps.jsx',    deps: ['icons.jsx', 'data.jsx'], target: 'pages/pumps.jsx', test: TEST_PUMPS },
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
+  { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },

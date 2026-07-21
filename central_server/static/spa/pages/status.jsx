@@ -147,6 +147,17 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
     const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
+  // Webcam client admin: "新增 Webcam Client" modal state.
+  const [showAddModal, setShowAddModal] = useState_p(false);
+  const [newClientName, setNewClientName] = useState_p('');
+  const [createdKey, setCreatedKey] = useState_p(null);
+  const [addBusy, setAddBusy] = useState_p(false);
+  // Revoke-key result: the fresh key is a credential shown exactly once, same
+  // as createdKey above. It is deliberately NOT surfaced via the 3s-auto-
+  // dismissing `toast` — an operator who doesn't finish copying before the
+  // toast disappears has no way to recover it short of revoking again. A
+  // modal (mirrors the create flow) stays up until explicitly dismissed.
+  const [revokedKey, setRevokedKey] = useState_p(null); // { nodeId, name, apiKey } | null
   // Unique locations from the current node list — filter values are derived
   // so a new deployment doesn't need a config change.
   const locations = useMemo_p(() => {
@@ -224,6 +235,12 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
             位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span>
           </FilterChip>
         </div>
+        <button
+          onClick={() => { setShowAddModal(true); setCreatedKey(null); setNewClientName(''); }}
+          className="px-3 py-1.5 rounded-lg bg-sev-info text-white text-xs font-bold hover:opacity-90 transition-opacity"
+        >
+          + 新增 Webcam Client
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-auto scroll-thin">
         <table className="w-full text-xs tnum">
@@ -397,6 +414,26 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                           return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                         }}
                         onError={err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` })}/>
+                      {n.type === 'webcam' && (
+                        <button
+                          title="撤銷並重新產生 API Key"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!confirm('確定要撤銷此 Key？舊 Key 將立即失效。')) return;
+                            window.SDPRS_API.revokeWebcamKey(n.id)
+                              .then(data => {
+                                // Fresh key is shown once via a persistent modal,
+                                // not the auto-dismissing toast — see revokedKey
+                                // state comment above.
+                                setRevokedKey({ nodeId: n.id, name: n.name, apiKey: data.api_key });
+                              })
+                              .catch(err => setToast({ tone: 'error', msg: err.message || '撤銷失敗' }));
+                          }}
+                          className="w-8 h-8 rounded text-ink-muted hover:text-sev-warn hover:bg-sev-warn/10 transition-colors text-xs"
+                        >
+                          🔑
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -405,6 +442,74 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           </tbody>
         </table>
       </div>
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowAddModal(false)}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">新增 Webcam Client</h3>
+            {!createdKey ? (
+              <>
+                <label className="block text-xs text-ink-secondary mb-1">名稱（如：櫃台電腦）</label>
+                <input
+                  value={newClientName}
+                  onChange={e => setNewClientName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-surface-base border border-border-subtle text-ink-primary text-sm mb-3"
+                  placeholder="輸入名稱..."
+                  autoFocus
+                />
+                <button
+                  disabled={addBusy || !newClientName.trim()}
+                  onClick={() => {
+                    setAddBusy(true);
+                    window.SDPRS_API.createWebcamClient(newClientName.trim())
+                      .then(data => setCreatedKey(data))
+                      .catch(err => setToast({ msg: err.message || '建立失敗', tone: 'error' }))
+                      .finally(() => setAddBusy(false));
+                  }}
+                  className="w-full py-2 rounded-lg bg-sev-info text-white text-sm font-bold disabled:opacity-50"
+                >
+                  {addBusy ? '建立中...' : '建立'}
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-sev-warn font-bold mb-2">⚠ API Key 僅顯示一次，請立即複製</p>
+                <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3">
+                  <code className="text-xs text-ink-primary break-all select-all">{createdKey.api_key}</code>
+                </div>
+                <p className="text-xs text-ink-muted mb-3">Node ID: {createdKey.node_id}</p>
+                <button
+                  onClick={() => { setShowAddModal(false); onRefresh && onRefresh(); }}
+                  className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
+                >
+                  已複製，關閉
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+      {/* Revoke-key result: same "shown once" contract as the create modal
+          above, kept in its own persistent modal (not the 3s toast) so an
+          operator has time to actually copy the fresh key before it's gone
+          for good. */}
+      {revokedKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setRevokedKey(null)}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">API Key 已重新產生</h3>
+            <p className="text-xs text-sev-warn font-bold mb-2">⚠ 新 Key 僅顯示一次，請立即複製，並更新 {revokedKey.name || revokedKey.nodeId} 的用戶端設定</p>
+            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3">
+              <code className="text-xs text-ink-primary break-all select-all">{revokedKey.apiKey}</code>
+            </div>
+            <p className="text-xs text-ink-muted mb-3">Node ID: {revokedKey.nodeId}</p>
+            <button
+              onClick={() => setRevokedKey(null)}
+              className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
+            >
+              已複製，關閉
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
