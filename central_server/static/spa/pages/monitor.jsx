@@ -70,6 +70,28 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // Live-view state for webcam tiles: off → loading (stream spinning up) → live
   // (HlsPlayer mounted). Non-webcam tiles never leave 'off'.
   const [liveMode, setLiveMode] = useState_p('off'); // 'off' | 'loading' | 'live'
+  // Live-view timers are lifecycle-managed off liveMode so BOTH the warm-up
+  // transition and the lease renewal auto-clean on unmount/stop (state is the
+  // single source of truth — no dangling setTimeout after the tile unmounts).
+  React.useEffect(() => {
+    if (liveMode === 'loading') {
+      // Give the client ~3s to receive stream_start, spin up ffmpeg, and emit the
+      // first HLS segment before we mount the player. (Cleaned up on unmount/stop,
+      // fixing the prior setTimeout-after-unmount warning.)
+      const t = setTimeout(() => setLiveMode('live'), 3000);
+      return () => clearTimeout(t);
+    }
+    if (liveMode === 'live') {
+      // Keep the 90s server viewer-lease alive while actually watching; without
+      // this the stream is force-stopped ~90s in. Best-effort; a failed renew just
+      // lets the lease lapse (HlsPlayer.onFallback then returns to snapshot mode).
+      const iv = setInterval(() => {
+        const api = window.SDPRS_API;
+        if (api && api.renewWebcamStream) api.renewWebcamStream(node.id).catch(() => {});
+      }, 30000);
+      return () => clearInterval(iv);
+    }
+  }, [liveMode, node.id]);
   return (
     <div
       role="button"
@@ -158,10 +180,12 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           <button
             onClick={(e) => {
               e.stopPropagation();
+              // Optimistic-first: enter 'loading' so the useEffect owns the 3s
+              // warm-up → 'live' transition (and its cleanup). A failed start
+              // returns to 'off', leaving no dangling timer.
               setLiveMode('loading');
               const api = window.SDPRS_API;
               api.startWebcamStream(node.id)
-                .then(() => setTimeout(() => setLiveMode('live'), 3000))
                 .catch(() => setLiveMode('off'));
             }}
             className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"

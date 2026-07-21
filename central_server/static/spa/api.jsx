@@ -1148,6 +1148,13 @@
   async function stopWebcamStream(nodeId) {
     return apiFetch(`/api/webcam/${nodeId}/stream/stop`, jsonBody('POST', {}));
   }
+  // Renews the 90s server-side viewer lease so an actively-watched stream is not
+  // force-stopped mid-view. The dashboard calls this every ~30s while a tile is
+  // 'live' (see monitor.jsx); a lapsed lease lets cleanup_stale_streams enqueue
+  // stream_stop to the client.
+  async function renewWebcamStream(nodeId) {
+    return apiFetch(`/api/webcam/${nodeId}/stream/renew`, jsonBody('POST', {}));
+  }
   async function createWebcamClient(name) {
     return apiFetch('/api/nodes/webcam', jsonBody('POST', { name }));
   }
@@ -1262,7 +1269,7 @@
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
     startStream, stopStream, getStreamHealth,
-    startWebcamStream, stopWebcamStream, createWebcamClient, revokeWebcamKey,
+    startWebcamStream, stopWebcamStream, renewWebcamStream, createWebcamClient, revokeWebcamKey,
     extendSession,
     openSocket,
   };

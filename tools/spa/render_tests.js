@@ -547,6 +547,28 @@ ${PRELUDE}
 })();
 `;
 
+// -------------------------------------------------- api.jsx: public surface --
+// api.jsx is a self-contained IIFE that publishes window.SDPRS_API at eval, so
+// loading it as a target (no deps) lets us assert the exported method surface
+// directly. GUARD: renewWebcamStream was wired into monitor.jsx (30s viewer-
+// lease renewal) but is a no-op unless api.jsx actually exports it — dropping it
+// from the public object silently re-broke the "stream force-stopped ~90s in"
+// bug the refs/render gates could not catch (monitor.jsx guards the call).
+const TEST_API = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const api = window.SDPRS_API;
+    A('api.jsx publishes window.SDPRS_API', !!api);
+    A('SDPRS_API.renewWebcamStream is a function', !!api && typeof api.renewWebcamStream === 'function', api && typeof api.renewWebcamStream);
+    A('SDPRS_API.startWebcamStream/stopWebcamStream still present', !!api && typeof api.startWebcamStream === 'function' && typeof api.stopWebcamStream === 'function');
+  } catch (e) {
+    results.push({ name: 'api surface suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'MSP-F6 / MSP-F5 / API-F9   pumps.jsx',    deps: ['icons.jsx', 'data.jsx'], target: 'pages/pumps.jsx', test: TEST_PUMPS },
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
@@ -556,6 +578,7 @@ const SUITES = [
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },
+  { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },
 ];
 
 (async () => {
