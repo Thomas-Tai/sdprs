@@ -158,6 +158,66 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // toast disappears has no way to recover it short of revoking again. A
   // modal (mirrors the create flow) stays up until explicitly dismissed.
   const [revokedKey, setRevokedKey] = useState_p(null); // { nodeId, name, apiKey } | null
+  // Delete confirmation for a webcam client (spec §節點管理: 撤銷 Key / 刪除).
+  // An in-app modal, NOT window.confirm: the native dialog is unstyled, blocks
+  // the whole tab (freezing the alert banner + WS-driven repaints behind it on
+  // a 24/7 wall display), and cannot name the consequence in the same voice as
+  // the rest of the console.
+  //
+  // THE ID TRAP: a 'webcam' row in this table is a CAMERA, but both webcam
+  // admin endpoints take the owning CLIENT's node_id (n.clientId, from
+  // webcam_cameras.client_id). The two ids look identical in shape
+  // ("webcam_" + 8 hex) and never match, so sending n.id here is a silent,
+  // permanent 404. Everything below addresses n.clientId, never n.id.
+  const [deleteTarget, setDeleteTarget] = useState_p(null); // { clientId, cameras: [{id,name}] } | null
+  const [deleteBusy, setDeleteBusy] = useState_p(false);
+  // Every camera row that belongs to the same client PC. Deleting the client
+  // takes ALL of them down, so the confirm dialog has to enumerate them from
+  // the FULL node list — not `filtered`, or an active type/status/location
+  // filter would hide siblings that are about to be destroyed anyway.
+  const camerasOfClient = (clientId) => (clientId
+    ? nodes.filter(x => x.type === 'webcam' && x.clientId === clientId)
+        .map(x => ({ id: x.id, name: x.name || x.id }))
+    : []);
+  // MSP-F26-style guard: the page can unmount (nav away) while the DELETE is
+  // still in flight — don't setState into a dead tree.
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  const confirmDeleteWebcam = () => {
+    if (deleteBusy || !deleteTarget) return;
+    // G1 guard (same as SnoozeRow/StreamRow): without the API bundle the
+    // button would otherwise latch on 「刪除中...」 forever.
+    const api = window.SDPRS_API;
+    if (!(api && api.deleteWebcamClient)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    const target = deleteTarget;
+    // Defence in depth: the button that opens this dialog is already disabled
+    // without a clientId, but NEVER let an undefined id reach the URL builder —
+    // "/api/nodes/webcam/undefined" is a request we must not be able to send.
+    if (!target.clientId) {
+      setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法刪除' });
+      return;
+    }
+    setDeleteBusy(true);
+    Promise.resolve(api.deleteWebcamClient(target.clientId))
+      // Server contract: 204 deleted, 404 already gone. A 404 means the
+      // operator's intent is already satisfied (double-click, or a peer
+      // deleted it first) — refresh like a success instead of crying failure.
+      .catch(err => { if (err && err.status === 404) return; throw err; })
+      .then(() => {
+        if (!mountedRef.current) return;
+        setDeleteTarget(null);
+        setToast({
+          tone: 'success',
+          msg: `Webcam 用戶端 ${target.clientId} 已刪除（含 ${(target.cameras || []).length} 支攝影機）`,
+        });
+        return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
+      })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: `刪除失敗: ${err?.message || err}` }); })
+      .finally(() => { if (mountedRef.current) setDeleteBusy(false); });
+  };
   // Unique locations from the current node list — filter values are derived
   // so a new deployment doesn't need a config change.
   const locations = useMemo_p(() => {
@@ -428,22 +488,67 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                         onError={err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` })}/>
                       {n.type === 'webcam' && (
                         <button
-                          title="撤銷並重新產生 API Key"
+                          title={n.clientId
+                            ? '撤銷並重新產生 API Key'
+                            : '此列缺少所屬用戶端識別碼，無法撤銷 Key'}
+                          disabled={!n.clientId}
                           onClick={(e) => {
                             e.stopPropagation();
+                            // G1 guard: check the API is actually there BEFORE
+                            // prompting — never ask the operator to confirm a
+                            // destructive action we cannot perform.
+                            const api = window.SDPRS_API;
+                            if (!(api && api.revokeWebcamKey)) {
+                              setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+                              return;
+                            }
+                            // THE SHIPPED BUG: this used to send n.id — the
+                            // CAMERA's id — to an endpoint that only ever knew
+                            // client ids, so the 撤銷 Key button 404'd 100% of
+                            // the time. The key is the CLIENT's, so rotate it
+                            // by the CLIENT's id.
+                            if (!n.clientId) {
+                              setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法撤銷 Key' });
+                              return;
+                            }
                             if (!confirm('確定要撤銷此 Key？舊 Key 將立即失效。')) return;
-                            window.SDPRS_API.revokeWebcamKey(n.id)
+                            Promise.resolve(api.revokeWebcamKey(n.clientId))
                               .then(data => {
                                 // Fresh key is shown once via a persistent modal,
                                 // not the auto-dismissing toast — see revokedKey
                                 // state comment above.
-                                setRevokedKey({ nodeId: n.id, name: n.name, apiKey: data.api_key });
+                                setRevokedKey({ nodeId: n.clientId, name: n.name, apiKey: (data || {}).api_key });
                               })
                               .catch(err => setToast({ tone: 'error', msg: err.message || '撤銷失敗' }));
                           }}
-                          className="w-8 h-8 rounded text-ink-muted hover:text-sev-warn hover:bg-sev-warn/10 transition-colors text-xs"
+                          className="w-8 h-8 rounded text-ink-muted hover:text-sev-warn hover:bg-sev-warn/10 transition-colors text-xs disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           🔑
+                        </button>
+                      )}
+                      {n.type === 'webcam' && (
+                        <button
+                          title={n.clientId
+                            ? '刪除此 Webcam 用戶端（含其全部攝影機）'
+                            : '此列缺少所屬用戶端識別碼，無法刪除'}
+                          disabled={!n.clientId}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // Opens the in-app confirm modal below; nothing is
+                            // sent until 「確定刪除」 is pressed there. Carry the
+                            // CLIENT id (what the endpoint takes) plus every
+                            // camera that will go with it, so the dialog can
+                            // state the true blast radius.
+                            if (!n.clientId) {
+                              setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法刪除' });
+                              return;
+                            }
+                            setDeleteTarget({ clientId: n.clientId, cameras: camerasOfClient(n.clientId) });
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+                          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          刪除
                         </button>
                       )}
                     </div>
@@ -471,11 +576,18 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 <button
                   disabled={addBusy || !newClientName.trim()}
                   onClick={() => {
+                    // G1 guard: without it a missing bundle throws inside the
+                    // handler and the button latches on 「建立中...」 forever.
+                    const api = window.SDPRS_API;
+                    if (!(api && api.createWebcamClient)) {
+                      setToast({ msg: '暫時無法連線後端，請稍後再試', tone: 'error' });
+                      return;
+                    }
                     setAddBusy(true);
-                    window.SDPRS_API.createWebcamClient(newClientName.trim())
+                    Promise.resolve(api.createWebcamClient(newClientName.trim()))
                       .then(data => setCreatedKey(data))
                       .catch(err => setToast({ msg: err.message || '建立失敗', tone: 'error' }))
-                      .finally(() => setAddBusy(false));
+                      .finally(() => { if (mountedRef.current) setAddBusy(false); });
                   }}
                   className="w-full py-2 rounded-lg bg-sev-info text-white text-sm font-bold disabled:opacity-50"
                 >
@@ -519,6 +631,52 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
             >
               已複製，關閉
             </button>
+          </div>
+        </div>
+      )}
+      {/* Delete confirmation — same modal shell as the create/revoke panels
+          above. Backdrop-dismiss is disabled while the request is in flight so
+          a stray click can't hide an operation the operator still owns. */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="刪除 Webcam Client"
+          onClick={() => { if (!deleteBusy) setDeleteTarget(null); }}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">刪除 Webcam Client</h3>
+            {/* A webcam ROW is one camera, but delete decommissions the whole
+                client PC. The operator clicked one row — spell out every
+                camera that disappears with it, or this is a destructive
+                action with an unstated blast radius. */}
+            <p className="text-xs text-ink-secondary mb-1">
+              確定要刪除？將移除 Webcam 用戶端
+              {' '}<span className="font-mono text-ink-primary">{deleteTarget.clientId}</span>
+              {' '}及其全部 {(deleteTarget.cameras || []).length} 支攝影機：
+            </p>
+            <ul className="text-xs text-ink-secondary mb-2 max-h-32 overflow-y-auto pl-1">
+              {(deleteTarget.cameras || []).map(c => (
+                <li key={c.id} className="leading-5">
+                  • <span className="text-ink-primary">{c.name}</span>
+                  {' '}<span className="font-mono text-ink-muted text-[10px]">{c.id}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-sev-warn font-bold mb-4">⚠ 此用戶端、其全部攝影機與 API Key 將被永久移除，此操作無法復原。用戶端會立即失去連線。</p>
+            <div className="flex gap-2">
+              <button
+                disabled={deleteBusy}
+                onClick={() => setDeleteTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={deleteBusy}
+                onClick={confirmDeleteWebcam}
+                className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
+              >
+                {deleteBusy ? '刪除中...' : '確定刪除'}
+              </button>
+            </div>
           </div>
         </div>
       )}

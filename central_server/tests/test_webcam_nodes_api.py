@@ -8,6 +8,14 @@ Tests for:
 - POST /api/nodes/{node_id}/revoke-key (rotate API key)
 - DELETE /api/nodes/webcam/{node_id} (decommission a webcam client)
 - register_webcam_cameras() batch atomicity
+- THE ID SEAM (end-to-end, mimicking the dashboard): GET /api/nodes lists
+  CAMERA rows, but both admin endpoints above take the owning CLIENT's
+  node_id. Both ids are minted as f"webcam_{secrets.token_hex(4)}" — identical
+  in shape, independently generated, so they NEVER match. Until webcam rows
+  carried client_id there was no way for the UI to address the client: the
+  shipped 撤銷 Key button 404'd 100% of the time, and the delete button would
+  have 404'd too (which the UI treats as "already gone" — i.e. it would have
+  looked like it worked while doing nothing).
 """
 import sqlite3
 import sys
@@ -198,6 +206,134 @@ async def test_delete_webcam_client_leaves_other_clients_alone(client, monkeypat
 
     assert get_webcam_cameras(drop_id) == []
     assert [c["name"] for c in get_webcam_cameras(keep_id)] == ["Keep Cam"]
+
+
+# =============================================================================
+# THE ID SEAM — end-to-end, exactly as the dashboard drives it:
+#   GET /api/nodes  ->  pick a webcam row  ->  admin it by that row's client_id
+# A camera id must NEVER be sent to these endpoints, and a webcam row must
+# never come back without a client_id (that is what forces the UI to guess).
+# =============================================================================
+
+class _FakeMqttForNodeList:
+    """Stands in for the MQTT singleton on BOTH paths the end-to-end test walks:
+    GET /api/nodes (needs get_node_states) and the delete route's WS broadcast
+    (needs `_loop`). A webcam carries no MQTT state, so an empty map is enough
+    for list_nodes to reach the webcam_cameras append."""
+
+    _loop = object()
+
+    def get_node_states(self):
+        return {}
+
+    def get_node_state(self, node_id):
+        return None
+
+
+@pytest.mark.anyio
+async def test_node_list_client_id_drives_revoke_and_delete(client, monkeypatch):
+    """THE regression: drive revoke + delete using ONLY what GET /api/nodes gave
+    the dashboard, and prove both land.
+
+    Before client_id was surfaced, the only id on a webcam row was the CAMERA's
+    node_id — and both endpoints below 404 on a camera id (see the companion
+    test). This walks the real dashboard path end to end: list, take a row, use
+    row["client_id"], revoke (200), delete (204), and confirm BOTH cameras and
+    the client are gone from the DB and from the node list itself.
+    """
+    import central_server.api.nodes as nodes_api
+    import central_server.services.websocket_service as ws_mod
+    from central_server.database import (
+        get_db_cursor, get_webcam_cameras, register_webcam_cameras,
+    )
+
+    events = []
+    monkeypatch.setattr(ws_mod, "broadcast_from_sync",
+                        lambda loop, evt: events.append(evt))
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    created = await client.post("/api/nodes/webcam", json={"name": "Bench PC"})
+    assert created.status_code == 201
+    client_node_id = created.json()["node_id"]
+
+    cams = register_webcam_cameras(
+        client_node_id, [{"name": "Cam 1"}, {"name": "Cam 2"}])
+    cam_ids = sorted(c["node_id"] for c in cams)
+    assert len(cam_ids) == 2
+
+    # --- what the dashboard actually receives -------------------------------
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200
+    webcam_rows = [n for n in listed.json() if n["node_type"] == "webcam"]
+    assert sorted(n["node_id"] for n in webcam_rows) == cam_ids, \
+        "GET /api/nodes lists CAMERA rows, not client rows"
+
+    # Every webcam row must be addressable. A null here means the UI has
+    # nothing to send but the camera id, which is the shipped 404.
+    assert all(n.get("client_id") for n in webcam_rows), webcam_rows
+    assert {n["client_id"] for n in webcam_rows} == {client_node_id}
+    # ...and the two ids are genuinely different values of the same shape.
+    assert all(n["client_id"] != n["node_id"] for n in webcam_rows)
+
+    # --- admin the CLIENT using only the row's own client_id ----------------
+    row = webcam_rows[0]
+    revoked = await client.post(f"/api/nodes/{row['client_id']}/revoke-key")
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["api_key"].startswith("sk-webcam-")
+
+    deleted = await client.delete(f"/api/nodes/webcam/{row['client_id']}")
+    assert deleted.status_code == 204, deleted.text
+
+    # BOTH cameras go with the client — not just the row that was clicked.
+    assert get_webcam_cameras(client_node_id) == []
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT node_id FROM webcam_cameras WHERE node_id IN (?, ?)",
+                       (cam_ids[0], cam_ids[1]))
+        assert cursor.fetchall() == []
+        cursor.execute("SELECT node_id FROM webcam_clients WHERE node_id = ?",
+                       (client_node_id,))
+        assert cursor.fetchone() is None
+
+    # And the dashboard's own view agrees on the next refresh.
+    relisted = await client.get("/api/nodes")
+    assert relisted.status_code == 200
+    assert [n for n in relisted.json() if n["node_type"] == "webcam"] == []
+
+    assert [e["type"] for e in events] == ["node_deleted"]
+
+
+@pytest.mark.anyio
+async def test_camera_node_id_is_404_on_both_client_endpoints(client, monkeypatch):
+    """The bug's signature, pinned: a CAMERA node_id 404s on revoke AND delete.
+
+    This must STAY a 404 — the endpoints key on webcam_clients by design. It is
+    the UI's job never to send a camera id (see the render tests: revoke/delete
+    are wired to node.clientId, and a row without one disables the button).
+    """
+    from central_server.database import get_webcam_cameras, register_webcam_cameras
+
+    events = _capture_broadcasts(monkeypatch)
+
+    created = await client.post("/api/nodes/webcam", json={"name": "Bench PC 2"})
+    assert created.status_code == 201
+    client_node_id = created.json()["node_id"]
+    cam_id = register_webcam_cameras(client_node_id, [{"name": "Cam 1"}])[0]["node_id"]
+
+    # Same prefix, same length, different value — indistinguishable by eye,
+    # which is exactly why the wrong one got sent.
+    assert cam_id != client_node_id
+    assert cam_id.startswith("webcam_") and client_node_id.startswith("webcam_")
+    assert len(cam_id) == len(client_node_id)
+
+    revoked = await client.post(f"/api/nodes/{cam_id}/revoke-key")
+    assert revoked.status_code == 404
+
+    deleted = await client.delete(f"/api/nodes/webcam/{cam_id}")
+    assert deleted.status_code == 404
+
+    # A wrong-id call must be inert: nothing deleted, nothing broadcast.
+    assert [c["node_id"] for c in get_webcam_cameras(client_node_id)] == [cam_id]
+    assert events == []
 
 
 # =============================================================================

@@ -49,6 +49,15 @@ class NodeStatus(BaseModel):
     node_id: str
     node_type: str
     status: str
+    # Webcam rows ONLY: the node_id of the owning webcam CLIENT (the PC), read
+    # from webcam_cameras.client_id. This row's own node_id is a CAMERA id, and
+    # both ids are minted as f"webcam_{token_hex(4)}" — same shape, generated
+    # independently, so they never match. Every webcam admin endpoint
+    # (POST /nodes/{id}/revoke-key, DELETE /nodes/webcam/{id}) keys on the
+    # CLIENT id, so without this field the dashboard had no way to address the
+    # client and sent the camera id instead — a guaranteed 404. Always None for
+    # pump/glass nodes, which are their own "client".
+    client_id: Optional[str] = None
     location: Optional[str] = None
     last_heartbeat: Optional[str] = None
     cpu_temp: Optional[float] = None
@@ -367,10 +376,11 @@ async def list_nodes(
         if get_backend() == "postgresql":
             from ..database import _pg_fetch_many_sync
             webcam_rows = _pg_fetch_many_sync(
-                "SELECT node_id, name, status, last_upload FROM webcam_cameras", {})
+                "SELECT node_id, client_id, name, status, last_upload FROM webcam_cameras", {})
         else:
             with get_db_cursor() as cursor:
-                cursor.execute("SELECT node_id, name, status, last_upload FROM webcam_cameras")
+                cursor.execute(
+                    "SELECT node_id, client_id, name, status, last_upload FROM webcam_cameras")
                 webcam_rows = [dict(r) for r in cursor.fetchall()]
     except Exception as e:
         logger.warning(f"Webcam camera lookup failed: {e}")
@@ -388,6 +398,9 @@ async def list_nodes(
         result.append(NodeStatus(
             node_id=wc["node_id"],
             node_type="webcam",
+            # The owning client PC — what the revoke-key / delete endpoints
+            # take. See NodeStatus.client_id.
+            client_id=wc.get("client_id"),
             status=wc.get("status") or "OFFLINE",
             location=wc.get("name"),
             last_heartbeat=last_upload,

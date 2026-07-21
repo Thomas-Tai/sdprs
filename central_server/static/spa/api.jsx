@@ -315,6 +315,15 @@
 
     return {
       id: n.node_id,
+      // Webcam rows only: the node_id of the owning webcam CLIENT (the PC).
+      // `id` above is the CAMERA's id — the two are minted in the same
+      // "webcam_xxxxxxxx" shape but never match, and BOTH admin endpoints
+      // (revoke-key, DELETE /nodes/webcam/{id}) key on the CLIENT. Anything
+      // that revokes or deletes must send THIS, never `id`. null for
+      // pump/glass, and null for a webcam row served by an older backend that
+      // does not send client_id yet — callers must treat null as
+      // "not addressable" and disable the affordance rather than guess.
+      clientId: n.client_id || null,
       type,
       name,
       location: loc || '—',
@@ -1155,12 +1164,38 @@
   async function renewWebcamStream(nodeId) {
     return apiFetch(`/api/webcam/${nodeId}/stream/renew`, jsonBody('POST', {}));
   }
+  // Live-view readiness probe. The dashboard used to flip a webcam tile to
+  // 'live' on a blind 3s timer, which on a slow client mounts <video> against a
+  // playlist ffmpeg has not written a segment into yet — i.e. a black tile that
+  // looks like a dead camera during a typhoon. monitor.jsx polls this instead
+  // and only mounts the player once the playlist actually references a segment.
+  //
+  // Deliberately never throws: while the stream is spinning up the endpoint
+  // legitimately 404s (no playlist yet), and a network blip should just mean
+  // "not ready yet, poll again" rather than tearing the tile back to 'off'.
+  // The caller owns the overall timeout. Returns the raw playlist text, or ''
+  // when it is not being served (yet).
+  async function getWebcamPlaylist(nodeId) {
+    try {
+      const text = await apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/hls/playlist.m3u8`, { timeoutMs: 5000 });
+      return typeof text === 'string' ? text : '';
+    } catch (e) {
+      return '';
+    }
+  }
   async function createWebcamClient(name) {
     return apiFetch('/api/nodes/webcam', jsonBody('POST', { name }));
   }
   async function revokeWebcamKey(nodeId) {
     return apiFetch(`/api/nodes/${nodeId}/revoke-key`, jsonBody('POST', {}));
   }
+  // Permanently removes a webcam client (node row + its API key). Server
+  // contract: 204 on success, 404 if it is already gone — callers should treat
+  // the 404 as "already deleted" (refresh the list) rather than an error, since
+  // a double-click or a peer operator's delete lands there and the operator's
+  // intent is satisfied either way.
+  const deleteWebcamClient = (nodeId) => apiFetch('/api/nodes/webcam/' + encodeURIComponent(nodeId),
+    { method: 'DELETE' });
 
   // ---- websocket ---------------------------------------------------------
 
@@ -1269,7 +1304,8 @@
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
     startStream, stopStream, getStreamHealth,
-    startWebcamStream, stopWebcamStream, renewWebcamStream, createWebcamClient, revokeWebcamKey,
+    startWebcamStream, stopWebcamStream, renewWebcamStream, getWebcamPlaylist,
+    createWebcamClient, revokeWebcamKey, deleteWebcamClient,
     extendSession,
     openSocket,
   };

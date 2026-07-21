@@ -239,7 +239,10 @@ ${PRELUDE}
     };
 
     const refreshCalls = [];
-    const webcamNode = { id: 'webcam_ab12cd34', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    // clientId is DELIBERATELY different from id: the row is a CAMERA, the key
+    // belongs to the owning CLIENT PC, and the two ids share a shape but never
+    // match. A handler that sends node.id here is the shipped 404 bug.
+    const webcamNode = { id: 'webcam_ab12cd34', clientId: 'webcam_c11e9701', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
     const cameraNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, bitrate: 1.2, drops: 0 };
     ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
       nodes: [webcamNode, cameraNode], onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
@@ -307,7 +310,11 @@ ${PRELUDE}
     revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     click(revokeBtn);
     await settle();
-    A('confirmed revoke calls revokeWebcamKey(nodeId)', calls.revoke[0] === 'webcam_ab12cd34', JSON.stringify(calls.revoke));
+    // THE SHIPPED BUG, pinned: revoke-key is a CLIENT endpoint. Sending the
+    // camera's own node_id (webcam_ab12cd34) 404s every single time, which is
+    // exactly what the dashboard did until this fix.
+    A('confirmed revoke calls revokeWebcamKey(node.clientId)', calls.revoke[0] === 'webcam_c11e9701', JSON.stringify(calls.revoke));
+    A('revoke NEVER sends the camera row id', calls.revoke.indexOf('webcam_ab12cd34') === -1, JSON.stringify(calls.revoke));
     const newKeyCode = Array.from(container.querySelectorAll('code')).find(c => c.textContent.indexOf('sk-webcam-ROTATED-NEW-KEY') !== -1);
     A('the rotated key is rendered exactly once, in a select-all block', !!newKeyCode && newKeyCode.className.indexOf('select-all') !== -1);
     const toastEl = container.querySelector('.fixed.top-16.right-4');
@@ -328,11 +335,248 @@ ${PRELUDE}
     await settle();
     A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗：節點不存在') !== -1);
 
+    // --- no clientId (older backend / unmapped row): never guess an id ---
+    // Sending node.id "because it looks like a client id" is precisely how the
+    // 404 shipped. With nothing addressable, the affordance is disabled and
+    // NOTHING is sent.
+    revokeShouldFail = false;
+    calls.revoke.length = 0;
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [{ id: 'webcam_orphan01', clientId: null, name: '無主攝影機', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 }],
+      onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
+    })));
+    await settle();
+    const orphanRevoke = Array.from(container.querySelectorAll('button')).find(b => (b.title || '').indexOf('撤銷') !== -1);
+    A('a webcam row with no clientId disables the revoke button', !!orphanRevoke && orphanRevoke.disabled === true, orphanRevoke && orphanRevoke.title);
+    click(orphanRevoke); await settle();
+    A('a clientId-less row never calls revokeWebcamKey (no undefined id on the wire)', calls.revoke.length === 0, JSON.stringify(calls.revoke));
+
     console.log = origLog; console.warn = origWarn; console.error = origErr;
     const leaked = loggedStrs.some(s => s.indexOf('TESTKEYVALUE') !== -1 || s.indexOf('ROTATED-NEW-KEY') !== -1);
     A('the API key value is never passed to console.log/warn/error', !leaked, JSON.stringify(loggedStrs).slice(0, 300));
   } catch (e) {
     results.push({ name: 'status webcam-admin suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// ------------------------------ status.jsx: webcam delete (follow-up Task 2) --
+// Spec §節點管理 lists 「撤銷 Key / 刪除」 — the row had no delete affordance, so a
+// decommissioned webcam client stayed in the node list (and its key stayed
+// valid) forever. The confirm step is an IN-APP dialog, never window.confirm:
+// asserted here by leaving window.confirm patched to a value that would fail
+// the flow if the handler actually called it.
+// Server contract (frozen): 204 deleted, 404 already gone. 404 must refresh
+// like a success, not raise an error toast.
+const TEST_STATUS_WEBCAM_DELETE = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const calls = [];
+    let mode = 'ok'; // ok | notfound | error | hang
+    const mkApi = () => ({
+      createWebcamClient: () => Promise.resolve({}),
+      revokeWebcamKey: () => Promise.resolve({}),
+      deleteWebcamClient: (nodeId) => {
+        calls.push(nodeId);
+        if (mode === 'hang') return new Promise(() => {});
+        if (mode === 'notfound') { const e = new Error('HTTP 404 on /api/nodes/webcam/x'); e.status = 404; return Promise.reject(e); }
+        if (mode === 'error') { const e = new Error('資料庫忙碌'); e.status = 500; return Promise.reject(e); }
+        return Promise.resolve(null); // 204 -> apiFetch returns null
+      },
+    });
+    window.SDPRS_API = mkApi();
+    // If the handler ever regressed to window.confirm, this would throw and the
+    // suite would fail loudly rather than silently passing on a native dialog.
+    window.confirm = () => { throw new Error('handler used window.confirm instead of the in-app dialog'); };
+
+    const refreshCalls = [];
+    // A webcam ROW is a CAMERA; the endpoint takes the owning CLIENT's id.
+    // camA/camB share one client PC, camC belongs to a different one — that
+    // split is what makes "the dialog lists the right cameras" falsifiable.
+    const camA = { id: 'webcam_cam00001', clientId: 'webcam_c11e9701', name: '櫃台電腦 前門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const camB = { id: 'webcam_cam00002', clientId: 'webcam_c11e9701', name: '櫃台電腦 後門', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const camC = { id: 'webcam_cam00003', clientId: 'webcam_c0ffee11', name: '車道主機 車道', location: '車道', type: 'webcam', status: 'online', snoozeMin: 0 };
+    const cameraNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, bitrate: 1.2, drops: 0, temp: 30 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [camA, camB, camC, cameraNode], onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
+    })));
+    await settle();
+
+    const delBtns = () => Array.from(container.querySelectorAll('button')).filter(b => (b.title || '').indexOf('刪除此 Webcam') !== -1);
+    A('every webcam row renders a 刪除 button', delBtns().length === 3 && delBtns()[0].textContent.indexOf('刪除') !== -1, delBtns().length);
+    const rows = Array.from(container.querySelectorAll('tr'));
+    const cameraTr = rows.find(r => r.textContent.indexOf('CAM-1') !== -1);
+    A('non-webcam (camera) row has NO 刪除 button', !!cameraTr && !Array.from(cameraTr.querySelectorAll('button')).some(b => (b.title || '').indexOf('刪除此 Webcam') !== -1));
+
+    // --- clicking 刪除 opens the in-app confirm dialog and sends NOTHING yet ---
+    click(delBtns()[0]);
+    await settle();
+    let dialog = container.querySelector('[role="dialog"]');
+    A('clicking 刪除 opens an in-app confirm dialog', !!dialog && dialog.textContent.indexOf('確定要刪除') !== -1);
+    // DECIDED SEMANTICS: delete decommissions the whole client PC. The dialog
+    // must therefore name the CLIENT and enumerate EVERY camera that goes with
+    // it — otherwise the operator clicks one row and silently loses two.
+    A('the dialog names the owning client, not the clicked camera id', !!dialog && dialog.textContent.indexOf('webcam_c11e9701') !== -1 && dialog.textContent.indexOf('webcam_c0ffee11') === -1, dialog && dialog.textContent);
+    A('the dialog states the camera count', !!dialog && dialog.textContent.indexOf('2 支攝影機') !== -1, dialog && dialog.textContent);
+    A('the dialog lists ALL sibling cameras of that client', !!dialog && dialog.textContent.indexOf('櫃台電腦 前門') !== -1 && dialog.textContent.indexOf('櫃台電腦 後門') !== -1, dialog && dialog.textContent);
+    A('the dialog does NOT list another client\\'s camera', !!dialog && dialog.textContent.indexOf('車道主機 車道') === -1, dialog && dialog.textContent);
+    A('the dialog states the irreversibility', !!dialog && dialog.textContent.indexOf('無法復原') !== -1);
+    A('opening the dialog issues no DELETE', calls.length === 0, JSON.stringify(calls));
+
+    // --- cancel: closes, deletes nothing ---
+    click(byText('button', '取消'));
+    await settle();
+    A('取消 closes the dialog without deleting', !container.querySelector('[role="dialog"]') && calls.length === 0, JSON.stringify(calls));
+
+    // --- confirm: 204 path ---
+    click(delBtns()[0]); await settle();
+    click(byText('button', '確定刪除')); await settle();
+    // THE BUG, pinned: the camera's own node_id is a guaranteed 404 on this
+    // endpoint — and the 404 branch below would have made it LOOK successful.
+    A('確定刪除 calls deleteWebcamClient(node.clientId)', calls.length === 1 && calls[0] === 'webcam_c11e9701', JSON.stringify(calls));
+    A('delete NEVER sends the camera row id', calls.indexOf('webcam_cam00001') === -1, JSON.stringify(calls));
+    A('a successful delete triggers onRefresh', refreshCalls.length === 1, JSON.stringify(refreshCalls));
+    A('the dialog closes after a successful delete', !container.querySelector('[role="dialog"]'));
+    A('a success toast names the deleted client', container.textContent.indexOf('webcam_c11e9701 已刪除') !== -1);
+
+    // --- 404 = already gone: refresh like a success, never an error toast ---
+    mode = 'notfound'; calls.length = 0;
+    click(delBtns()[0]); await settle();
+    click(byText('button', '確定刪除')); await settle();
+    A('404 still calls through', calls.length === 1, JSON.stringify(calls));
+    A('404 (already deleted) refreshes instead of erroring', refreshCalls.length === 2, JSON.stringify(refreshCalls));
+    A('404 raises NO 刪除失敗 toast', container.textContent.indexOf('刪除失敗') === -1);
+    A('404 closes the dialog', !container.querySelector('[role="dialog"]'));
+
+    // --- a real failure: toast + dialog stays open, button not latched ---
+    mode = 'error'; calls.length = 0;
+    click(delBtns()[0]); await settle();
+    click(byText('button', '確定刪除')); await settle();
+    A('a real failure surfaces the backend message', container.textContent.indexOf('刪除失敗: 資料庫忙碌') !== -1);
+    A('the dialog stays open after a failure so the operator can retry', !!container.querySelector('[role="dialog"]'));
+    A('the confirm button is not latched on 刪除中', !!byText('button', '確定刪除') && !byText('button', '刪除中'));
+    A('a failed delete does not fake a refresh', refreshCalls.length === 2, JSON.stringify(refreshCalls));
+
+    // --- missing API bundle: toast, no latch (G1 guard) ---
+    window.SDPRS_API = {};
+    calls.length = 0;
+    click(byText('button', '確定刪除')); await settle();
+    A('missing API bundle attempts no DELETE', calls.length === 0, JSON.stringify(calls));
+    A('missing API bundle toasts instead of latching on 刪除中', container.textContent.indexOf('暫時無法連線後端') !== -1 && !byText('button', '刪除中'));
+
+    // --- in-flight: busy label + no double-fire ---
+    window.SDPRS_API = mkApi();
+    mode = 'hang'; calls.length = 0;
+    click(byText('button', '確定刪除')); await settle();
+    const busyBtn = byText('button', '刪除中');
+    A('an in-flight delete shows 刪除中... and disables the confirm button', !!busyBtn && busyBtn.disabled === true, busyBtn && busyBtn.disabled);
+    click(busyBtn); await settle();
+    A('a second click while in flight issues no second DELETE', calls.length === 1, JSON.stringify(calls));
+
+    // --- no clientId: nothing addressable, so nothing is sent ---
+    // Never fall back to node.id "because it looks like a client id" — that is
+    // the exact substitution that produced a permanent 404 in the shipped UI.
+    mode = 'ok'; calls.length = 0;
+    // Unmount first: the hang above left a dialog open on the previous target.
+    ReactDOM.flushSync(() => root.render(null));
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [{ id: 'webcam_orphan01', clientId: null, name: '無主攝影機', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 }],
+      onSelectNode: () => {}, onRefresh: () => { refreshCalls.push(1); },
+    })));
+    await settle();
+    // Looked up by label, not by title: the disabled button deliberately
+    // carries a DIFFERENT title explaining why it cannot be used.
+    const orphanDel = Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === '刪除');
+    A('a webcam row with no clientId disables the 刪除 button', !!orphanDel && orphanDel.disabled === true, orphanDel && orphanDel.title);
+    click(orphanDel); await settle();
+    A('a clientId-less row opens no confirm dialog and sends no DELETE', !container.querySelector('[role="dialog"]') && calls.length === 0, JSON.stringify(calls));
+  } catch (e) {
+    results.push({ name: 'status webcam-delete suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// ------------------------ monitor.jsx: live-view readiness (follow-up Task 1) --
+// The tile used to flip to 'live' on a blind setTimeout(3000): on a slow client
+// that mounts <video> against a playlist with no segment yet — a black tile
+// that reads as a dead camera on the wall. Readiness is now MEASURED by polling
+// the playlist until it lists a .ts segment.
+// The load-bearing regression guard here is the LAST block: the 30s viewer-lease
+// renew interval lives in the same useEffect and must still be armed exactly
+// once the tile is genuinely live (without it the server force-stops the stream
+// ~90s in). window.setInterval is wrapped so the 30s arm can be asserted, and
+// its callback invoked, without a 30s wait.
+const TEST_MONITOR_LIVE = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const HEADER_ONLY = '#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n';
+    const WITH_SEGMENT = HEADER_ONLY + '#EXTINF:2.000,\\nseg00001.ts\\n';
+    const probes = [], startCalls = [], stopCalls = [], renewCalls = [];
+    let playlist = HEADER_ONLY;
+    window.SDPRS_API = {
+      startWebcamStream: (id) => { startCalls.push(id); return Promise.resolve({}); },
+      stopWebcamStream: (id) => { stopCalls.push(id); return Promise.resolve({}); },
+      renewWebcamStream: (id) => { renewCalls.push(id); return Promise.resolve({}); },
+      getWebcamPlaylist: (id) => { probes.push(id); return Promise.resolve(playlist); },
+    };
+    const intervals = [];
+    const origSetInterval = window.setInterval;
+    window.setInterval = function (fn, ms) { intervals.push({ fn: fn, ms: ms }); return origSetInterval.call(window, fn, ms); };
+    const ivMs = () => JSON.stringify(intervals.map(i => i.ms));
+
+    const node = { id: 'webcam_ab12', name: '櫃台電腦', type: 'webcam', status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: null };
+    const render = () => ReactDOM.flushSync(() => root.render(React.createElement(NodeCard, { node, onSelect: () => {}, nodeAlerts: [] })));
+    const findBtn = (txt) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf(txt) !== -1);
+
+    // --- playlist has no segment yet: must NOT go live ---
+    render();
+    click(findBtn('即時'));
+    await settle();
+    A('clicking 即時 starts the stream', startCalls.length === 1 && startCalls[0] === 'webcam_ab12', JSON.stringify(startCalls));
+    A('the playlist is probed immediately (no blind 3s wait)', probes.length >= 1, probes.length);
+    A('a segment-less playlist keeps the tile on 連線中', container.textContent.indexOf('連線中') !== -1);
+    A('a segment-less playlist does NOT mount the <video> player', !container.querySelector('video'));
+    A('the 30s lease-renew interval is NOT armed while still loading', !intervals.some(i => i.ms === 30000), ivMs());
+
+    const beforeRepeat = probes.length;
+    await sleep(1700);
+    A('the readiness poll repeats while loading', probes.length > beforeRepeat, beforeRepeat + ' -> ' + probes.length);
+
+    // --- unmount must stop the poll (no timer leak / no setState after unmount) ---
+    ReactDOM.flushSync(() => root.render(null));
+    const afterUnmount = probes.length;
+    await sleep(1700);
+    A('unmounting stops the readiness poll', probes.length === afterUnmount, afterUnmount + ' -> ' + probes.length);
+
+    // --- playlist lists a segment: go live on the very first probe ---
+    playlist = WITH_SEGMENT;
+    probes.length = 0; startCalls.length = 0; intervals.length = 0;
+    render();
+    click(findBtn('即時'));
+    await settle();
+    A('a playlist listing a .ts segment flips the tile to live', !!findBtn('LIVE'));
+    A('going live mounts the HLS <video> player', !!container.querySelector('video'));
+    A('the 連線中 placeholder is gone once live', container.textContent.indexOf('連線中') === -1);
+
+    // REGRESSION GUARD: the lease-renew arm still fires, only once live.
+    const renewIv = intervals.find(i => i.ms === 30000);
+    A('the live arm still arms the 30s viewer-lease renew interval', !!renewIv, ivMs());
+    if (renewIv) { renewIv.fn(); await settle(); }
+    A('the lease-renew tick calls renewWebcamStream(nodeId)', renewCalls[0] === 'webcam_ab12', JSON.stringify(renewCalls));
+
+    // --- stop returns to snapshot mode ---
+    click(findBtn('LIVE'));
+    await settle();
+    A('stopping calls stopWebcamStream and unmounts the player', stopCalls[0] === 'webcam_ab12' && !container.querySelector('video'), JSON.stringify(stopCalls));
+
+    window.setInterval = origSetInterval;
+  } catch (e) {
+    results.push({ name: 'monitor live-readiness suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }
   window.__TEST_RESULT = results;
 })();
@@ -562,6 +806,13 @@ ${PRELUDE}
     A('api.jsx publishes window.SDPRS_API', !!api);
     A('SDPRS_API.renewWebcamStream is a function', !!api && typeof api.renewWebcamStream === 'function', api && typeof api.renewWebcamStream);
     A('SDPRS_API.startWebcamStream/stopWebcamStream still present', !!api && typeof api.startWebcamStream === 'function' && typeof api.stopWebcamStream === 'function');
+    // Same guard, follow-up Task 2: status.jsx's 刪除 button is a no-op unless
+    // api.jsx exports this (the row guards the call, so a dropped export would
+    // silently degrade to "button does nothing but toast").
+    A('SDPRS_API.deleteWebcamClient is a function', !!api && typeof api.deleteWebcamClient === 'function', api && typeof api.deleteWebcamClient);
+    // Follow-up Task 1: monitor.jsx polls this to decide readiness; if it is
+    // missing the tile silently falls back to the old blind 3s warm-up.
+    A('SDPRS_API.getWebcamPlaylist is a function', !!api && typeof api.getWebcamPlaylist === 'function', api && typeof api.getWebcamPlaylist);
   } catch (e) {
     results.push({ name: 'api surface suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }
@@ -575,6 +826,8 @@ const SUITES = [
   { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },
   { name: 'Task 5                      monitor.jsx (webcam tile)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR },
   { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
+  { name: 'Follow-up 2/3               status.jsx (webcam delete)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_DELETE },
+  { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },

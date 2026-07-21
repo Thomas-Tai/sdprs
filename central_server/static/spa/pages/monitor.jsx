@@ -59,6 +59,22 @@ function useStableSort(list, frozen) {
   return order.map(id => byId.get(id)).filter(Boolean);
 }
 
+// Live-view warm-up tuning. The player is only mounted once the HLS playlist
+// actually references a media segment, so these bound the POLL, not a guess at
+// how long ffmpeg takes.
+const LIVE_POLL_MS = 1500;      // gap between playlist probes while 'loading'
+const LIVE_POLL_TIMEOUT_MS = 30000; // give up and return to 'off' after this
+// A playlist that exists but lists no segment yet is just the header
+// (#EXTM3U/#EXT-X-TARGETDURATION…) — mounting <video> against it is exactly the
+// black-tile case. "Ready" means at least one media segment URI is listed.
+function playlistHasSegment(text) {
+  if (!text || typeof text !== 'string') return false;
+  return text.split(/\r?\n/).some(line => {
+    const l = line.trim();
+    return l !== '' && l.charAt(0) !== '#' && /\.ts(\?.*)?$/i.test(l);
+  });
+}
+
 const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
   // MSP-F9 contract: `upload` is null for a camera with no snapshot ever —
@@ -75,11 +91,35 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // single source of truth — no dangling setTimeout after the tile unmounts).
   React.useEffect(() => {
     if (liveMode === 'loading') {
-      // Give the client ~3s to receive stream_start, spin up ffmpeg, and emit the
-      // first HLS segment before we mount the player. (Cleaned up on unmount/stop,
-      // fixing the prior setTimeout-after-unmount warning.)
-      const t = setTimeout(() => setLiveMode('live'), 3000);
-      return () => clearTimeout(t);
+      // Readiness is MEASURED, not guessed. The old blind 3s timer mounted
+      // <video> whether or not the client had produced a segment yet — on a
+      // slow client that paints a black tile, which on a monitor wall reads as
+      // a dead camera. Poll the playlist instead and only go 'live' once it
+      // lists a real segment; give up after LIVE_POLL_TIMEOUT_MS so a client
+      // that never starts falls back to snapshots instead of spinning forever.
+      let cancelled = false;
+      let timer = null;
+      const api = window.SDPRS_API;
+      if (!(api && api.getWebcamPlaylist)) {
+        // Old/partial bundle without the readiness probe — degrade to the
+        // legacy fixed warm-up rather than never leaving 'loading'.
+        timer = setTimeout(() => setLiveMode('live'), 3000);
+        return () => { cancelled = true; clearTimeout(timer); };
+      }
+      const deadline = Date.now() + LIVE_POLL_TIMEOUT_MS;
+      const probe = () => {
+        if (cancelled) return;
+        Promise.resolve(api.getWebcamPlaylist(node.id))
+          .catch(() => '') // getWebcamPlaylist swallows its own errors; belt-and-braces for a stub that doesn't
+          .then(text => {
+            if (cancelled) return;
+            if (playlistHasSegment(text)) { setLiveMode('live'); return; }
+            if (Date.now() >= deadline) { setLiveMode('off'); return; }
+            timer = setTimeout(probe, LIVE_POLL_MS);
+          });
+      };
+      probe(); // probe immediately — a client that is already streaming should not eat a full poll interval
+      return () => { cancelled = true; if (timer) clearTimeout(timer); };
     }
     if (liveMode === 'live') {
       // Keep the 90s server viewer-lease alive while actually watching; without
@@ -180,12 +220,16 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              // Optimistic-first: enter 'loading' so the useEffect owns the 3s
-              // warm-up → 'live' transition (and its cleanup). A failed start
-              // returns to 'off', leaving no dangling timer.
-              setLiveMode('loading');
+              // Optimistic-first: enter 'loading' so the useEffect owns the
+              // playlist-readiness poll → 'live' transition (and its cleanup).
+              // A failed start returns to 'off', leaving no dangling timer.
               const api = window.SDPRS_API;
-              api.startWebcamStream(node.id)
+              // Same defensive guard the status-page rows use: without the API
+              // bundle there is nothing to start, so stay 'off' rather than
+              // sticking the tile on 「連線中...」 until the poll times out.
+              if (!(api && api.startWebcamStream)) return;
+              setLiveMode('loading');
+              Promise.resolve(api.startWebcamStream(node.id))
                 .catch(() => setLiveMode('off'));
             }}
             className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
@@ -202,8 +246,14 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              window.SDPRS_API.stopWebcamStream(node.id).catch(() => {});
+              // Stop the tile FIRST and unconditionally: a missing/failed API
+              // must never leave the tile stuck showing 「● LIVE」 over a stream
+              // the operator asked to close.
               setLiveMode('off');
+              const api = window.SDPRS_API;
+              if (api && api.stopWebcamStream) {
+                Promise.resolve(api.stopWebcamStream(node.id)).catch(() => {});
+              }
             }}
             className="absolute top-1 right-1 z-20 px-2 py-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
           >
