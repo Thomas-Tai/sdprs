@@ -54,7 +54,21 @@ from fastapi.testclient import TestClient
 from central_server.main import app
 
 
-API_KEY = "test-api-key-12345"
+# Read the key that is ACTUALLY in effect rather than hardcoding one.
+#
+# central_server/tests/conftest.py runs before this module and sets a strong
+# EDGE_API_KEY (>= 32 chars / >= 8 unique) so validate_settings passes at app
+# startup. That makes the os.environ.setdefault() above a deliberate no-op —
+# exactly as conftest documents. Hardcoding "test-api-key-12345" here meant
+# every request in this module sent a key the app had never been configured
+# with, so all four HTTP tests got 401 from verify_api_key and never reached
+# the allowlist logic they exist to test. The two direct verify_node_id()
+# unit tests kept passing, which made the failure look like an allowlist bug
+# rather than an auth-setup bug.
+#
+# Deriving it from the environment keeps this module correct whether conftest
+# supplies the value or the setdefault fallback above does.
+API_KEY = os.environ["EDGE_API_KEY"]
 
 # Minimal valid JPEG (copied from test_snapshot_api.py's FAKE_JPEG literal).
 FAKE_JPEG = (
