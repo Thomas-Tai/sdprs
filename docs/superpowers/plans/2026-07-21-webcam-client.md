@@ -8,6 +8,24 @@
 
 **Tech Stack:** Python 3.11+ / OpenCV / FFmpeg / httpx / tkinter / pystray / PyInstaller (client); FastAPI / SQLite / APScheduler (server); React 17 / hls.js / Babel-standalone (dashboard)
 
+> **Revision 2026-07-21 (after Tasks 1-2 shipped).** A pre-flight scan of the remaining
+> tasks against the actual codebase found seven defects in this plan's own text. All are
+> corrected in place; each correction is annotated inline where it applies, so a reader who
+> knows the original will see what changed and why. Summary:
+>
+> | # | Where | Defect |
+> |---|-------|--------|
+> | 1 | Task 3 | Broadcast two new WS types but updated neither the SPA whitelist nor the frozen contract test — `test_ws_event_contract.py` would go red and the SPA would drop both frames. New Step 6 added |
+> | 2 | Tasks 5 + 12 | Task 5 keyed the tile off `node.type === 'webcam'`, which nothing populated until Task 12, seven tasks later. **Merged into Task 5**; Task 12 retired |
+> | 3 | Task 12 | Told the implementer to make required `NodeStatus.node_type` optional, and called `NodeStatus(...)` with two kwargs that are not fields on the model |
+> | 4 | Task 3 | `get_hls_file` gated traversal with `str.startswith()` — a sibling dir `storage/hls-evil` satisfies it. Now `Path.is_relative_to()` + an extension allowlist |
+> | 5 | Task 3 | `cleanup_hls_dir` never dropped `_command_queues`, which `get_command_queue` creates for any caller-supplied `node_id` |
+> | 6 | Task 3 | Re-derived the API-key hash inline via `__import__("hashlib")` instead of using the identity `verify_webcam_api_key` had already authenticated |
+> | 7 | Task 5 | The `app.jsx` WS handler tested `data.type` (always `undefined` — the callback is `onEvent(type, data)`), called the un-debounced refresh, and ignored `webcam_stream_started` entirely |
+>
+> Tasks 1 and 2 are already committed and were not revisited. Task numbering for Tasks 6-11
+> and 13 is unchanged.
+
 ## Global Constraints
 
 - All vendor JS must be local (zero external CDN requests — disaster resilience requirement)
@@ -20,8 +38,38 @@
 - Default capture: 640×480, JPEG quality 40
 - Existing edge node behavior must not change
 - Database: must support both SQLite and PostgreSQL backends
-- Timestamps: use `utcnow().isoformat()` from `timeutil.py`
+- Timestamps: use `utcnow().isoformat()` from `timeutil.py` — naive UTC. Never
+  `datetime.utcnow()`, never timezone-aware datetimes; mixing them raises at comparison
 - All new POST/PUT/PATCH/DELETE under `/api/*` auto-covered by CSRFOriginMiddleware
+
+**SPA invariants** (this dashboard has NO build step — added 2026-07-21 after the UI audit):
+
+- Every `.jsx` is compiled in-browser by vendored Babel via `<script type="text/babel">`.
+  There is no bundler, no import/export, and no compile-time error surface
+- **Each file runs in its OWN top-level scope.** A `const` in `components.jsx` is invisible
+  to `monitor.jsx`. Cross-file symbols resolve ONLY through explicit `window.*` publication
+- `cd sdprs/tools/spa && npm run check` must pass before any SPA task is committed. It is
+  the only offline signal that the page still compiles and renders; a red gate is a hard stop
+- Adding a WebSocket event is a **three-way change**: the server `broadcast(...)` call, the
+  `_WS_EVENT_TYPES` whitelist in `api.jsx`, AND a matching branch in `app.jsx`'s `onEvent`
+  allowlist (which has no default case). Miss the whitelist and the frame is dropped
+  silently; miss the `onEvent` branch and it arrives but does nothing. Additionally,
+  `central_server/tests/test_ws_event_contract.py` sweeps every non-test `.py` for broadcast
+  `type` literals and fails on any type missing from its frozen set
+
+**Security constraints** (non-negotiable — this system commands real water pumps):
+
+- No hardcoded credentials of any kind. No WiFi or MQTT passwords in committed source
+- The literals `Msc@2333` and `MSC-Person` must never appear in any file
+- No `broker.emqx.io` (or any public broker) on a production code path
+- New payload/heartbeat fields are **telemetry-only**. Do not add a downlink or command
+  surface to the edge nodes beyond the existing `cmd/*` topic set. The webcam control
+  channel is a separate HTTP long-poll to webcam *clients* and does not touch edge MQTT
+
+**Test invocation:** run pytest ONE suite file per invocation
+(`/c/Python314/python -m pytest <file> -q -p no:cacheprovider`). A bare `pytest` from the
+repo root fails because the `[Cloud]` bracket in the absolute path is parsed as test-id
+parametrization. There is no `python3` alias on this machine.
 
 ---
 
@@ -491,6 +539,8 @@ git commit -m "feat(server): add webcam client creation and key revocation endpo
 - Create: `sdprs/central_server/services/hls_service.py`
 - Modify: `sdprs/central_server/main.py` (register router + init state)
 - Modify: `sdprs/central_server/config.py` (add HLS_STORAGE_PATH)
+- Modify: `sdprs/central_server/static/spa/api.jsx` (WS event whitelist — see Step 6)
+- Modify: `sdprs/central_server/tests/test_ws_event_contract.py` (frozen contract — see Step 6)
 - Test: `sdprs/central_server/tests/test_webcam_api.py`
 
 **Interfaces:**
@@ -559,11 +609,21 @@ def _prune_old_segments(node_dir: Path) -> None:
         oldest.unlink(missing_ok=True)
 
 
+# Only these two extensions are ever served. HLS needs nothing else, and an
+# allowlist means a traversal bug alone is not enough to read arbitrary files.
+_SERVABLE_SUFFIXES = (".ts", ".m3u8")
+
+
 def get_hls_file(node_id: str, filename: str) -> Optional[bytes]:
     settings = get_settings()
-    base = Path(settings.HLS_STORAGE_PATH)
+    base = Path(settings.HLS_STORAGE_PATH).resolve()
+    if not filename.endswith(_SERVABLE_SUFFIXES):
+        return None
     target = (base / node_id / filename).resolve()
-    if not str(target).startswith(str(base.resolve())):
+    # is_relative_to(), NOT str.startswith(). A string prefix test passes for
+    # a sibling directory whose name merely starts with the base name --
+    # base "storage/hls" would happily match "storage/hls-evil/secret.ts".
+    if not target.is_relative_to(base):
         return None
     if target.is_file():
         return target.read_bytes()
@@ -578,6 +638,10 @@ def cleanup_hls_dir(node_id: str) -> None:
         shutil.rmtree(node_dir, ignore_errors=True)
     _viewer_count.pop(node_id, None)
     _last_activity.pop(node_id, None)
+    # _command_queues must be dropped here too. get_command_queue() creates an
+    # entry for ANY node_id that reaches the long-poll endpoint, so leaving it
+    # behind lets caller-supplied ids accumulate without bound.
+    _command_queues.pop(node_id, None)
 
 
 def get_viewer_count(node_id: str) -> int:
@@ -644,9 +708,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from ..auth import get_current_user, verify_webcam_api_key, verify_node_id
-from ..database import (
-    register_webcam_cameras, get_webcam_cameras, get_webcam_camera_owner,
-)
+from ..database import register_webcam_cameras, get_webcam_cameras
 from ..services import hls_service
 from ..services.websocket_service import ws_manager
 
@@ -678,9 +740,11 @@ async def upload_hls_segment(
     verify_node_id(node_id)
     if not filename.endswith((".ts", ".m3u8")):
         raise HTTPException(status_code=400, detail="Only .ts and .m3u8 files allowed")
-    owner = get_webcam_camera_owner(node_id, __import__("hashlib").sha256(
-        request.headers.get("X-API-Key", "").encode()).hexdigest())
-    if not owner:
+    # Ownership is checked against the identity the dependency already
+    # authenticated. Re-hashing the raw X-API-Key header here would duplicate
+    # auth logic that verify_webcam_api_key has done, and re-reading a header
+    # the dependency owns is how the two drift apart later.
+    if not any(c["node_id"] == node_id for c in get_webcam_cameras(client_node_id)):
         raise HTTPException(status_code=403, detail="Camera not owned by this client")
     data = await request.body()
     if not data:
@@ -703,10 +767,13 @@ async def serve_hls_file(
     if data is None:
         raise HTTPException(status_code=404, detail="HLS file not found")
     media_type = "application/vnd.apple.mpegurl" if filename.endswith(".m3u8") else "video/mp2t"
+    # No Access-Control-Allow-Origin here. This endpoint is session-authenticated
+    # and the SPA fetches it same-origin, so a wildcard would only widen reach
+    # without enabling anything the dashboard needs.
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Cache-Control": "no-cache, no-store", "Access-Control-Allow-Origin": "*"},
+        headers={"Cache-Control": "no-cache, no-store"},
     )
 
 
@@ -777,7 +844,55 @@ from .services.hls_service import cleanup_stale_streams
 scheduler.add_job(cleanup_stale_streams, "interval", minutes=5, id="hls_cleanup")
 ```
 
-- [ ] **Step 6: Write integration test**
+- [ ] **Step 6: Update the WS event contract — BOTH sides (hard gate)**
+
+Step 3 adds two `ws_manager.broadcast(...)` call-sites emitting `webcam_stream_started`
+and `webcam_stream_stopped`. `central_server/tests/test_ws_event_contract.py` sweeps every
+non-test `.py` under `central_server/` for broadcast payload `type` literals and fails on
+any type absent from its frozen set. It will go RED the moment Step 3 lands unless both
+sides are updated in the same commit. Independently, `api.jsx` silently drops unrecognised
+frames ("unknown type — ignore silently for forward-compat"), so skipping the SPA half
+produces no error — just a live view that never reacts to start/stop.
+
+**6a.** In `sdprs/central_server/static/spa/api.jsx`, extend the `_WS_EVENT_TYPES` set:
+
+```javascript
+  const _WS_EVENT_TYPES = new Set([
+    'alert_updated', 'alert_acknowledged', 'alert_resolved',
+    'node_status', 'pump_status', 'node_deleted',
+    'auth_expired',
+    'webcam_stream_started', 'webcam_stream_stopped',
+  ]);
+```
+
+**6b.** In `sdprs/central_server/tests/test_ws_event_contract.py`, add both to
+`EXPECTED_ALL_TYPES`, preserving the file's alphabetical ordering:
+
+```python
+EXPECTED_ALL_TYPES = frozenset({
+    "alert_acknowledged",
+    "alert_resolved",
+    "alert_updated",
+    "auth_expired",
+    "new_alert",
+    "node_deleted",
+    "node_status",
+    "ping",
+    "pump_status",
+    "webcam_stream_started",
+    "webcam_stream_stopped",
+})
+```
+
+Do NOT add them to `INTERNAL_ONLY_TYPES` — they are genuinely intended for the SPA.
+
+**6c.** Verify the gate is green before continuing:
+
+```bash
+cd sdprs && /c/Python314/python -m pytest central_server/tests/test_ws_event_contract.py -q -p no:cacheprovider
+```
+
+- [ ] **Step 7: Write integration test**
 
 ```python
 # sdprs/central_server/tests/test_webcam_api.py
@@ -865,16 +980,24 @@ async def test_full_webcam_flow(authed_client, tmp_path):
     assert resp.json()["viewers"] == 0
 ```
 
-- [ ] **Step 7: Run tests**
+- [ ] **Step 8: Run tests**
 
-Run: `cd sdprs && python -m pytest central_server/tests/test_webcam_api.py -v`
-Expected: PASS
-
-- [ ] **Step 8: Commit**
+Run each suite as its own pytest invocation — a bare `pytest` from the repo root fails
+because the `[Cloud]` bracket in the absolute path is parsed as test-id parametrization:
 
 ```bash
 cd sdprs
-git add central_server/api/webcam.py central_server/services/hls_service.py central_server/main.py central_server/config.py central_server/tests/test_webcam_api.py
+/c/Python314/python -m pytest central_server/tests/test_webcam_api.py -v -p no:cacheprovider
+/c/Python314/python -m pytest central_server/tests/test_ws_event_contract.py -q -p no:cacheprovider
+```
+
+Expected: both PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+cd sdprs
+git add central_server/api/webcam.py central_server/services/hls_service.py central_server/main.py central_server/config.py central_server/tests/test_webcam_api.py central_server/static/spa/api.jsx central_server/tests/test_ws_event_contract.py
 git commit -m "feat(server): add webcam router with HLS, stream control, and command long-poll"
 ```
 
@@ -884,6 +1007,9 @@ git commit -m "feat(server): add webcam router with HLS, stream control, and com
 
 **Files:**
 - Create: `sdprs/central_server/static/spa/vendor/hls.min.js` (download)
+- Create: `sdprs/central_server/static/spa/vendor/VENDOR.md` (provenance + pinned SHA-256)
+- Create: `sdprs/tools/spa/check_vendor.js` (integrity gate)
+- Modify: `sdprs/tools/spa/run_all.js` (register the gate)
 - Modify: `sdprs/central_server/static/spa/index.html`
 - Modify: `sdprs/central_server/static/spa/api.jsx`
 - Modify: `sdprs/central_server/static/spa/components.jsx`
@@ -893,15 +1019,58 @@ git commit -m "feat(server): add webcam router with HLS, stream control, and com
 - Produces: `window.HlsPlayer` component
 - Produces: `window.SDPRS_API.startWebcamStream(nodeId)`, `stopWebcamStream(nodeId)`, `createWebcamClient(name)`, `revokeWebcamKey(nodeId)`
 
-- [ ] **Step 1: Download hls.js to vendor directory**
+- [ ] **Step 1: Vendor hls.js with a pinned SHA-256**
 
-Run:
+Global Constraint #1 is zero-CDN disaster resilience: this blob is fetched ONCE at
+development time and served locally forever after. A size check ("is it >100KB") does not
+establish that the bytes committed are the bytes intended, so pin the digest instead.
+
 ```bash
 cd sdprs/central_server/static/spa/vendor
-curl -L -o hls.min.js "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"
+curl -fL -o hls.min.js "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"
+sha256sum hls.min.js          # record this value
+head -c 120 hls.min.js        # sanity: minified JS, not an HTML error page
 ```
 
-Verify file is >100KB and starts with valid JS.
+`curl -f` matters — without it a 404 or captive-portal page is written to the file and
+"it's >100KB" still passes. If the fetch is blocked in this environment, STOP and report
+NEEDS_CONTEXT rather than committing a placeholder.
+
+Record provenance in `sdprs/central_server/static/spa/vendor/VENDOR.md`:
+
+```markdown
+# Vendored third-party assets
+
+Runtime loads these from disk only — no CDN request is ever made in production.
+Re-verify with: `cd tools/spa && npm run vendor`
+
+| File | Version | Source | SHA-256 |
+|------|---------|--------|---------|
+| `hls.min.js` | 1.5.13 | https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js | `<paste digest>` |
+```
+
+- [ ] **Step 1b: Add the integrity gate**
+
+Create `sdprs/tools/spa/check_vendor.js` — it parses the VENDOR.md table, re-hashes each
+listed file, and exits non-zero on any mismatch or missing file. Keep it dependency-free
+(node's built-in `crypto` and `fs` only), matching the other gates in that directory.
+
+Register it in `sdprs/tools/spa/run_all.js` as a **blocking** check, placed first so a
+corrupted vendor blob is reported before the syntax and render gates run against it:
+
+```javascript
+const CHECKS = [
+  { name: 'vendor integrity', script: 'check_vendor.js', blocking: true },
+  { name: 'scope invariant', script: 'scope_probe.js', blocking: true },
+  { name: 'syntax',          script: 'check_spa_syntax.js', blocking: true },
+  { name: 'undefined refs',  script: 'check_spa_refs.js', blocking: true },
+  { name: 'render tests',    script: 'render_tests.js', blocking: true },
+  { name: 'tailwind tokens', script: 'check_spa_classes.js', blocking: false },
+];
+```
+
+Add a `"vendor": "node check_vendor.js"` entry to the `scripts` block of
+`sdprs/tools/spa/package.json`.
 
 - [ ] **Step 2: Add hls.min.js script tag to index.html**
 
@@ -1000,28 +1169,134 @@ Add to the window export line:
 window.HlsPlayer = HlsPlayer;
 ```
 
-- [ ] **Step 5: Verify in browser**
+- [ ] **Step 5: Run the SPA gates**
 
-Start the dev server, open Dashboard, confirm no console errors from hls.min.js loading.
+This SPA has no build step — every `.jsx` is compiled in-browser by vendored Babel, so a
+syntax error or an undefined cross-file reference is invisible until a browser loads the
+page. `sdprs/tools/spa/` exists to catch that offline and is the real verification here:
+
+```bash
+cd sdprs/tools/spa && npm run check
+```
+
+All blocking gates must pass. Two traps specific to this task:
+
+- **Scope isolation.** Each `<script type="text/babel">` runs in its OWN top-level scope.
+  `HlsPlayer` defined in `components.jsx` is NOT visible to `monitor.jsx` unless it is
+  published as `window.HlsPlayer`. The `scope invariant` and `undefined refs` gates catch
+  this; do not hand-wave them.
+- **`Hls` is a global** from the vendored script tag, not an import. The `typeof Hls ===
+  'undefined'` guard in the component is what keeps the page alive if the vendor file
+  fails to load — keep it.
+
+Then start the dev server, open the Dashboard, and confirm no console errors from
+hls.min.js loading.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd sdprs
-git add central_server/static/spa/vendor/hls.min.js central_server/static/spa/index.html central_server/static/spa/api.jsx central_server/static/spa/components.jsx
+git add central_server/static/spa/vendor/hls.min.js central_server/static/spa/vendor/VENDOR.md central_server/static/spa/index.html central_server/static/spa/api.jsx central_server/static/spa/components.jsx tools/spa/check_vendor.js tools/spa/run_all.js tools/spa/package.json
 git commit -m "feat(dashboard): add hls.js vendor, HlsPlayer component, webcam API functions"
 ```
 
 ---
 
-### Task 5: Dashboard — Monitor Wall Webcam Tile (Badge + Live Button)
+### Task 5: Integration — `node_type` End-to-End + Monitor Wall Webcam Tile
+
+> **Merged task.** This absorbs what was originally Task 12. The two were separated in the
+> first draft, which made Task 5 unbuildable: it keys the entire tile off
+> `node.type === 'webcam'`, but nothing populated that value until Task 12 seven tasks
+> later, so the badge would have been permanently-false dead code with no way to test it.
+> Server field → SPA mapping → tile now land together and are verifiable in one diff.
 
 **Files:**
-- Modify: `sdprs/central_server/static/spa/pages/monitor.jsx`
+- Modify: `sdprs/central_server/api/nodes.py` (include webcam cameras in `GET /api/nodes`)
+- Modify: `sdprs/central_server/static/spa/api.jsx` (`mapNode` — recognise `webcam`)
+- Modify: `sdprs/central_server/static/spa/pages/monitor.jsx` (badge + live button)
+- Modify: `sdprs/central_server/static/spa/app.jsx` (route the two webcam WS events)
+- Modify: `sdprs/tools/spa/render_tests.js` (badge render assertions)
+- Test: `sdprs/central_server/tests/test_webcam_node_list.py`
 
 **Interfaces:**
 - Consumes: `window.HlsPlayer` (Task 4), `window.SDPRS_API.startWebcamStream/stopWebcamStream` (Task 4)
-- Consumes: `node.type` field — webcam cameras will have `type === 'webcam'`
+- Consumes: `webcam_cameras` table (Task 1)
+- Produces: `GET /api/nodes` returns webcam rows with `node_type: "webcam"`
+- Produces: `node.type === 'webcam'` in the SPA's mapped node shape
+
+- [ ] **Step 0a: Return webcam cameras from `GET /api/nodes`**
+
+In `sdprs/central_server/api/nodes.py`, in `list_nodes`, append webcam rows after the
+existing node list is built:
+
+```python
+if get_backend() == "postgresql":
+    webcam_rows = _pg_fetch_many_sync(
+        "SELECT node_id, name, status, last_upload FROM webcam_cameras", {})
+else:
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT node_id, name, status, last_upload FROM webcam_cameras")
+        webcam_rows = [dict(r) for r in cursor.fetchall()]
+
+for wc in webcam_rows:
+    last_upload = wc.get("last_upload")
+    is_stale = False
+    if last_upload:
+        try:
+            age = (utcnow() - datetime.fromisoformat(last_upload)).total_seconds()
+            is_stale = age > STALE_THRESHOLD_SECONDS
+        except (TypeError, ValueError):
+            pass
+    nodes.append(NodeStatus(
+        node_id=wc["node_id"],
+        node_type="webcam",
+        status=wc.get("status") or "OFFLINE",
+        location=wc.get("name"),
+        last_heartbeat=last_upload,
+        snapshot_timestamp=last_upload,
+        is_stale=is_stale,
+    ))
+```
+
+Three corrections against the original Task 12 text, which would not have run:
+
+1. **Do NOT change `NodeStatus.node_type` to `Optional[str] = None`.** The original said
+   "add if missing" — it is already present and **required** (`node_type: str`). Relaxing
+   it would weaken the contract for pump and glass nodes too. Leave it required.
+2. The original passed `heartbeat=` and `upload=` — **neither is a field on `NodeStatus`**
+   (they are `last_heartbeat` / `snapshot_timestamp`; `heartbeat` and `upload` are names in
+   the SPA's *mapped* shape, not the server model). As written it raised a pydantic
+   validation error.
+3. Import `datetime` and `utcnow` at module top, not inside the loop. Use
+   `central_server.timeutil.utcnow()` — naive-UTC — never `datetime.utcnow()`.
+
+- [ ] **Step 0b: Recognise `webcam` in `mapNode`**
+
+`sdprs/central_server/static/spa/api.jsx` line ~262 currently collapses every non-pump
+node to `'camera'`:
+
+```javascript
+const type = n.node_type === 'pump' ? 'pump' : 'camera';
+```
+
+A webcam therefore arrives as `'camera'` today and the tile's `node.type === 'webcam'`
+test can never be true. Widen it:
+
+```javascript
+const type = n.node_type === 'pump' ? 'pump'
+           : n.node_type === 'webcam' ? 'webcam'
+           : 'camera';
+// Webcams are camera-like for freshness purposes: their "upload" age comes from
+// snapshot_timestamp (not the heartbeat), and staleness downgrades them to warn.
+// Introducing 'webcam' as a THIRD type silently excluded them from both rules,
+// because every such check below was written as `type === 'camera'`.
+const cameraLike = (type === 'camera' || type === 'webcam');
+```
+
+Then replace the `type === 'camera'` tests in this function with `cameraLike` for the
+staleness downgrade (~line 282) and the `up` computation (~line 303). Leave the
+visual/audio-health degradation check keyed to `type === 'camera'` only — a webcam client
+reports neither, so `'unknown'` must not be read as degraded.
 
 - [ ] **Step 1: Add webcam badge and live button to NodeCard**
 
@@ -1100,30 +1375,83 @@ In the image area of NodeCard, conditionally render:
 )}
 ```
 
-- [ ] **Step 4: Handle webcam_stream_stopped WS event**
+- [ ] **Step 4: Route the webcam WS events in `app.jsx`**
 
-In `app.jsx` where WS events are routed (the `onEvent` handler), add:
+`app.jsx`'s `onEvent` handler is an explicit if/else-if allowlist of `type` values with
+**no default branch** (~line 646). Adding the two types to `api.jsx`'s `_WS_EVENT_TYPES` in
+Task 3 lets them reach `onEvent`, but they then match no branch and nothing refreshes.
+Extend the existing node-event branch:
+
 ```javascript
-if (data.type === 'webcam_stream_stopped') {
-  // Force refresh nodes to update tile state
-  window.SDPRS_API.refreshLive();
+} else if (type === 'node_status' || type === 'pump_status' || type === 'node_deleted' ||
+           type === 'webcam_stream_started' || type === 'webcam_stream_stopped') {
+  scheduleRefresh();
 }
 ```
 
-- [ ] **Step 5: Test in browser**
+The original text here was wrong three ways and must not be transcribed:
 
-Start server, verify:
-- Webcam nodes show blue "Webcam" badge
-- Edge cam nodes show grey "Edge Cam" badge
-- Clicking "▶ 即時" shows loading then switches to video (or falls back gracefully if no client connected)
-- Clicking "● LIVE ✕" returns to snapshot mode
+- It tested `data.type`. The callback signature is `onEvent(type, data)` — `type` is the
+  first parameter and `data` is already the unwrapped `msg.data` payload, so `data.type`
+  is `undefined` and the branch never fires.
+- It called `window.SDPRS_API.refreshLive()` directly. Use the local `scheduleRefresh()`,
+  which is the 300ms-debounced coalescing helper every other event branch uses; calling
+  `refreshLive` directly bypasses that and can stampede on a burst of stream events.
+- It handled only `webcam_stream_stopped`, leaving `webcam_stream_started` inert.
 
-- [ ] **Step 6: Commit**
+Read the `SHL-1` comment immediately above this branch before editing. It documents a
+`weather` event that was dead in both directions — missing from the whitelist AND never
+emitted by any backend path — and is precisely the failure mode this step exists to avoid.
+A three-way change (backend emit + `api.jsx` whitelist + this branch) is one deliberate
+unit; land all three or the feature silently does nothing.
+
+- [ ] **Step 5: Automated verification (this is the gate, not the browser check)**
+
+**5a — backend.** Create `sdprs/central_server/tests/test_webcam_node_list.py` asserting
+that a registered webcam camera appears in `GET /api/nodes` with `node_type == "webcam"`,
+that `location`/`last_heartbeat`/`snapshot_timestamp` carry the expected values, and that
+a camera whose `last_upload` is older than `STALE_THRESHOLD_SECONDS` comes back
+`is_stale: true`. Follow the fixture style of the already-passing
+`central_server/tests/test_webcam_nodes_api.py` (`@pytest.mark.anyio` + `AsyncClient` +
+`ASGITransport`; anyio's pytest plugin supplies `anyio_backend`, no extra config needed).
+
+```bash
+cd sdprs && /c/Python314/python -m pytest central_server/tests/test_webcam_node_list.py -v -p no:cacheprovider
+```
+
+**5b — regression guard.** `mapNode` is shared by every node type, so re-run the suites
+that assert node-shape behaviour:
 
 ```bash
 cd sdprs
-git add central_server/static/spa/pages/monitor.jsx central_server/static/spa/app.jsx
-git commit -m "feat(dashboard): add webcam badge, live view button, and HlsPlayer integration to Monitor Wall"
+/c/Python314/python -m pytest central_server/tests/test_nodes_api.py -q -p no:cacheprovider
+/c/Python314/python -m pytest central_server/tests/test_ws_event_contract.py -q -p no:cacheprovider
+```
+
+**5c — SPA render assertions.** Add cases to `sdprs/tools/spa/render_tests.js` covering:
+a node with `node_type: 'webcam'` renders the `Webcam` badge; a node with
+`node_type: 'glass'` renders `Edge Cam` and NOT the webcam badge; the live button is
+absent for non-webcam nodes. Then:
+
+```bash
+cd sdprs/tools/spa && npm run check
+```
+
+All blocking gates must pass. This is the step that proves the badge is reachable — the
+whole reason Tasks 5 and 12 were merged.
+
+- [ ] **Step 6: Browser sanity check**
+
+Start the server and confirm by eye: webcam nodes show the blue `Webcam` badge, edge cams
+show grey `Edge Cam`, `▶ 即時` goes loading → video (or falls back cleanly with no client
+connected), and `● LIVE ✕` returns to snapshot mode.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd sdprs
+git add central_server/api/nodes.py central_server/static/spa/api.jsx central_server/static/spa/pages/monitor.jsx central_server/static/spa/app.jsx central_server/tests/test_webcam_node_list.py tools/spa/render_tests.js
+git commit -m "feat(dashboard): surface webcam nodes end-to-end with badge and live view"
 ```
 
 ---
@@ -2314,77 +2642,32 @@ git commit -m "feat(client): add main entry point, requirements, and PyInstaller
 
 ---
 
-### Task 12: Integration — Server Returns `node_type` in Node List + Dashboard Consumes It
+### Task 12: MERGED INTO TASK 5 — do not implement
 
-**Files:**
-- Modify: `sdprs/central_server/api/nodes.py` (include webcam cameras in GET /nodes)
-- Modify: `sdprs/central_server/static/spa/api.jsx` (map node_type to `node.type`)
+**Status: retired 2026-07-21.** This task's entire content (webcam rows in
+`GET /api/nodes`, plus the `node_type` -> `node.type` mapping in `api.jsx`) now lives in
+**Task 5**, as Steps 0a and 0b.
 
-**Interfaces:**
-- Consumes: `webcam_cameras` table (Task 1)
-- Produces: `GET /api/nodes` returns webcam cameras with `type: "webcam"`
+**Why it moved.** Task 5 keys the Monitor Wall webcam tile off `node.type === 'webcam'`,
+but nothing produced that value until this task, seven positions later. Task 5 would have
+shipped as permanently-false dead code with no way to test the badge it exists to add, and
+this task would have "enabled" a feature whose UI had already passed review unexercised.
 
-- [ ] **Step 1: Extend GET /api/nodes to include webcam cameras**
+Three defects in the original text of this task were corrected during the merge; they are
+documented inline at Task 5 Step 0a so the reasoning survives:
 
-In `sdprs/central_server/api/nodes.py`, in the `list_nodes` function, after building the existing node list, append webcam cameras:
+1. It instructed `NodeStatus.node_type` be made `Optional[str] = None` "(add if missing)".
+   The field already exists and is **required**; the change would have weakened the model
+   for pump and glass nodes too.
+2. Its `NodeStatus(...)` call passed `heartbeat=` and `upload=`, neither of which is a
+   field on that model — those are names in the SPA's mapped node shape. It would have
+   raised a pydantic validation error on the first webcam row.
+3. Its `api.jsx` snippet assumed a `type` mapping it could amend. `mapNode` collapses every
+   non-pump node to `'camera'`, so introducing `'webcam'` as a third type also silently
+   removes webcams from the staleness and upload-age rules unless those are widened too.
 
-```python
-# After existing node list construction:
-from ..database import get_db_cursor, get_backend
-if get_backend() == "postgresql":
-    from ..database import _pg_fetch_many_sync
-    webcam_rows = _pg_fetch_many_sync(
-        "SELECT node_id, name, status, last_upload FROM webcam_cameras", {})
-else:
-    with get_db_cursor() as cursor:
-        cursor.execute("SELECT node_id, name, status, last_upload FROM webcam_cameras")
-        webcam_rows = [dict(r) for r in cursor.fetchall()]
-
-for wc in webcam_rows:
-    upload_age = None
-    if wc.get("last_upload"):
-        from ..timeutil import utcnow
-        from datetime import datetime
-        try:
-            ts = datetime.fromisoformat(wc["last_upload"])
-            upload_age = (utcnow() - ts).total_seconds()
-        except Exception:
-            pass
-    nodes.append(NodeStatus(
-        node_id=wc["node_id"],
-        status=wc.get("status", "OFFLINE"),
-        node_type="webcam",
-        location=None,
-        heartbeat=None,
-        upload=upload_age,
-    ))
-```
-
-Ensure `NodeStatus` model has `node_type: Optional[str] = None` field (add if missing).
-
-- [ ] **Step 2: Map node_type in api.jsx loadNodes**
-
-In `sdprs/central_server/static/spa/api.jsx`, in the `loadNodes()` function where nodes are mapped, ensure the `type` field is populated:
-
-```javascript
-// In the node mapping:
-type: raw.node_type === 'webcam' ? 'webcam' : (raw.node_type === 'pump' ? 'pump' : 'camera'),
-```
-
-- [ ] **Step 3: Test end-to-end in browser**
-
-1. Start server
-2. Create a webcam client via Dashboard (Status page → 新增 Webcam Client)
-3. Verify it appears in the node list
-4. Verify Monitor Wall shows the webcam badge (even if offline)
-
-- [ ] **Step 4: Commit**
-
-```bash
-cd sdprs
-git add central_server/api/nodes.py central_server/static/spa/api.jsx
-git commit -m "feat: include webcam cameras in node list with type field for dashboard"
-```
+**If you are executing the plan: skip this task.** Task numbering for Tasks 6-11 and 13 is
+unchanged.
 
 ---
 
