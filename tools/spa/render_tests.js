@@ -605,6 +605,27 @@ ${PRELUDE}
     await settle();
     A('stopping calls stopWebcamStream and unmounts the player', stopCalls[0] === 'webcam_ab12' && !container.querySelector('video'), JSON.stringify(stopCalls));
 
+    // --- readiness poll times out: release the armed lease, do not strand it ---
+    // The 即時 click armed the server viewer-lease via startWebcamStream. If the
+    // client never produces a segment, the poll must give up AND call
+    // stopWebcamStream — otherwise the lease sits armed ~90s and the field PC
+    // keeps encoding a stream nobody watches. Drive the deadline by jumping
+    // Date.now past it instead of waiting the full LIVE_POLL_TIMEOUT_MS.
+    ReactDOM.flushSync(() => root.render(null)); // fresh instance for the timeout case
+    playlist = HEADER_ONLY;
+    probes.length = 0; startCalls.length = 0; stopCalls.length = 0; intervals.length = 0;
+    const realNow = Date.now;
+    render();
+    click(findBtn('即時'));
+    await settle();
+    A('timeout case: the stream is armed on click', startCalls.length === 1 && startCalls[0] === 'webcam_ab12', JSON.stringify(startCalls));
+    A('timeout case: no <video> while still segment-less', !container.querySelector('video'));
+    Date.now = () => realNow() + LIVE_POLL_TIMEOUT_MS + 5000; // jump past the readiness deadline
+    await sleep(1700); // let the next scheduled probe run and hit the deadline branch
+    A('a readiness timeout releases the server lease via stopWebcamStream', stopCalls[0] === 'webcam_ab12', JSON.stringify(stopCalls));
+    A('a readiness timeout returns the tile to the 即時 affordance (no video)', !!findBtn('即時') && !container.querySelector('video'));
+    Date.now = realNow;
+
     window.setInterval = origSetInterval;
   } catch (e) {
     results.push({ name: 'monitor live-readiness suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
@@ -844,6 +865,25 @@ ${PRELUDE}
     // Follow-up Task 1: monitor.jsx polls this to decide readiness; if it is
     // missing the tile silently falls back to the old blind 3s warm-up.
     A('SDPRS_API.getWebcamPlaylist is a function', !!api && typeof api.getWebcamPlaylist === 'function', api && typeof api.getWebcamPlaylist);
+
+    // Follow-up 3: pin mapNode's snake_case -> camelCase contract. The status +
+    // monitor pages key revoke/delete on node.clientId / node.clientName, and
+    // those fields are ONLY ever produced here, by mapNode, from the backend's
+    // client_id / client_name. Drive the REAL mapNode end-to-end via refreshLive
+    // over a stubbed /api/nodes so a dropped mapping cannot pass unnoticed.
+    const jsonRes = (data) => Promise.resolve({
+      ok: true, status: 200,
+      headers: { get: () => 'application/json' },
+      json: () => Promise.resolve(data), text: () => Promise.resolve(''),
+    });
+    window.fetch = (path) => (path.indexOf('/api/nodes') === 0)
+      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99' }])
+      : jsonRes([]); // every other loader: benign empty payload
+    const rl = await api.refreshLive();
+    const mapped = ((rl && rl.nodes) || []).find(n => n.id === 'webcam_cam99');
+    A('mapNode maps node_type webcam -> type webcam', !!mapped && mapped.type === 'webcam', mapped && mapped.type);
+    A('mapNode surfaces client_id as clientId', !!mapped && mapped.clientId === 'webcam_cli99', mapped && mapped.clientId);
+    A('mapNode surfaces client_name as clientName', !!mapped && mapped.clientName === 'Front Desk PC', mapped && mapped.clientName);
   } catch (e) {
     results.push({ name: 'api surface suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }

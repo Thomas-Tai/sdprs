@@ -114,7 +114,16 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           .then(text => {
             if (cancelled) return;
             if (playlistHasSegment(text)) { setLiveMode('live'); return; }
-            if (Date.now() >= deadline) { setLiveMode('off'); return; }
+            if (Date.now() >= deadline) {
+              // Giving up: the ▶ 即時 click armed the server viewer-lease via
+              // startWebcamStream. Release it now — otherwise it stays armed up
+              // to LEASE_TTL_SECONDS (~90s) and the field PC keeps encoding a
+              // stream no one will ever watch. Symmetric with the ✕ button's
+              // stop. Best-effort; a failed stop just lets the lease lapse.
+              if (api.stopWebcamStream) api.stopWebcamStream(node.id).catch(() => {});
+              setLiveMode('off');
+              return;
+            }
             timer = setTimeout(probe, LIVE_POLL_MS);
           });
       };

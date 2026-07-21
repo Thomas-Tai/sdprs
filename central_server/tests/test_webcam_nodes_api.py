@@ -456,6 +456,128 @@ async def test_camera_node_id_is_404_on_both_client_endpoints(client, monkeypatc
 
 
 # =============================================================================
+# Clientless webcam client — created via 新增 Webcam Client but never provisioned
+# by the wizard, so it has NO camera rows. GET /api/nodes lists CAMERAS, so
+# without a dedicated surface such a client is invisible in the node list, which
+# means its live API key can never be revoked nor the client retired.
+# =============================================================================
+
+@pytest.mark.anyio
+async def test_node_list_surfaces_clientless_webcam_client(client, monkeypatch):
+    """A camera-less webcam client must still appear so it stays revocable.
+
+    It appears as its own webcam node whose client_id IS its own node_id (a
+    clientless client is the addressable client), so the revoke-key / delete
+    affordances — which key on the CLIENT node_id — target it directly. Before
+    this surface existed the row never appeared and the key was undead: valid
+    forever with no UI path to rotate or retire it.
+    """
+    import central_server.api.nodes as nodes_api
+    import central_server.services.websocket_service as ws_mod
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+    # This test also DELETEs, which broadcasts node_deleted; stub the WS seam so
+    # the real broadcaster isn't fired against the fake's dummy loop (which would
+    # leave an un-awaited coroutine warning).
+    monkeypatch.setattr(ws_mod, "broadcast_from_sync", lambda loop, evt: None)
+
+    created = await client.post("/api/nodes/webcam", json={"name": "Unprovisioned PC"})
+    assert created.status_code == 201
+    client_node_id = created.json()["node_id"]  # no register_webcam_cameras call
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200
+    rows = [n for n in listed.json() if n["node_type"] == "webcam"]
+    assert len(rows) == 1, f"clientless webcam client did not surface: {rows}"
+    row = rows[0]
+    # It IS its own client — node_id and client_id coincide here (unlike a camera
+    # row, where they are deliberately different).
+    assert row["node_id"] == client_node_id
+    assert row["client_id"] == client_node_id
+    assert row["client_name"] == "Unprovisioned PC"
+
+    # And it is genuinely retireable via the exact id the row hands the UI.
+    deleted = await client.delete(f"/api/nodes/webcam/{row['client_id']}")
+    assert deleted.status_code == 204
+    relisted = await client.get("/api/nodes")
+    assert [n for n in relisted.json() if n["node_type"] == "webcam"] == []
+
+
+@pytest.mark.anyio
+async def test_provisioned_client_not_double_listed(client, monkeypatch):
+    """A client WITH cameras appears once per camera, never also as a bare row.
+
+    The clientless surface excludes provisioned clients via
+    NOT IN (SELECT client_id FROM webcam_cameras). Without that guard a client
+    with two cameras would show three rows — two cameras plus a phantom client.
+    """
+    from central_server.database import register_webcam_cameras
+    import central_server.api.nodes as nodes_api
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    provisioned = (await client.post(
+        "/api/nodes/webcam", json={"name": "Has Cameras"})).json()["node_id"]
+    clientless = (await client.post(
+        "/api/nodes/webcam", json={"name": "No Cameras"})).json()["node_id"]
+    cams = register_webcam_cameras(provisioned, [{"name": "A"}, {"name": "B"}])
+    cam_ids = sorted(c["node_id"] for c in cams)
+
+    listed = await client.get("/api/nodes")
+    rows = [n for n in listed.json() if n["node_type"] == "webcam"]
+    # Exactly the two camera rows + the one clientless row — no phantom for the
+    # provisioned client.
+    node_ids = sorted(n["node_id"] for n in rows)
+    assert node_ids == sorted(cam_ids + [clientless]), node_ids
+    assert provisioned not in node_ids  # provisioned client is NOT itself a row
+
+
+# =============================================================================
+# DELETE + live stream — deleting a client whose cameras are being watched must
+# tell the field PC to stop encoding. release_lease pops the lease, which also
+# removes it from cleanup_stale_streams' expiry scan, so an explicit stream_stop
+# is the ONLY thing that ever reaches the client. stream_stop is the EXISTING
+# control command — no new downlink surface is introduced.
+# =============================================================================
+
+@pytest.mark.anyio
+async def test_delete_enqueues_stream_stop_only_for_live_cameras(client, monkeypatch):
+    """Live cameras get a stream_stop on delete; idle cameras get nothing.
+
+    Proves both halves: the enqueue (so the field PC stops encoding a camera
+    that no longer exists) and the `if was_live` guard (no spurious command to a
+    camera nobody was watching).
+    """
+    from central_server.database import register_webcam_cameras
+    from central_server.services import hls_service
+
+    _capture_broadcasts(monkeypatch)
+
+    node_id = (await client.post(
+        "/api/nodes/webcam", json={"name": "Streaming PC"})).json()["node_id"]
+    cams = register_webcam_cameras(
+        node_id, [{"name": "Live A"}, {"name": "Live B"}, {"name": "Idle C"}])
+    cam_ids = [c["node_id"] for c in cams]
+    live_ids, idle_id = cam_ids[:2], cam_ids[2]
+
+    # Two cameras being watched, one not.
+    for cid in live_ids:
+        hls_service.touch_lease(cid)
+    assert hls_service.has_active_lease(idle_id) is False
+
+    resp = await client.delete(f"/api/nodes/webcam/{node_id}")
+    assert resp.status_code == 204
+
+    # Each watched camera is commanded to stop. Under the pre-fix code (only
+    # release_lease, no enqueue) these queues are empty and the dequeue is None.
+    for cid in live_ids:
+        cmd = await hls_service.dequeue_command(cid, timeout=0.2)
+        assert cmd is not None, f"no stream_stop enqueued for live camera {cid}"
+        assert cmd["command"] == "stream_stop"
+
+    # The idle camera nobody watched gets no command — the was_live guard holds.
+    assert await hls_service.dequeue_command(idle_id, timeout=0.2) is None
+
+
+# =============================================================================
 # register_webcam_cameras() atomicity — a client registers its WHOLE camera
 # list in one call, so a batch that fails halfway must leave no rows at all.
 # =============================================================================

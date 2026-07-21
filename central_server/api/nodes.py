@@ -432,6 +432,48 @@ async def list_nodes(
             is_stale=is_stale,
         ))
 
+    # Also surface webcam CLIENTS that have registered NO cameras yet — created
+    # via 新增 Webcam Client but never provisioned by the setup wizard. The query
+    # above lists CAMERAS, so such a client is invisible in the node list, which
+    # means its live API key can never be revoked nor the client retired: a
+    # dangling credential with no UI affordance. Represent each as its own webcam
+    # node whose client_id IS its own node_id, so the revoke-key / delete
+    # buttons (which key on the CLIENT node_id) target it correctly.
+    #
+    # NOT IN (SELECT client_id ...) excludes clients that already appear via
+    # their camera rows above, so a provisioned client is never double-listed.
+    # Backend-portable (same SQL both engines); tolerant like the reads above.
+    clientless_rows: List[Dict[str, Any]] = []
+    _CLIENTLESS_SQL = (
+        "SELECT node_id, name, status FROM webcam_clients "
+        "WHERE node_id NOT IN (SELECT client_id FROM webcam_cameras)"
+    )
+    try:
+        from ..database import get_backend, get_db_cursor
+        if get_backend() == "postgresql":
+            from ..database import _pg_fetch_many_sync
+            clientless_rows = _pg_fetch_many_sync(_CLIENTLESS_SQL, {})
+        else:
+            with get_db_cursor() as cursor:
+                cursor.execute(_CLIENTLESS_SQL)
+                clientless_rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.warning(f"Clientless webcam lookup failed: {e}")
+        clientless_rows = []
+
+    for wcl in clientless_rows:
+        result.append(NodeStatus(
+            node_id=wcl["node_id"],
+            node_type="webcam",
+            # Its own node_id — a clientless client IS the addressable client.
+            client_id=wcl["node_id"],
+            client_name=wcl.get("name"),
+            status=wcl.get("status") or "OFFLINE",
+            location=wcl.get("name"),
+            # No camera => it has never uploaded a frame. Leave heartbeat /
+            # snapshot empty so it reads as OFFLINE / no-data, which is the truth.
+        ))
+
     logger.debug(f"Returning {len(result)} nodes")
     return result
 
@@ -798,9 +840,18 @@ async def delete_webcam_node(
     # in-memory and expire on their own.
     for cam_id in camera_ids:
         try:
-            hls_service.release_lease(cam_id)
+            was_live = hls_service.release_lease(cam_id)
+            if was_live:
+                # A live lease means the field PC is actively encoding + uploading
+                # HLS for this camera right now. release_lease popped it, which
+                # ALSO removes it from cleanup_stale_streams' expiry scan — so
+                # without an explicit command here the client is never told to
+                # stop and keeps encoding/retry-uploading indefinitely against a
+                # camera that no longer exists. stream_stop is the EXISTING
+                # control command (no new downlink surface); best-effort.
+                await hls_service.enqueue_command(cam_id, "stream_stop")
         except Exception as e:
-            logger.debug(f"release_lease({cam_id}) after webcam delete failed: {e}")
+            logger.debug(f"lease release / stream_stop for {cam_id} after webcam delete failed: {e}")
 
     # Fire-and-forget WS broadcast (same pattern as delete_node above).
     try:
