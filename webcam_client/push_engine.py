@@ -84,12 +84,13 @@ class PushEngine(threading.Thread):
 
                 with self._stream_lock:
                     streaming = self._streaming
+                    encoder = self._encoder
 
-                if streaming and self._encoder:
+                if streaming and encoder:
                     fps = adaptive_fps(motion, self._target_fps)
                     interval = 1.0 / fps
                     if now - last_snapshot_time >= interval:
-                        self._encoder.write_frame(frame.tobytes())
+                        encoder.write_frame(cv2.resize(frame, self._resolution).tobytes())
                         last_snapshot_time = now
                         if now - last_hls_upload >= 2.0:
                             self._upload_segments()

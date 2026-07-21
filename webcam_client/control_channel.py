@@ -19,6 +19,7 @@ class ControlChannel(threading.Thread):
         self._on_command = on_command
         self._stop_event = threading.Event()
         self._client: Optional[httpx.Client] = None
+        self._backoff = 1.0
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -28,22 +29,20 @@ class ControlChannel(threading.Thread):
             timeout=httpx.Timeout(10.0, connect=3.0),
             headers={"X-API-Key": self._api_key},
         )
-        backoff = 1.0
         while not self._stop_event.is_set():
             try:
                 for node_id in self._node_ids:
                     if self._stop_event.is_set():
                         break
                     self._poll_node(node_id)
-                backoff = 1.0
             except httpx.ConnectError:
-                logger.warning(f"Control channel connection failed, retry in {backoff}s")
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, 30.0)
+                logger.warning(f"Control channel connection failed, retry in {self._backoff}s")
+                self._stop_event.wait(self._backoff)
+                self._backoff = min(self._backoff * 2, 30.0)
             except Exception as e:
                 logger.debug(f"Control channel error: {e}")
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, 30.0)
+                self._stop_event.wait(self._backoff)
+                self._backoff = min(self._backoff * 2, 30.0)
         if self._client:
             self._client.close()
 
@@ -57,6 +56,20 @@ class ControlChannel(threading.Thread):
                 params = data.get("params")
                 logger.info(f"Received command: {cmd} for {node_id}")
                 self._on_command(node_id, cmd, params)
+            # A clean poll resets the backoff; the small per-cycle floor keeps a
+            # 200 + null (empty long-poll) response from tight-looping the uplink.
+            self._backoff = 1.0
+            self._stop_event.wait(0.1)
         elif resp.status_code == 401:
             logger.error("API key rejected — stopping control channel")
             self._stop_event.set()
+        else:
+            # httpx does NOT raise on 5xx; without this arm a persistent non-200/
+            # non-401 status re-polls with no delay (Task 9 [Important] busy-loop).
+            # Apply the SAME exponential backoff the ConnectError arm uses.
+            logger.warning(
+                f"Control channel unexpected status {resp.status_code} for {node_id}, "
+                f"retry in {self._backoff}s"
+            )
+            self._stop_event.wait(self._backoff)
+            self._backoff = min(self._backoff * 2, 30.0)

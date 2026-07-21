@@ -51,8 +51,8 @@ class HlsEncoder:
                 )
                 logger.info("FFmpeg HLS encoder started")
                 return True
-            except FileNotFoundError:
-                logger.error("ffmpeg not found in PATH")
+            except OSError as e:
+                logger.error(f"Failed to start ffmpeg HLS encoder: {e}")
                 return False
 
     def write_frame(self, frame_bytes: bytes) -> bool:
@@ -76,6 +76,7 @@ class HlsEncoder:
                     self._process.wait(timeout=5)
                 except Exception:
                     self._process.kill()
+                    self._process.wait()
                 self._process = None
                 logger.info("FFmpeg HLS encoder stopped")
 
