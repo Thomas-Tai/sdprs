@@ -26,6 +26,8 @@ from ..database import (
     get_pump_readings,
     get_pump_readings_multi,
     delete_node as db_delete_node,
+    create_webcam_client,
+    revoke_webcam_key as db_revoke_webcam_key,
 )
 from ..services.mqtt_service import get_mqtt_service
 from ..timeutil import utcnow
@@ -620,6 +622,54 @@ async def pump_history(
     rows = get_pump_readings(node_id, start, end, limit)
     logger.debug(f"Pump history for {node_id}: {len(rows)} rows between {start} and {end}")
     return rows
+
+
+class WebcamCreateRequest(BaseModel):
+    """Request body for creating a webcam client."""
+    name: str = Field(..., min_length=1, max_length=60)
+
+
+@router.post("/nodes/webcam", status_code=201)
+async def create_webcam_node(
+    body: WebcamCreateRequest,
+    request: Request,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Register a new webcam client PC and return its credentials."""
+    from ..services.audit_service import log_action, ACTION_WEBCAM_CREATE
+
+    result = create_webcam_client(body.name)
+    log_action(user, ACTION_WEBCAM_CREATE, target_id=result["node_id"],
+               details={"name": body.name})
+    return {"node_id": result["node_id"], "api_key": result["api_key"], "name": body.name}
+
+
+@router.post("/nodes/{node_id}/revoke-key")
+async def revoke_node_key(
+    node_id: str,
+    request: Request,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Rotate the API key for a webcam client, invalidating the old key."""
+    from ..services.audit_service import log_action, ACTION_WEBCAM_REVOKE_KEY
+    from ..database import get_db_cursor, get_backend
+
+    # Verify node exists as webcam client
+    if get_backend() == "postgresql":
+        from ..database import _pg_fetch_one_sync
+        row = _pg_fetch_one_sync(
+            "SELECT node_id FROM webcam_clients WHERE node_id = :id", {"id": node_id}
+        )
+    else:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT node_id FROM webcam_clients WHERE node_id = ?", (node_id,))
+            row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Webcam client {node_id} not found")
+
+    result = db_revoke_webcam_key(node_id)
+    log_action(user, ACTION_WEBCAM_REVOKE_KEY, target_id=node_id, details={})
+    return {"api_key": result["api_key"]}
 
 
 class SnoozeRequest(BaseModel):
