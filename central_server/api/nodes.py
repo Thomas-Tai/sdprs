@@ -774,6 +774,18 @@ async def delete_webcam_node(
     the SPA, so no new event type is warranted."""
     from ..services.audit_service import log_action, ACTION_DELETE_NODE
     from ..services import hls_service
+    from ..database import get_webcam_cameras
+
+    # Capture the camera node_ids BEFORE deleting. HLS viewer leases are keyed
+    # by the CAMERA node_id (stream/start arms one per camera), never by the
+    # client's — so releasing by `node_id` here would be a silent no-op that
+    # merely looks like cleanup. After the delete the rows are gone and can no
+    # longer be enumerated, hence capturing first.
+    try:
+        camera_ids = [c["node_id"] for c in (get_webcam_cameras(node_id) or [])]
+    except Exception as e:
+        logger.debug(f"camera lookup before webcam delete({node_id}) failed: {e}")
+        camera_ids = []
 
     existed = db_delete_webcam_client(node_id)
     if not existed:
@@ -781,13 +793,14 @@ async def delete_webcam_node(
 
     log_action(user, ACTION_DELETE_NODE, target_id=node_id, details={"kind": "webcam"})
 
-    # Best-effort: drop any live viewer lease so the HLS service stops
-    # accounting for a node that no longer exists. Never fatal — the lease is
-    # in-memory and expires on its own.
-    try:
-        hls_service.release_lease(node_id)
-    except Exception as e:
-        logger.debug(f"release_lease({node_id}) after webcam delete failed: {e}")
+    # Best-effort: drop each camera's live viewer lease so the HLS service
+    # stops accounting for nodes that no longer exist. Never fatal — leases are
+    # in-memory and expire on their own.
+    for cam_id in camera_ids:
+        try:
+            hls_service.release_lease(cam_id)
+        except Exception as e:
+            logger.debug(f"release_lease({cam_id}) after webcam delete failed: {e}")
 
     # Fire-and-forget WS broadcast (same pattern as delete_node above).
     try:

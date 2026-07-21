@@ -171,6 +171,45 @@ async def test_delete_webcam_client_removes_client_and_cameras(client, monkeypat
 
 
 @pytest.mark.anyio
+async def test_delete_releases_each_cameras_hls_lease(client, monkeypatch):
+    """Deleting a client must release its CAMERAS' viewer leases.
+
+    Another face of the id seam: HLS leases are keyed by the CAMERA node_id
+    (stream/start arms one per camera), never by the client's. So a
+    `release_lease(client_node_id)` is a silent no-op that merely *looks* like
+    cleanup. The endpoint therefore captures the camera ids BEFORE deleting
+    (afterwards the rows are gone and cannot be enumerated) and releases each.
+    Under the old client-id call this test fails.
+    """
+    from central_server.database import register_webcam_cameras
+    from central_server.services import hls_service
+
+    _capture_broadcasts(monkeypatch)
+
+    resp = await client.post("/api/nodes/webcam", json={"name": "Lease PC"})
+    assert resp.status_code == 201
+    node_id = resp.json()["node_id"]
+
+    cams = register_webcam_cameras(node_id, [{"name": "Cam A"}, {"name": "Cam B"}])
+    cam_ids = [c["node_id"] for c in cams]
+    assert node_id not in cam_ids  # the seam: client id is never a camera id
+
+    # Arm a viewer lease on each camera, exactly as POST /stream/start does.
+    for cid in cam_ids:
+        hls_service.touch_lease(cid)
+        assert hls_service.has_active_lease(cid) is True
+
+    resp2 = await client.delete(f"/api/nodes/webcam/{node_id}")
+    assert resp2.status_code == 204
+
+    for cid in cam_ids:
+        assert hls_service.has_active_lease(cid) is False, (
+            f"lease for camera {cid} survived the client delete — release_lease "
+            "was likely called with the client id, which matches nothing"
+        )
+
+
+@pytest.mark.anyio
 async def test_delete_webcam_client_nonexistent_returns_404(client, monkeypatch):
     """Unknown node_id is a 404, and nothing is broadcast."""
     events = _capture_broadcasts(monkeypatch)
