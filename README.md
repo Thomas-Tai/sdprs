@@ -114,15 +114,33 @@ sdprs/
 
 ## Webcam Client (Windows)
 
-讓任一 Windows 電腦透過 USB Webcam 推送畫面到 Dashboard。
+讓任一 Windows 電腦透過 USB Webcam 推送畫面到 Dashboard —— 每秒 JPEG 快照，並可依需求開啟 H.264 / HLS 即時串流。
 
 ### 使用方式
 
-1. Dashboard → 系統狀態 → 「新增 Webcam Client」→ 複製 API Key
-2. 在目標電腦運行 `SDPRS_Webcam.exe`
-3. 填入 Server URL + API Key → 選擇攝影機 → 開始
-4. 程式最小化到 System Tray，自動推送 1Hz 快照
-5. Dashboard 上點「即時觀看」可觸發 H.264 HLS 串流
+1. Dashboard → 系統狀態 →「新增 Webcam Client」→ 複製一次性顯示的 API Key
+2. 在目標電腦運行 `SDPRS_Webcam.exe`（或 `python -m webcam_client.main`）
+3. 首次啟動精靈：掃描攝影機（含預覽縮圖與逐鏡命名）→ 填入 Server URL + API Key → 開始
+4. 程式最小化到 System Tray，自動推送 1Hz 快照到監控牆
+5. 節點卡點「▶ 即時」觸發即時串流：等實際影格就緒才播放；觀看期間每 30s 自動續租（90s lease），關閉分頁後約 90s 內自動停止串流、回收上行頻寬
+
+### 管理
+
+於 Dashboard → 系統狀態 的 Webcam 節點列：
+
+- **暫停推送 / 恢復推送**（Tray 選單）—— 真正暫停/恢復快照上傳，非僅圖示變化
+- **撤銷 Key** —— 輪換 API Key，舊 Key 立即失效（外洩或換機時使用）
+- **刪除** —— 除役整台 Client（含其所有攝影機與憑證）；確認對話框會顯示 Client 名稱
+
+### 安全
+
+- API Key 以 Windows DPAPI 加密後才落地：`config.json` 只存 `api_key_encrypted`，永不存明文；換帳號解密失敗即視為未設定並重跑精靈，絕不退回明文
+- 每個 Webcam Key 僅於 `/api/webcam/*` 有效，用於 edge 端點會回 401
+
+### 現場驗證
+
+自動化測試全數 mock 攝影機 / ffmpeg / 網路。實機端到端須先跑一次
+[`docs/webcam-client-bench-test-checklist.md`](docs/webcam-client-bench-test-checklist.md)（11 節，逐步標註所驗證的不變量），方可視為現場驗證通過。
 
 ### 開發
 
