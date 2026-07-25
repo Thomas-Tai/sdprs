@@ -47,7 +47,6 @@ class AppController:
         server_url = self._config.get("server_url", "")
         api_key = self._config.get("api_key", "")
         motion = self._config.get("motion_threshold", 25)
-        new_engines = []
         for cam in self._enabled_cameras():
             cam = dict(cam)
             cam["motion_threshold"] = motion
@@ -57,9 +56,12 @@ class AppController:
             # otherwise a settings save silently un-pauses uploads while the
             # tray still shows amber/"resume" (Finding 1).
             engine.set_paused(self._paused)
-            new_engines.append(engine)
-        with self._lock:
-            self._engines.extend(new_engines)
+            # Track the engine THE MOMENT it is started (Finding A regression
+            # fix): if a later camera in this loop fails to build/start,
+            # engines started so far are already tracked, so stop_engines()
+            # can still release them instead of leaking an open camera.
+            with self._lock:
+                self._engines.append(engine)
         node_ids = [c["node_id"] for c in self._enabled_cameras() if c.get("node_id")]
         self._control = self._control_factory(server_url, api_key, node_ids,
                                               self._on_command)
@@ -123,7 +125,12 @@ class AppController:
 
     def _on_command(self, node_id: str, command: str,
                     params: Optional[dict] = None) -> None:
-        for e in self._engines:
+        # _on_command runs on the ControlChannel thread -- snapshot under the
+        # lock first (Finding C) so it never iterates _engines concurrently
+        # with a start/stop/apply mutation on the main thread.
+        with self._lock:
+            engines = list(self._engines)
+        for e in engines:
             if getattr(e, "_node_id", None) == node_id:
                 if command == "stream_start":
                     e.set_streaming(True)

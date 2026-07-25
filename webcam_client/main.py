@@ -40,11 +40,17 @@ def _handle_request(req, controller, settings_fn) -> bool:
                 controller.start_engines()     # cancelled -> resume old config
         except Exception:
             # A bad settings interaction (e.g. Tk blowing up mid-rebuild) must
-            # not kill the tray app -- log it, best-effort resume the previous
-            # engines, and keep the dispatch loop alive.
+            # not kill the tray app -- log it, best-effort recover, and keep
+            # the dispatch loop alive. Recovery uses apply(controller.config)
+            # rather than start_engines(): if the failure happened mid-apply()
+            # (config already swapped, engines partially started), calling
+            # start_engines() again would stack a SECOND engine set on top of
+            # the partial one. apply() stops first -- cleaning up any partial
+            # set and releasing cameras -- then rebuilds from the current
+            # config, so there is never a duplicate set.
             logger.exception("Unexpected error handling OPEN_SETTINGS")
             try:
-                controller.start_engines()
+                controller.apply(controller.config)
             except Exception:
                 logger.exception("Failed to resume engines after OPEN_SETTINGS error")
     return True

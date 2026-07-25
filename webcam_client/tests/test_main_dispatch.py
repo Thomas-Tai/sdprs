@@ -54,9 +54,13 @@ def test_quit_shuts_down_and_stops_loop():
 
 
 def test_open_settings_recovers_from_settings_fn_exception():
-    """Finding 3: a raising settings_fn (e.g. Tk blew up mid-rebuild) must not
-    kill the dispatch loop -- it must log, best-effort resume engines, and
-    keep the loop alive."""
+    """Finding B: recovery must not stack a duplicate engine set on top of a
+    partially-started one. If the failure happened mid-apply() (config
+    already swapped, engines partially started -- see AppController Finding
+    A), calling start_engines() again would append a SECOND set on top of the
+    partial one. apply(controller.config) instead stops first (cleaning any
+    partial set, releasing cameras) then rebuilds fresh from the current
+    config -- no duplication. The loop must still stay alive."""
     import webcam_client.main as m
 
     def raising_fn(cfg):
@@ -65,7 +69,8 @@ def test_open_settings_recovers_from_settings_fn_exception():
     ctrl = FakeController({"server_url": "old"})
     keep = m._handle_request("OPEN_SETTINGS", ctrl, raising_fn)
     assert keep is True
-    assert ctrl.calls == ["stop_engines", "start_engines"]
+    assert ctrl.calls == ["stop_engines", "apply"]
+    assert ctrl.applied == {"server_url": "old"}
 
 
 def test_tray_open_settings_callback_only_enqueues():

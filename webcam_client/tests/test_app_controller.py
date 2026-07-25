@@ -7,6 +7,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from webcam_client.app_controller import AppController
@@ -21,8 +23,12 @@ class FakeEngine:
         self.streaming = None
         self._raise_on_stop = cam.get("_raise_on_stop", False)
         self._alive_after_join = cam.get("_alive_after_join", False)
+        self._raise_on_start = cam.get("_raise_on_start", False)
 
-    def start(self): self.started = True
+    def start(self):
+        if self._raise_on_start:
+            raise RuntimeError("boom: start() failed")
+        self.started = True
 
     def stop(self):
         self.stopped = True
@@ -70,6 +76,41 @@ def test_start_engines_builds_one_per_enabled_camera_and_starts_them():
     assert made["engines"][0].cam["motion_threshold"] == 30
     assert made["controls"][0].node_ids == ["webcam_a", "webcam_b"]
     assert made["controls"][0].started
+
+
+def test_start_engines_tracks_each_engine_immediately_on_mid_loop_failure():
+    """Finding A regression: engines were previously batched into a local list
+    and only added to self._engines via a single extend() AFTER the whole
+    build loop finished. If the 2nd of N cameras raised while
+    building/starting, the 1st engine -- already holding an open camera --
+    was never tracked, so stop_engines() couldn't clean it up: an orphaned,
+    leaked camera handle. Each engine must be appended to self._engines the
+    moment it is started, so a mid-loop failure still leaves already-started
+    engines cleanable."""
+    cfg = {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": [
+            {"device_index": 0, "node_id": "a", "enabled": True},
+            {"device_index": 1, "node_id": "b", "enabled": True, "_raise_on_start": True},
+            {"device_index": 2, "node_id": "c", "enabled": True},
+        ],
+    }
+    ctrl, made = _controller(cfg)
+
+    with pytest.raises(RuntimeError):
+        ctrl.start_engines()
+
+    # only the first engine was fully built+started before the 2nd raised
+    assert len(made["engines"]) == 2
+    first = made["engines"][0]
+    assert first.started
+
+    # it must already be tracked -- not orphaned -- so stop_engines can free it
+    assert ctrl._engines == [first]
+
+    ctrl.stop_engines()  # must be able to clean up the already-started engine
+    assert first.stopped and first.joined
+    assert ctrl._engines == []
 
 
 def test_stop_engines_stops_joins_and_clears():
