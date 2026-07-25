@@ -408,13 +408,23 @@ async def list_nodes(
 
     for wc in webcam_rows:
         last_upload = wc.get("last_upload")
+        # last_upload's Python type depends on the backend: SQLite's DATETIME
+        # column returns the ISO TEXT string it was written as, but PostgreSQL's
+        # TIMESTAMP column coerces that write and hands back a native datetime.
+        # Normalise to a datetime for the staleness math, and to an ISO string
+        # for the Optional[str] response fields — passing the raw PG datetime
+        # into NodeStatus is what 500'd the deployed node list (Pydantic v2
+        # rejects datetime for a str field).
         is_stale = False
         if last_upload:
             try:
-                age = (now - datetime.fromisoformat(last_upload)).total_seconds()
+                lu_dt = (last_upload if isinstance(last_upload, datetime)
+                         else datetime.fromisoformat(last_upload))
+                age = (now - lu_dt).total_seconds()
                 is_stale = age > STALE_THRESHOLD_SECONDS
             except (TypeError, ValueError):
                 pass
+        last_upload_iso = _ts_to_iso(last_upload)
         result.append(NodeStatus(
             node_id=wc["node_id"],
             node_type="webcam",
@@ -427,8 +437,8 @@ async def list_nodes(
             status=wc.get("status") or "OFFLINE",
             # `name` here is the CAMERA's name, not the client's.
             location=wc.get("name"),
-            last_heartbeat=last_upload,
-            snapshot_timestamp=last_upload,
+            last_heartbeat=last_upload_iso,
+            snapshot_timestamp=last_upload_iso,
             is_stale=is_stale,
         ))
 

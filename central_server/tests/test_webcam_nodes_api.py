@@ -456,6 +456,101 @@ async def test_camera_node_id_is_404_on_both_client_endpoints(client, monkeypatc
 
 
 # =============================================================================
+# PostgreSQL last_upload type seam — the deployed 500.
+#   webcam_cameras.last_upload is a TIMESTAMP column. touch_webcam_upload writes
+#   an ISO *string* into it; PostgreSQL coerces that to a native timestamp and
+#   hands it BACK as a Python datetime on read. SQLite's DATETIME column has no
+#   strict affinity, so it stores/returns the raw string — which is why every
+#   SQLite CI run was green while the live Postgres GET /api/nodes 500'd the
+#   moment a camera uploaded. NodeStatus.last_heartbeat / .snapshot_timestamp are
+#   Optional[str]; a raw datetime made Pydantic v2 raise ValidationError.
+# =============================================================================
+
+@pytest.mark.anyio
+async def test_node_list_serializes_datetime_last_upload_from_postgres(client, monkeypatch):
+    """A datetime last_upload (what Postgres returns) must serialize to an ISO
+    string, not 500 the node list.
+
+    Drives the EXACT production path: postgres backend + _pg_fetch_many_sync
+    returning a row whose last_upload is a datetime object. Against the unfixed
+    code this GETs a 500 (pydantic_core.ValidationError for last_heartbeat and
+    snapshot_timestamp — the two errors in the deployed traceback).
+    """
+    import central_server.api.nodes as nodes_api
+    import central_server.database as db
+    from central_server.timeutil import utcnow
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    ts = utcnow()  # naive UTC datetime — exactly what a PG TIMESTAMP column yields
+    webcam_row = {
+        "node_id": "webcam_cam00001",
+        "client_id": "webcam_cli00001",
+        "name": "前門",
+        "status": "ONLINE",
+        "last_upload": ts,            # datetime, NOT a str -- the bug's trigger
+        "client_name": "櫃台電腦",
+    }
+
+    def fake_pg_fetch(sql, params):
+        # The camera query returns our datetime row; the clientless query is empty.
+        return [dict(webcam_row)] if "FROM webcam_cameras c" in sql else []
+
+    # Force the postgres branch and feed it the datetime row. _load_node_db /
+    # snooze / pump-command reads degrade to empty under the faked backend (no
+    # DATABASE_URL) and never reach a real PG connection.
+    monkeypatch.setattr(db, "get_backend", lambda: "postgresql")
+    monkeypatch.setattr(db, "_pg_fetch_many_sync", fake_pg_fetch)
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200, listed.text   # was 500 (ValidationError) pre-fix
+
+    rows = [n for n in listed.json() if n["node_type"] == "webcam"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    # The datetime is serialized to an ISO string on BOTH timestamp fields.
+    assert row["last_heartbeat"] == ts.isoformat()
+    assert row["snapshot_timestamp"] == ts.isoformat()
+    # Fresh upload -> not stale.
+    assert row["is_stale"] is False
+
+
+@pytest.mark.anyio
+async def test_node_list_staleness_computed_for_datetime_last_upload(client, monkeypatch):
+    """Staleness must be computed from a datetime last_upload too, not silently
+    skipped.
+
+    The old `datetime.fromisoformat(last_upload)` threw a TypeError on a PG
+    datetime and was swallowed by the bare except, so on Postgres a long-dead
+    camera never went stale (its dot stayed green forever). Pin the isinstance
+    branch: an old datetime yields is_stale True.
+    """
+    import datetime as _dt
+    import central_server.api.nodes as nodes_api
+    import central_server.database as db
+    from central_server.timeutil import utcnow
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    old = utcnow() - _dt.timedelta(hours=1)  # well past STALE_THRESHOLD_SECONDS
+    webcam_row = {
+        "node_id": "webcam_cam00002", "client_id": "webcam_cli00002",
+        "name": "後門", "status": "ONLINE", "last_upload": old,
+        "client_name": "櫃台電腦",
+    }
+    monkeypatch.setattr(db, "get_backend", lambda: "postgresql")
+    monkeypatch.setattr(
+        db, "_pg_fetch_many_sync",
+        lambda sql, params: [dict(webcam_row)] if "FROM webcam_cameras c" in sql else [])
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200, listed.text
+    row = [n for n in listed.json() if n["node_type"] == "webcam"][0]
+    assert row["is_stale"] is True
+    assert row["last_heartbeat"] == old.isoformat()
+
+
+# =============================================================================
 # Clientless webcam client — created via 新增 Webcam Client but never provisioned
 # by the wizard, so it has NO camera rows. GET /api/nodes lists CAMERAS, so
 # without a dedicated surface such a client is invisible in the node list, which
