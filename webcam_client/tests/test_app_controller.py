@@ -3,6 +3,7 @@
 (freeing cameras), rebuild them from a new config in-process, and fan out
 pause/resume. Factories are injected so this is testable without real cameras
 or network."""
+import logging
 import sys
 from pathlib import Path
 
@@ -18,10 +19,18 @@ class FakeEngine:
         self.started = self.stopped = self.joined = False
         self.paused = None
         self.streaming = None
+        self._raise_on_stop = cam.get("_raise_on_stop", False)
+        self._alive_after_join = cam.get("_alive_after_join", False)
 
     def start(self): self.started = True
-    def stop(self): self.stopped = True
+
+    def stop(self):
+        self.stopped = True
+        if self._raise_on_stop:
+            raise RuntimeError("boom: stop() failed")
+
     def join(self, timeout=None): self.joined = True
+    def is_alive(self): return self._alive_after_join
     def set_paused(self, v): self.paused = v
     def set_streaming(self, v): self.streaming = v
 
@@ -72,6 +81,56 @@ def test_stop_engines_stops_joins_and_clears():
     assert made["controls"][0].stopped
     ctrl.start_engines()
     assert len(made["engines"]) == 4  # fresh engines, old ones not reused
+
+
+def test_stop_engines_continues_after_one_engine_stop_raises():
+    """A raising e.stop() must not abort cleanup of the remaining engines,
+    and _engines must still end up cleared (finally-semantics)."""
+    cfg = {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": [
+            {"device_index": 0, "node_id": "a", "enabled": True, "_raise_on_stop": True},
+            {"device_index": 1, "node_id": "b", "enabled": True},
+        ],
+    }
+    ctrl, made = _controller(cfg)
+    ctrl.start_engines()
+    first = list(made["engines"])
+
+    ctrl.stop_engines()  # must not raise despite first.stop() blowing up
+
+    assert first[0].stopped  # attempted, even though it raised
+    assert first[1].stopped and first[1].joined
+    assert first[0].joined  # join loop still runs for the raising engine too
+    assert made["controls"][0].stopped
+    assert ctrl._engines == []
+
+    ctrl.start_engines()
+    assert len(made["engines"]) == 4  # fresh engines only, none leaked
+
+
+def test_stop_engines_logs_warning_when_engine_still_alive_after_join(caplog):
+    """join(timeout=5) result must not be discarded: an engine still alive
+    after join is a stuck thread == a camera that never got released, and
+    must be surfaced via a warning naming the engine."""
+    cfg = {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": [
+            {"device_index": 0, "node_id": "stuck_cam", "enabled": True,
+             "_alive_after_join": True},
+        ],
+    }
+    ctrl, made = _controller(cfg)
+    ctrl.start_engines()
+
+    with caplog.at_level(logging.WARNING, logger="webcam_client.app_controller"):
+        ctrl.stop_engines()  # must not crash
+
+    assert made["engines"][0].joined
+    assert ctrl._engines == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "expected a warning log when engine is still alive after join"
+    assert any("stuck_cam" in r.getMessage() for r in warnings)
 
 
 def test_apply_stops_old_then_starts_new_and_updates_config():

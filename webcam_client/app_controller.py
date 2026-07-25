@@ -53,16 +53,35 @@ class AppController:
         self._control.start()
 
     def stop_engines(self) -> None:
-        if self._control is not None:
-            self._control.stop()
-            self._control = None
-        for e in self._engines:
-            e.stop()
-        for e in self._engines:
-            join = getattr(e, "join", None)
-            if callable(join):
-                join(timeout=5)
-        self._engines = []
+        try:
+            if self._control is not None:
+                try:
+                    self._control.stop()
+                except Exception:
+                    logger.exception("Error stopping control channel")
+                self._control = None
+            for e in self._engines:
+                try:
+                    e.stop()
+                except Exception:
+                    logger.exception("Error stopping engine %s",
+                                     getattr(e, "_node_id", e))
+            for e in self._engines:
+                join = getattr(e, "join", None)
+                if callable(join):
+                    try:
+                        join(timeout=5)
+                    except Exception:
+                        logger.exception("Error joining engine %s",
+                                         getattr(e, "_node_id", e))
+                is_alive = getattr(e, "is_alive", None)
+                if callable(is_alive) and is_alive():
+                    logger.warning(
+                        "Engine %s did not stop within timeout; "
+                        "camera device may still be open",
+                        getattr(e, "_node_id", e))
+        finally:
+            self._engines = []
 
     def apply(self, new_config: dict) -> None:
         self.stop_engines()
