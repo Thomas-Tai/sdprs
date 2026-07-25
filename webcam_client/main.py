@@ -30,13 +30,23 @@ def _handle_request(req, controller, settings_fn) -> bool:
         controller.shutdown()
         return False
     if req == "OPEN_SETTINGS":
-        controller.stop_engines()          # free the cameras for the wizard
-        new_cfg = settings_fn(controller.config)  # runs on the main thread
-        if new_cfg:
-            save_config(new_cfg)
-            controller.apply(new_cfg)      # rebuild in-process, no restart
-        else:
-            controller.start_engines()     # cancelled -> resume old config
+        try:
+            controller.stop_engines()          # free the cameras for the wizard
+            new_cfg = settings_fn(controller.config)  # runs on the main thread
+            if new_cfg:
+                save_config(new_cfg)
+                controller.apply(new_cfg)      # rebuild in-process, no restart
+            else:
+                controller.start_engines()     # cancelled -> resume old config
+        except Exception:
+            # A bad settings interaction (e.g. Tk blowing up mid-rebuild) must
+            # not kill the tray app -- log it, best-effort resume the previous
+            # engines, and keep the dispatch loop alive.
+            logger.exception("Unexpected error handling OPEN_SETTINGS")
+            try:
+                controller.start_engines()
+            except Exception:
+                logger.exception("Failed to resume engines after OPEN_SETTINGS error")
     return True
 
 

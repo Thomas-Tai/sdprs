@@ -151,10 +151,12 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         # through here. If the operator closed the window while work was in
         # flight, root is destroyed and a bare root.after(...) would raise an
         # unhandled exception on the daemon thread -> guard + swallow the race.
+        # Some Tcl builds raise RuntimeError("main thread is not in main
+        # loop") instead of TclError for this same race, so catch both.
         try:
             if root.winfo_exists():
                 root.after(0, fn)
-        except tk.TclError:
+        except (tk.TclError, RuntimeError):
             pass
 
     def _add_row(device_index, name, node_id, enabled, subtitle):

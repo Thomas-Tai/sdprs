@@ -155,6 +155,36 @@ def test_pause_and_resume_fan_out_to_current_engines():
     assert all(e.paused is False for e in made["engines"])
 
 
+def test_pause_state_persists_across_apply():
+    """Finding 1: if the operator paused pushes before opening settings, the
+    NEW engines built by apply() must come up already paused -- otherwise the
+    tray still shows amber/paused while uploads have silently resumed."""
+    ctrl, made = _controller(CONFIG)
+    ctrl.start_engines()
+    ctrl.pause_all()
+    new_cfg = {"server_url": "http://y", "api_key": "k2",
+               "cameras": [{"device_index": 0, "node_id": "webcam_c", "enabled": True}]}
+    ctrl.apply(new_cfg)
+    new_engines = made["engines"][2:]  # engines built by this apply() only
+    assert new_engines, "apply should have built new engines"
+    assert all(e.paused is True for e in new_engines)
+
+
+def test_resume_state_persists_across_apply():
+    """Mirror of the above: if the operator resumed before opening settings,
+    the new engines must come up unpaused."""
+    ctrl, made = _controller(CONFIG)
+    ctrl.start_engines()
+    ctrl.pause_all()
+    ctrl.resume_all()
+    new_cfg = {"server_url": "http://y", "api_key": "k2",
+               "cameras": [{"device_index": 0, "node_id": "webcam_c", "enabled": True}]}
+    ctrl.apply(new_cfg)
+    new_engines = made["engines"][2:]
+    assert new_engines, "apply should have built new engines"
+    assert all(e.paused is False for e in new_engines)
+
+
 def test_disabled_cameras_are_skipped():
     cfg = {"server_url": "http://x", "api_key": "k", "cameras": [
         {"device_index": 0, "node_id": "a", "enabled": True},

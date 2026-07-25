@@ -53,6 +53,21 @@ def test_quit_shuts_down_and_stops_loop():
     assert ctrl.calls == ["shutdown"]
 
 
+def test_open_settings_recovers_from_settings_fn_exception():
+    """Finding 3: a raising settings_fn (e.g. Tk blew up mid-rebuild) must not
+    kill the dispatch loop -- it must log, best-effort resume engines, and
+    keep the loop alive."""
+    import webcam_client.main as m
+
+    def raising_fn(cfg):
+        raise RuntimeError("boom: settings window blew up")
+
+    ctrl = FakeController({"server_url": "old"})
+    keep = m._handle_request("OPEN_SETTINGS", ctrl, raising_fn)
+    assert keep is True
+    assert ctrl.calls == ["stop_engines", "start_engines"]
+
+
 def test_tray_open_settings_callback_only_enqueues():
     import queue
     q = queue.Queue()

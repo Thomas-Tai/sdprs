@@ -1,5 +1,6 @@
 # webcam_client/app_controller.py
 import logging
+import threading
 from typing import Callable, List, Optional
 
 logger = logging.getLogger("webcam_client.app_controller")
@@ -29,6 +30,11 @@ class AppController:
         self._control_factory = control_factory or _default_control_factory
         self._engines: List = []
         self._control = None
+        self._paused = False
+        # pause_all/resume_all run on the pystray daemon thread; start/stop/apply
+        # run on the main thread. Guards _engines mutations + snapshots so the
+        # two threads never observe/mutate the list mid-iteration.
+        self._lock = threading.Lock()
 
     @property
     def config(self) -> dict:
@@ -41,18 +47,27 @@ class AppController:
         server_url = self._config.get("server_url", "")
         api_key = self._config.get("api_key", "")
         motion = self._config.get("motion_threshold", 25)
+        new_engines = []
         for cam in self._enabled_cameras():
             cam = dict(cam)
             cam["motion_threshold"] = motion
             engine = self._engine_factory(cam, server_url, api_key)
             engine.start()
-            self._engines.append(engine)
+            # Re-assert the remembered pause state on freshly built engines --
+            # otherwise a settings save silently un-pauses uploads while the
+            # tray still shows amber/"resume" (Finding 1).
+            engine.set_paused(self._paused)
+            new_engines.append(engine)
+        with self._lock:
+            self._engines.extend(new_engines)
         node_ids = [c["node_id"] for c in self._enabled_cameras() if c.get("node_id")]
         self._control = self._control_factory(server_url, api_key, node_ids,
                                               self._on_command)
         self._control.start()
 
     def stop_engines(self) -> None:
+        with self._lock:
+            engines = list(self._engines)
         try:
             if self._control is not None:
                 try:
@@ -60,13 +75,13 @@ class AppController:
                 except Exception:
                     logger.exception("Error stopping control channel")
                 self._control = None
-            for e in self._engines:
+            for e in engines:
                 try:
                     e.stop()
                 except Exception:
                     logger.exception("Error stopping engine %s",
                                      getattr(e, "_node_id", e))
-            for e in self._engines:
+            for e in engines:
                 join = getattr(e, "join", None)
                 if callable(join):
                     try:
@@ -81,7 +96,8 @@ class AppController:
                         "camera device may still be open",
                         getattr(e, "_node_id", e))
         finally:
-            self._engines = []
+            with self._lock:
+                self._engines = []
 
     def apply(self, new_config: dict) -> None:
         self.stop_engines()
@@ -89,11 +105,17 @@ class AppController:
         self.start_engines()
 
     def pause_all(self) -> None:
-        for e in self._engines:
+        self._paused = True
+        with self._lock:
+            engines = list(self._engines)
+        for e in engines:
             e.set_paused(True)
 
     def resume_all(self) -> None:
-        for e in self._engines:
+        self._paused = False
+        with self._lock:
+            engines = list(self._engines)
+        for e in engines:
             e.set_paused(False)
 
     def shutdown(self) -> None:
