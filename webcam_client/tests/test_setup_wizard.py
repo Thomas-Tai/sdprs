@@ -70,3 +70,30 @@ def test_register_cameras_non_json_201_is_reported_not_raised():
     with patch("webcam_client.gui.setup_wizard.httpx.post", return_value=resp):
         cams, err = register_cameras("http://x", "k", [{"device_index": 0}])
     assert cams is None and err
+
+
+def test_register_skips_post_when_all_cameras_already_registered():
+    # Editing settings must NOT re-register already-known cameras (that minted a
+    # fresh node_id each edit -> duplicate dashboard tiles).
+    selected = [{"device_index": 0, "node_id": "webcam_a", "name": "A"}]
+    with patch("webcam_client.gui.setup_wizard.httpx.post") as post:
+        cams, err = register_cameras("http://x", "k", selected)
+    post.assert_not_called()
+    assert err is None
+    assert cams[0]["node_id"] == "webcam_a"
+
+
+def test_register_posts_only_new_cameras_and_preserves_existing_ids():
+    selected = [
+        {"device_index": 0, "node_id": "webcam_a", "name": "A"},  # existing
+        {"device_index": 1, "name": "B"},                          # new
+    ]
+    resp = MagicMock(status_code=201)
+    resp.json.return_value = [{"node_id": "webcam_new"}]
+    with patch("webcam_client.gui.setup_wizard.httpx.post", return_value=resp) as post:
+        cams, err = register_cameras("http://x", "k", selected)
+    body = post.call_args.kwargs["json"]
+    assert body["cameras"] == [{"device_index": 1, "name": "B"}]  # only the new one
+    assert err is None
+    assert cams[0]["node_id"] == "webcam_a"    # preserved
+    assert cams[1]["node_id"] == "webcam_new"  # assigned to the new one

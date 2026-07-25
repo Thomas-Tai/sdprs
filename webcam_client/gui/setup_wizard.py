@@ -30,23 +30,28 @@ def normalize_server_url(raw: str) -> str:
 
 
 def register_cameras(server_url: str, api_key: str, selected: list):
-    """POST the selected cameras to the server.
+    """POST only cameras that lack a node_id; keep already-registered ones as-is.
 
-    Returns ``(cameras_with_node_ids, None)`` on success or ``(None, message)``
-    on ANY failure. It NEVER raises: the caller runs inside a Tk callback, where
-    an unhandled exception is dumped to stderr (invisible in a windowed exe) and
-    the Start button silently appears to do nothing.
+    Editing settings must be idempotent: re-registering every camera on each
+    edit minted a fresh node_id per camera, so the dashboard grew a duplicate
+    webcam tile every time settings were opened. Cameras that already carry a
+    node_id are left untouched; only new ones are sent.
+
+    Returns ``(cameras, None)`` on success or ``(None, message)`` on ANY failure.
+    Never raises: the caller runs inside a Tk callback where an unhandled
+    exception is swallowed in a windowed exe and the Start button appears dead.
     """
+    new_cams = [dict(c) for c in selected if not c.get("node_id")]
+    if not new_cams:
+        return [dict(c) for c in selected], None
     try:
         resp = httpx.post(
             f"{server_url}/api/webcam/cameras",
-            json={"cameras": selected},
+            json={"cameras": new_cams},
             headers={"X-API-Key": api_key},
             timeout=10.0,
         )
     except httpx.HTTPError as e:
-        # Covers ConnectError, ConnectTimeout, ReadTimeout, UnsupportedProtocol,
-        # ... — every httpx transport/request error, not just ConnectError.
         return None, f"無法連線到伺服器：{e}"
     if resp.status_code == 401:
         return None, "API Key 無效"
@@ -56,11 +61,16 @@ def register_cameras(server_url: str, api_key: str, selected: list):
         registered = resp.json()
     except Exception:
         return None, "伺服器回應格式錯誤（非 JSON）"
-    cams = [dict(c) for c in selected]
-    for i, cam in enumerate(cams):
-        if i < len(registered):
-            cam["node_id"] = registered[i].get("node_id")
-    return cams, None
+    reg = iter(registered)
+    result = []
+    for c in selected:
+        c = dict(c)
+        if not c.get("node_id"):
+            r = next(reg, None)
+            if r:
+                c["node_id"] = r.get("node_id")
+        result.append(c)
+    return result, None
 
 
 def run_setup_wizard(existing_config: Optional[dict] = None) -> Optional[dict]:
