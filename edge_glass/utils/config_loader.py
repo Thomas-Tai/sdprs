@@ -29,7 +29,19 @@ DEFAULTS: Dict[str, Any] = {
     "buffer": {
         "duration_seconds": 10,
     },
+    # 事件擷取：非阻塞編碼路徑為預設。事件不再凍結主迴圈（錄 5s + 編碼約 15s 的
+    # 720p）數十秒，快照與偵測在事件期間持續運作。節點可在自己的 config 覆寫。
+    "capture": {
+        "async_encode": True,
+        "pre_roll_seconds": 4,
+        "post_roll_seconds": 5,
+        "encode_queue_size": 2,
+    },
     "visual": {
+        # 視覺偵測以此幀率執行，而非每一台攝像頭幀。CV（Canny／輪廓）是 Pi 的主要
+        # 發熱來源，玻璃破裂偵測不需要 15fps。攝像頭仍以 camera.fps 擷取供緩衝／快照。
+        # 夾在 [1, camera.fps]（見 edge_glass_main.resolve_detect_fps）。
+        "detect_fps": 5,
         "edge_density_threshold": 1.5,
         "baseline_window_seconds": 60,
         "brightness_anomaly_percent": 50,
@@ -64,6 +76,9 @@ DEFAULTS: Dict[str, Any] = {
     },
     "server": {
         "api_url": "http://central-server:8000/api",
+        # 心跳間隔（秒）：節點狀態／CPU 溫度／健康的上報頻率。調低讓儀表板更即時；
+        # 仍遠小於伺服器約 90 秒的離線逾時。節點可在自己的 config 覆寫。
+        "heartbeat_interval": 10,
         "api_key": "changeme-random-secret-key",
         "mqtt_broker": "central-server",
         "mqtt_port": 1883,
