@@ -80,6 +80,7 @@ class PushEngine(threading.Thread):
 
         prev_frame = None
         last_snapshot_time = 0.0
+        last_encode_time = 0.0
         last_hls_upload = 0.0
 
         try:
@@ -101,28 +102,39 @@ class PushEngine(threading.Thread):
                     time.sleep(0.1)
                     continue
 
+                # 1) The tile's lifeline: push a ~1Hz snapshot EVERY iteration,
+                #    REGARDLESS of live-view streaming. This used to live in an
+                #    `else` branch, so opening live view stopped snapshots and the
+                #    dashboard tile went grey once it passed the server staleness
+                #    threshold. Motion-gated so a static scene does not hammer the
+                #    uplink (a fresh frame still goes out at least every ~2s).
+                static_recent = motion < 0.01 and now - last_snapshot_time < 2.0
+                if not static_recent and now - last_snapshot_time >= 1.0:
+                    self._push_snapshot(frame)
+                    last_snapshot_time = now
+
+                # 2) When a viewer is watching, ALSO feed the encoder — via the
+                #    now non-blocking write_frame (it drops frames rather than
+                #    blocking on a slow ffmpeg), so live view can never stall the
+                #    snapshot heartbeat above. Its own cadence (last_encode_time)
+                #    is kept separate from the snapshot cadence.
                 with self._stream_lock:
                     streaming = self._streaming
                     encoder = self._encoder
-
                 if streaming and encoder:
                     fps = adaptive_fps(motion, self._target_fps)
                     interval = 1.0 / fps
-                    if now - last_snapshot_time >= interval:
+                    if now - last_encode_time >= interval:
                         encoder.write_frame(cv2.resize(frame, self._resolution).tobytes())
-                        last_snapshot_time = now
+                        last_encode_time = now
                         if now - last_hls_upload >= 2.0:
                             self._upload_segments()
                             last_hls_upload = now
-                else:
-                    if motion < 0.01 and now - last_snapshot_time < 2.0:
-                        time.sleep(0.05)
-                        continue
-                    if now - last_snapshot_time >= 1.0:
-                        self._push_snapshot(frame)
-                        last_snapshot_time = now
 
-                time.sleep(0.01)
+                # Idle throttle: ease CPU on a static scene with no live viewer
+                # (the old snapshot path slept 0.05 here). While streaming, keep
+                # the loop tight so the encoder still gets frames at target fps.
+                time.sleep(0.05 if (static_recent and not streaming) else 0.01)
         finally:
             cap.release()
             self._stop_encoder()

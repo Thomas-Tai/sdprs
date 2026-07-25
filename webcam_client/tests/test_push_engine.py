@@ -156,7 +156,9 @@ def test_streaming_path_resizes_before_write():
     fake_cap = MagicMock()
     fake_cap.read.side_effect = lambda: read_once()
 
-    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap):
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot"), \
+         patch.object(engine, "_upload_segments"):
         engine._streaming = True
         engine._encoder = mock_encoder
         engine.run()
@@ -166,3 +168,36 @@ def test_streaming_path_resizes_before_write():
     expected_len = len(np.zeros((480, 640, 3), dtype=np.uint8).tobytes())
     assert len(written) == expected_len          # resized to self._resolution
     assert len(written) != len(big_frame.tobytes())  # NOT the raw mis-sized bytes
+
+
+def test_streaming_still_pushes_snapshot():
+    # ROBUSTNESS (grey-tile fix): entering live-view/streaming must NOT stop the
+    # 1Hz snapshot the dashboard tile lives on. The old run loop was
+    # `if streaming: feed encoder  else: push snapshot`, so starting live view
+    # silenced snapshots and the tile went stale -> grey. A streaming iteration
+    # must now do BOTH: feed the encoder AND push a snapshot.
+    import numpy as np
+    config = {"node_id": "webcam_01", "device_index": 0,
+              "resolution": [640, 480], "target_fps": 8}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+
+    mock_encoder = MagicMock()
+    mock_encoder.write_frame.return_value = True
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def read_once():
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: read_once()
+
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot") as mock_push, \
+         patch.object(engine, "_upload_segments"):
+        engine._streaming = True
+        engine._encoder = mock_encoder
+        engine.run()
+
+    assert mock_push.called, "snapshot must still be pushed while streaming"
+    assert mock_encoder.write_frame.called, "encoder must still be fed while streaming"

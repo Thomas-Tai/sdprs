@@ -37,6 +37,17 @@ class HlsEncoder:
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._segment_count = 0
+        # Non-blocking frame feed. write_frame() only hands the LATEST frame to
+        # _pending (overwriting any not-yet-written one -> drop, never block) and
+        # wakes _writer, which does the actual BLOCKING stdin.write to ffmpeg. A
+        # ~900KB raw frame into a full pipe on a CPU-starved PC blocks for tens of
+        # seconds; doing that on the caller's run loop stalled the 1Hz snapshot
+        # too (push_engine.run pushes both), so the dashboard tile went grey.
+        # Latest-frame-wins: there is never a growing backlog.
+        self._pending: Optional[bytes] = None
+        self._frame_cond = threading.Condition()
+        self._writer: Optional[threading.Thread] = None
+        self._writer_stop = threading.Event()
 
     @property
     def is_running(self) -> bool:
@@ -73,24 +84,62 @@ class HlsEncoder:
                 self._process = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                logger.info("FFmpeg HLS encoder started")
-                return True
             except OSError as e:
                 logger.error(f"Failed to start ffmpeg HLS encoder: {e}")
                 return False
+        # Spawn the writer OUTSIDE self._lock: it owns the blocking stdin.write so
+        # write_frame() never blocks the caller's run loop.
+        self._writer_stop.clear()
+        self._pending = None
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True)
+        self._writer.start()
+        logger.info("FFmpeg HLS encoder started")
+        return True
 
     def write_frame(self, frame_bytes: bytes) -> bool:
-        with self._lock:
-            if not self.is_running or self._process.stdin is None:
-                return False
+        """Hand the latest frame to the writer thread WITHOUT blocking. Any frame
+        the writer has not yet written is dropped in favour of this newer one, so
+        a slow ffmpeg never backs up or stalls the caller. Returns False only when
+        the encoder is not running."""
+        if not self.is_running:
+            return False
+        with self._frame_cond:
+            self._pending = frame_bytes
+            self._frame_cond.notify()
+        return True
+
+    def _writer_loop(self) -> None:
+        """Drain the single-slot latest-frame buffer, doing the BLOCKING write to
+        ffmpeg's stdin here so the caller's run loop stays responsive even when
+        ffmpeg cannot keep up."""
+        while not self._writer_stop.is_set():
+            with self._frame_cond:
+                while self._pending is None and not self._writer_stop.is_set():
+                    self._frame_cond.wait(timeout=0.5)
+                frame = self._pending
+                self._pending = None
+            if frame is None:
+                continue
+            proc = self._process
+            if proc is None or proc.stdin is None:
+                break
             try:
-                self._process.stdin.write(frame_bytes)
-                self._process.stdin.flush()
-                return True
+                proc.stdin.write(frame)
+                proc.stdin.flush()
             except (BrokenPipeError, OSError):
-                return False
+                break
 
     def stop(self) -> None:
+        # Stop the writer FIRST so it is never mid-write when we close stdin /
+        # terminate ffmpeg. If it is blocked in a real stdin.write, the join
+        # times out and the terminate below breaks the pipe, which unblocks it.
+        self._writer_stop.set()
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+        writer = self._writer
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=3)
+        self._writer = None
         with self._lock:
             if self._process is not None:
                 try:
