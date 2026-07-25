@@ -97,3 +97,38 @@ def test_register_posts_only_new_cameras_and_preserves_existing_ids():
     assert err is None
     assert cams[0]["node_id"] == "webcam_a"    # preserved
     assert cams[1]["node_id"] == "webcam_new"  # assigned to the new one
+
+
+def test_scan_cameras_async_runs_off_the_calling_thread(monkeypatch):
+    import threading as _t
+    from webcam_client.gui import setup_wizard as sw
+    seen = {}
+
+    def fake_scan(max_index=10):
+        seen["thread"] = _t.current_thread()
+        return [{"device_index": 0, "width": 640, "height": 480}]
+
+    monkeypatch.setattr(sw, "scan_cameras", fake_scan)
+    done = _t.Event()
+    result = {}
+
+    def on_done(cams):
+        result["cams"] = cams
+        done.set()
+
+    sw._scan_cameras_async(on_done)
+    assert done.wait(5), "on_done was never called"
+    assert seen["thread"] is not _t.current_thread(), "scan must not run on the caller thread"
+    assert result["cams"][0]["device_index"] == 0
+
+
+def test_camera_rows_from_config_preserves_node_id_and_name():
+    from webcam_client.gui.setup_wizard import _camera_rows_from_config
+    cfg = {"cameras": [
+        {"device_index": 2, "name": "前門", "node_id": "webcam_a", "enabled": True},
+        {"device_index": 5, "name": "後門", "node_id": "webcam_b", "enabled": False},
+    ]}
+    assert _camera_rows_from_config(cfg) == [
+        {"device_index": 2, "name": "前門", "node_id": "webcam_a", "enabled": True},
+        {"device_index": 5, "name": "後門", "node_id": "webcam_b", "enabled": False},
+    ]
