@@ -1,16 +1,15 @@
 # sdprs/webcam_client/main.py
 import logging
+import queue
 import signal
-import sys
-import time
 
 from .config import load_config, save_config, is_first_run
-from .push_engine import PushEngine
-from .control_channel import ControlChannel
+from .app_controller import AppController
 from .gui.setup_wizard import run_setup_wizard
 from .gui.tray_app import TrayApp
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("webcam_client.main")
 
 _running = True
@@ -21,101 +20,67 @@ def _signal_handler(sig, frame):
     _running = False
 
 
+def _handle_request(req, controller, settings_fn) -> bool:
+    """Service one queued request on the MAIN thread. Returns False to quit.
+
+    The tray (daemon thread) only enqueues; opening the settings window and
+    rebuilding engines therefore happen here, on the main thread, which is what
+    lets Tk run correctly and the cameras be released before the window scans."""
+    if req == "QUIT":
+        controller.shutdown()
+        return False
+    if req == "OPEN_SETTINGS":
+        controller.stop_engines()          # free the cameras for the wizard
+        new_cfg = settings_fn(controller.config)  # runs on the main thread
+        if new_cfg:
+            save_config(new_cfg)
+            controller.apply(new_cfg)      # rebuild in-process, no restart
+        else:
+            controller.start_engines()     # cancelled -> resume old config
+    return True
+
+
 def main():
-    global _running
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     config = load_config()
-
     if is_first_run() or not config.get("server_url"):
-        new_config = run_setup_wizard(config)
+        new_config = run_setup_wizard(config, mode="first-run")
         if new_config is None:
             logger.info("Setup cancelled, exiting")
             return
         config = new_config
         save_config(config)
 
-    server_url = config["server_url"]
-    api_key = config["api_key"]
-    cameras = [c for c in config.get("cameras", []) if c.get("enabled", True)]
-
-    if not cameras:
+    enabled = [c for c in config.get("cameras", []) if c.get("enabled", True)]
+    if not enabled:
         logger.error("No cameras configured")
         return
 
-    # Start push engines
-    engines = []
-    for cam in cameras:
-        cam["motion_threshold"] = config.get("motion_threshold", 25)
-        engine = PushEngine(cam, server_url, api_key)
-        engine.start()
-        engines.append(engine)
+    controller = AppController(config)
+    controller.start_engines()
 
-    # Start control channel
-    node_ids = [c["node_id"] for c in cameras if c.get("node_id")]
-
-    def on_command(node_id: str, command: str, params: dict = None):
-        for engine in engines:
-            if engine._node_id == node_id:
-                if command == "stream_start":
-                    engine.set_streaming(True)
-                elif command == "stream_stop":
-                    engine.set_streaming(False)
-                break
-
-    control = ControlChannel(server_url, api_key, node_ids, on_command)
-    control.start()
-
-    # Tray app — pause/resume are real: fan out to every engine so the
-    # "暫停推送" menu item actually stops uploads instead of lying.
-    def _pause_all():
-        for engine in engines:
-            engine.set_paused(True)
-
-    def _resume_all():
-        for engine in engines:
-            engine.set_paused(False)
-
+    q: "queue.Queue[str]" = queue.Queue()
     tray = TrayApp(
-        on_open_settings=lambda: _open_settings(config),
-        on_quit=lambda: _shutdown(engines, control),
-        on_pause=_pause_all,
-        on_resume=_resume_all,
+        on_open_settings=lambda: q.put("OPEN_SETTINGS"),
+        on_quit=lambda: q.put("QUIT"),
+        on_pause=controller.pause_all,
+        on_resume=controller.resume_all,
     )
     tray.start()
     tray.set_status(True)
+    logger.info(f"SDPRS Webcam Client running ({len(enabled)} cameras)")
 
-    logger.info(f"SDPRS Webcam Client running ({len(cameras)} cameras)")
-
-    # Main loop — heartbeat
-    heartbeat_interval = config.get("heartbeat_interval", 30)
-    last_heartbeat = 0.0
-    while _running:
-        time.sleep(1)
-        now = time.time()
-        if now - last_heartbeat >= heartbeat_interval:
-            last_heartbeat = now
-            # Heartbeat is implicit via snapshot push; server detects offline at 90s
-
-    _shutdown(engines, control)
-
-
-def _open_settings(config):
-    new_config = run_setup_wizard(config)
-    if new_config:
-        save_config(new_config)
-        logger.info("Settings updated — restart required")
-
-
-def _shutdown(engines, control):
-    global _running
-    _running = False
-    control.stop()
-    for engine in engines:
-        engine.stop()
-    for engine in engines:
-        engine.join(timeout=5)
+    running = True
+    while running and _running:
+        try:
+            req = q.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        running = _handle_request(
+            req, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"))
+    controller.shutdown()
     logger.info("Shutdown complete")
 
 
