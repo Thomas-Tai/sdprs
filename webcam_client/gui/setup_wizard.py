@@ -87,6 +87,20 @@ def _scan_cameras_async(on_done, max_index: int = 10) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
+def _load_thumbnail_async(device_index, on_ready) -> None:
+    """Grab a preview frame + build its thumbnail OFF the Tk thread so the
+    settings window paints immediately. on_ready(thumb_or_None) runs on the
+    worker thread; a Tk caller marshals back with root.after."""
+    def worker():
+        try:
+            thumb = make_thumbnail(grab_preview_frame(device_index))
+        except Exception as e:
+            logger.warning(f"thumbnail grab for device {device_index} failed: {e}")
+            thumb = None
+        on_ready(thumb)
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def _camera_rows_from_config(config: dict) -> list:
     """Edit-mode prefill: the rows to show from a saved config, each keeping its
     node_id so a re-save re-registers nothing (see register_cameras)."""
@@ -132,6 +146,17 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
     cam_frame_inner = ttk.Frame(frame_cam)
     cam_frame_inner.pack(fill="both", expand=True)
 
+    def _safe_after(fn):
+        # Worker threads (camera scan, thumbnail grab) marshal UI updates
+        # through here. If the operator closed the window while work was in
+        # flight, root is destroyed and a bare root.after(...) would raise an
+        # unhandled exception on the daemon thread -> guard + swallow the race.
+        try:
+            if root.winfo_exists():
+                root.after(0, fn)
+        except tk.TclError:
+            pass
+
     def _add_row(device_index, name, node_id, enabled, subtitle):
         var = tk.BooleanVar(value=enabled)
         name_var = tk.StringVar(value=name)
@@ -142,12 +167,27 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         ttk.Checkbutton(row, text=subtitle, variable=var).pack(side="left")
         ttk.Label(row, text="名稱:").pack(side="left", padx=(8, 2))
         ttk.Entry(row, textvariable=name_var, width=16).pack(side="left")
-        # Live thumbnail is best-effort; a busy device yields None -> omitted.
-        thumb = make_thumbnail(grab_preview_frame(device_index))
-        if thumb is not None:
-            lbl = ttk.Label(row, image=thumb)
-            lbl.image = thumb  # keep a ref so Tk doesn't GC the PhotoImage
-            lbl.pack(side="right")
+        # Render the row NOW; grab_preview_frame opens the camera and can
+        # take 0.5-2s per device, so the thumbnail loads on a worker thread
+        # and attaches when ready instead of blocking the window from
+        # painting. Best-effort: a busy device yields None -> omitted.
+        def _attach(thumb):
+            if thumb is None:
+                return
+            try:
+                if not row.winfo_exists():
+                    return
+                lbl = ttk.Label(row, image=thumb)
+                lbl.image = thumb  # keep a ref so Tk doesn't GC the PhotoImage
+                lbl.pack(side="right")
+            except tk.TclError:
+                pass  # row was destroyed (e.g. re-scan) while thumbnail loaded
+
+        def on_ready(thumb):
+            # Called from the worker thread -> marshal back to the Tk thread.
+            _safe_after(lambda: _attach(thumb))
+
+        _load_thumbnail_async(device_index, on_ready)
 
     def _render(rows):
         for w in cam_frame_inner.winfo_children():
@@ -168,7 +208,7 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         def apply_ui():
             _render(cams)
             status_var.set(f"找到 {len(cams)} 支攝影機")
-        root.after(0, apply_ui)
+        _safe_after(apply_ui)
 
     def do_scan():
         status_var.set("掃描中...")

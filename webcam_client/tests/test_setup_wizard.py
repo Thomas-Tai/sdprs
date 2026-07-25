@@ -122,6 +122,36 @@ def test_scan_cameras_async_runs_off_the_calling_thread(monkeypatch):
     assert result["cams"][0]["device_index"] == 0
 
 
+def test_load_thumbnail_async_runs_off_the_calling_thread(monkeypatch):
+    import threading as _t
+    from webcam_client.gui import setup_wizard as sw
+    seen = {}
+
+    def fake_grab(device_index):
+        seen["thread"] = _t.current_thread()
+        seen["device_index"] = device_index
+        return "FRAME"
+
+    def fake_make_thumbnail(frame):
+        assert frame == "FRAME"
+        return "THUMB"
+
+    monkeypatch.setattr(sw, "grab_preview_frame", fake_grab)
+    monkeypatch.setattr(sw, "make_thumbnail", fake_make_thumbnail)
+    done = _t.Event()
+    result = {}
+
+    def on_ready(thumb):
+        result["thumb"] = thumb
+        done.set()
+
+    sw._load_thumbnail_async(3, on_ready)
+    assert done.wait(5), "on_ready was never called"
+    assert seen["thread"] is not _t.current_thread(), "thumbnail grab must not run on the caller thread"
+    assert seen["device_index"] == 3
+    assert result["thumb"] == "THUMB"
+
+
 def test_camera_rows_from_config_preserves_node_id_and_name():
     from webcam_client.gui.setup_wizard import _camera_rows_from_config
     cfg = {"cameras": [
