@@ -268,7 +268,12 @@ const SnapshotImage = ({ node, iconSize = 48 }) => {
   // built from an undefined timestamp and, on the wall, read as a live feed.
   // Absent data is frozen data.
   const frozen = node.status === 'offline' || node.upload == null || node.upload > 60;
-  const wantsLiveImg = node.type === 'camera' && !frozen;
+  // Webcams are camera-like: their 1Hz JPEG is served from the SAME
+  // /api/edge/{id}/snapshot/latest buffer as an edge cam's (the webcam ingest
+  // shares it server-side). Gating on `=== 'camera'` alone left every webcam
+  // tile on the fallback icon with no live frame. Mirror mapNode's `cameraLike`.
+  const cameraLike = node.type === 'camera' || node.type === 'webcam';
+  const wantsLiveImg = cameraLike && !frozen;
   const src = `/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}`;
   // CMP-F14: a snapshot fetch that 404s / times out / returns a truncated JPEG
   // used to leave the browser's broken-image glyph on the monitor wall, which
@@ -290,7 +295,7 @@ const SnapshotImage = ({ node, iconSize = 48 }) => {
   const loadFailed = wantsLiveImg && node.snapshotTimestamp && failedSrc === src;
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-ink-muted/40">
-      {node.type === 'camera' ? <Icon.Camera size={iconSize} strokeWidth={1}/> : <Icon.Droplet size={iconSize} strokeWidth={1}/>}
+      {cameraLike ? <Icon.Camera size={iconSize} strokeWidth={1}/> : <Icon.Droplet size={iconSize} strokeWidth={1}/>}
       {loadFailed && (
         <span className="text-[10px] text-sev-warn font-mono tnum">畫面載入失敗</span>
       )}

@@ -688,6 +688,84 @@ ${PRELUDE}
 })();
 `;
 
+// -------------------------------- monitor.jsx: webcam appears on the wall ----
+// A registered webcam IS a camera on the 監看牆. The reported bug: MonitorPage
+// built cameraNodes as `type === 'camera'`, so a `type === 'webcam'` node
+// rendered in NO section on the 全部 tab (both the pumps and cameras sub-lists
+// exclude it) and was filtered out entirely under the 攝影機 tab — the tile
+// never appeared on the wall on any tab. TEST_MONITOR proves NodeCard *can*
+// render a webcam; this proves the PAGE routes one into the grid and counts it.
+const TEST_MONITOR_TABS = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    window.SDPRS_API = { startWebcamStream: () => Promise.resolve({}), stopWebcamStream: () => Promise.resolve({}), getWebcamPlaylist: () => Promise.resolve('') };
+    const webcam  = { id: 'webcam_wall01', name: '櫃台電腦', type: 'webcam', status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: null };
+    const edgeCam = { id: 'CAM-1', name: '西灣橋', type: 'camera', status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: null, temp: 30, visualHealth: 'ok', audioHealth: 'ok' };
+    const pump    = { id: 'pump-1', name: '泵站', type: 'pump', status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: 50, cycles: 5 };
+    const render = () => ReactDOM.flushSync(() => root.render(
+      React.createElement(MonitorPage, { nodes: [pump, edgeCam, webcam], activeAlerts: [], onSelectNode: () => {} })));
+    // The 攝影機 TAB button (label + count) — NOT the 全部-tab '僅顯示攝影機 →'
+    // section shortcut, which also contains '攝影機'.
+    const camTab = () => Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf('攝影機') !== -1 && b.textContent.indexOf('僅顯示') === -1);
+
+    // --- default 全部 (all) tab: the webcam tile must be on the wall ---
+    render();
+    A('全部 tab shows the edge-cam tile', container.textContent.indexOf('CAM-1') !== -1);
+    A('全部 tab shows the WEBCAM tile (the reported bug)', container.textContent.indexOf('webcam_wall01') !== -1);
+    A('攝影機 tab count includes the webcam (2 camera-like nodes, not 1)', !!camTab() && camTab().textContent.indexOf('2') !== -1, camTab() && camTab().textContent);
+
+    // --- 攝影機 (cameras) tab: webcam rendered, edge-cam kept, pump excluded ---
+    click(camTab());
+    await settle();
+    A('攝影機 tab shows the edge-cam tile', container.textContent.indexOf('CAM-1') !== -1);
+    A('攝影機 tab shows the WEBCAM tile', container.textContent.indexOf('webcam_wall01') !== -1);
+  } catch (e) {
+    results.push({ name: 'monitor webcam-on-wall suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// ---------------------------- components.jsx: webcam SnapshotImage feed ------
+// Second surface of the same bug: even once a webcam tile renders, SnapshotImage
+// gated the live <img> on `node.type === 'camera'`, so a webcam showed the
+// fallback icon (a water Droplet, no less) instead of its 1Hz frame. A webcam
+// with a fresh snapshot must render the same /api/edge/{id}/snapshot/latest img
+// an edge cam does; a pump must still fall back (guard against over-broadening).
+const TEST_SNAPSHOT_WEBCAM = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const render = (node) => ReactDOM.flushSync(() => root.render(React.createElement(SnapshotImage, { node })));
+    const imgSrc = () => { const im = container.querySelector('img'); return im ? im.getAttribute('src') : null; };
+
+    // --- webcam with a fresh frame: renders the live <img>, not the fallback ---
+    render({ id: 'webcam_snap01', name: '櫃台電腦', type: 'webcam', status: 'online', upload: 2, snapshotTimestamp: '2026-07-25T08:01:00Z' });
+    A('a fresh webcam renders the live snapshot <img> (the reported blank-tile bug)', !!container.querySelector('img'));
+    A('the webcam img points at its own snapshot/latest URL', !!imgSrc() && imgSrc().indexOf('webcam_snap01/snapshot/latest') !== -1, imgSrc());
+
+    // --- edge cam: unchanged (regression guard) ---
+    ReactDOM.flushSync(() => root.render(null));
+    render({ id: 'CAM-1', name: '西灣橋', type: 'camera', status: 'online', upload: 2, snapshotTimestamp: '2026-07-25T08:01:00Z' });
+    A('a fresh edge cam still renders its live snapshot <img>', !!imgSrc() && imgSrc().indexOf('CAM-1/snapshot/latest') !== -1, imgSrc());
+
+    // --- pump: must NOT request a snapshot (fix stays scoped to camera-like) ---
+    ReactDOM.flushSync(() => root.render(null));
+    render({ id: 'pump-1', name: '泵站', type: 'pump', status: 'online', upload: 2, snapshotTimestamp: '2026-07-25T08:01:00Z' });
+    A('a pump renders NO snapshot img (fix did not over-broaden)', !container.querySelector('img'));
+
+    // --- webcam that has never uploaded: frozen, so fallback (no phantom feed) ---
+    ReactDOM.flushSync(() => root.render(null));
+    render({ id: 'webcam_new01', name: '新機', type: 'webcam', status: 'online', upload: null, snapshotTimestamp: null });
+    A('a webcam with no snapshot yet shows the fallback, not a broken img', !container.querySelector('img'));
+  } catch (e) {
+    results.push({ name: 'components webcam-snapshot suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ------------------------------------ status.jsx: webcam columns (Task 5) ---
 // Step 0c headline-bug guard: a webcam row must not be rendered as a pump. Its
 // 類型 cell shows "Webcam" (never 「抽水站」), its 電源 cell is not "PoE", and its
@@ -915,10 +993,12 @@ const SUITES = [
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
   { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },
   { name: 'Task 5                      monitor.jsx (webcam tile)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR },
+  { name: 'Wall filter                 monitor.jsx (webcam on wall)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_TABS },
   { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
   { name: 'Follow-up 2/3               status.jsx (webcam delete)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_DELETE },
   { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
+  { name: 'Wall feed                   components.jsx (webcam snapshot)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_WEBCAM },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },
   { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },

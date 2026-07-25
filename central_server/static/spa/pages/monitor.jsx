@@ -358,7 +358,13 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
   // React state contract — any future refactor that updates NODES without
   // triggering a re-render would silently freeze this page.
   const allNodes = nodes ?? [];
-  const cameraNodes = allNodes.filter(n => n.type === 'camera');
+  // A webcam IS a camera on the wall: it must appear under the 攝影機 filter and
+  // in the 全部 tab's camera section. api.jsx keeps webcam as its own type (so
+  // the tile can show the blue Webcam badge + live button), so every
+  // camera-grouping check here must be camera-OR-webcam — matching mapNode's
+  // `cameraLike`. Filtering `=== 'camera'` alone hid the webcam tile on EVERY
+  // tab (both 全部 sub-lists and the 攝影機 filter dropped it).
+  const cameraNodes = allNodes.filter(n => n.type === 'camera' || n.type === 'webcam');
   const pumpNodes = allNodes.filter(n => n.type === 'pump');
   const visibleNodes = tab === 'cameras' ? cameraNodes : tab === 'pumps' ? pumpNodes : allNodes;
   // MSP-F10: was `[...visibleNodes].sort(...)` recomputed fresh every render —
