@@ -100,3 +100,19 @@ class TestDetectorHealthTelemetry:
                 mock.patch.object(MQTTClient, "_init_client", lambda self: None):
             client = MQTTClient(config)
         assert client._heartbeat_interval == 10
+
+    def test_heartbeat_includes_ip_and_hostname(self):
+        """心跳帶入節點 LAN IP 與主機名，讓儀表板能顯示每台 Pi 的位址（找節點／SSH 用）。"""
+        client = _make_client()
+        client._publish_heartbeat()
+        payload = json.loads(client._client.last_payload)
+        # 鍵必須存在（IP 偵測失敗時值可為 None，但鍵一定在，儀表板才能一致渲染）。
+        assert "ip" in payload
+        assert "hostname" in payload
+        assert payload["hostname"]  # socket.gethostname() 一律非空
+
+    def test_get_local_ip_returns_dotted_ip_or_none(self):
+        """_get_local_ip 回傳點分四段 IP 或 None（絕不拋例外——找不到不得使節點崩潰）。"""
+        client = _make_client()
+        ip = client._get_local_ip()
+        assert ip is None or (isinstance(ip, str) and ip.count(".") == 3)

@@ -259,6 +259,12 @@ class MQTTService:
                     "visual_health": data.get("visual_health"),
                     "audio_health": data.get("audio_health"),
                     "uptime_seconds": data.get("uptime_seconds"),
+                    # LAN address + hostname from the heartbeat so the dashboard can
+                    # show where each Pi actually is (the server itself only sees the
+                    # node's egress/proxy IP). Live telemetry — kept in memory from
+                    # the latest heartbeat, not persisted (a stale IP has no value).
+                    "ip": data.get("ip"),
+                    "hostname": data.get("hostname"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
 

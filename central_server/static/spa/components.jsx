@@ -2120,6 +2120,19 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
             )}
           </div>
 
+          {/* LAN address — glass nodes self-report it in the heartbeat, so this
+              is how an operator finds / SSHes to the physical Pi. The server only
+              sees the node's egress/proxy IP, never this. select-all = one-click
+              copy. Only rendered once a heartbeat has carried it. */}
+          {node.ip && (
+            <div className="bg-surface-elevated rounded p-2">
+              <div className="text-[10px] text-ink-muted">位址</div>
+              <div className="font-mono tnum text-ink-primary select-all break-all">
+                {node.ip}{node.hostname ? ` · ${node.hostname}` : ''}
+              </div>
+            </div>
+          )}
+
           {/* Detector health (camera only) */}
           {node.type === 'camera' && (
             <div>

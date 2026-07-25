@@ -72,6 +72,12 @@ class NodeStatus(BaseModel):
     cpu_temp: Optional[float] = None
     memory_usage_percent: Optional[float] = None
     uptime_seconds: Optional[int] = None
+    # Glass nodes only: the Pi's own LAN address + hostname, self-reported in the
+    # heartbeat. The server otherwise only sees the node's egress/proxy IP, so
+    # this is the dashboard's only way to show where a node actually is (find it
+    # / SSH to it). None until the first heartbeat carrying it.
+    ip: Optional[str] = None
+    hostname: Optional[str] = None
     buffer_health: Optional[str] = None
     visual_health: Optional[str] = None
     audio_health: Optional[str] = None
@@ -328,6 +334,8 @@ async def list_nodes(
             cpu_temp=state.get("cpu_temp"),
             memory_usage_percent=state.get("memory_usage_percent"),
             uptime_seconds=state.get("uptime_seconds"),
+            ip=state.get("ip"),
+            hostname=state.get("hostname"),
             buffer_health=state.get("buffer_health"),
             visual_health=state.get("visual_health"),
             audio_health=state.get("audio_health"),
@@ -648,6 +656,8 @@ async def get_node(
         cpu_temp=state.get("cpu_temp"),
         memory_usage_percent=state.get("memory_usage_percent"),
         uptime_seconds=state.get("uptime_seconds"),
+        ip=state.get("ip"),
+        hostname=state.get("hostname"),
         buffer_health=state.get("buffer_health"),
         visual_health=state.get("visual_health"),
         audio_health=state.get("audio_health"),

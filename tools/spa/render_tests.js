@@ -974,13 +974,16 @@ ${PRELUDE}
       json: () => Promise.resolve(data), text: () => Promise.resolve(''),
     });
     window.fetch = (path) => (path.indexOf('/api/nodes') === 0)
-      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99' }])
+      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99', ip: '172.16.37.42', hostname: 'sdprs-glass-01' }])
       : jsonRes([]); // every other loader: benign empty payload
     const rl = await api.refreshLive();
     const mapped = ((rl && rl.nodes) || []).find(n => n.id === 'webcam_cam99');
     A('mapNode maps node_type webcam -> type webcam', !!mapped && mapped.type === 'webcam', mapped && mapped.type);
     A('mapNode surfaces client_id as clientId', !!mapped && mapped.clientId === 'webcam_cli99', mapped && mapped.clientId);
     A('mapNode surfaces client_name as clientName', !!mapped && mapped.clientName === 'Front Desk PC', mapped && mapped.clientName);
+    // Node LAN address for the dashboard "where is this Pi" affordance.
+    A('mapNode surfaces ip', !!mapped && mapped.ip === '172.16.37.42', mapped && mapped.ip);
+    A('mapNode surfaces hostname', !!mapped && mapped.hostname === 'sdprs-glass-01', mapped && mapped.hostname);
   } catch (e) {
     results.push({ name: 'api surface suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }

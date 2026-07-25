@@ -23,6 +23,7 @@
 import json
 import logging
 import platform
+import socket
 import threading
 import time
 from datetime import datetime, timezone
@@ -298,6 +299,10 @@ class MQTTClient:
             "audio_health": self._audio_health,
             "uptime_seconds": int(time.monotonic() - self._start_time),
             "memory_usage_percent": self._get_memory_usage(),
+            # LAN 位址與主機名（telemetry-only）：伺服器只看得到節點的對外／代理 IP，
+            # 心跳裡沒有這兩項就無從得知該台 Pi 的 SSH 可達位址。讓儀表板顯示「找節點」。
+            "ip": self._get_local_ip(),
+            "hostname": socket.gethostname(),
         }
 
         # 發布
@@ -307,6 +312,27 @@ class MQTTClient:
         if self._client:
             self._client.publish(topic, payload, qos=0)
             logger.debug(f"Heartbeat published: {heartbeat_data}")
+
+    def _get_local_ip(self) -> Optional[str]:
+        """取得本機 LAN IP（送出心跳的來源介面位址）。
+
+        用「connect 一個外部位址的 UDP socket 再讀 getsockname」的慣用法找出到達
+        外網所用的介面 IP——不會真的送出封包。回傳點分四段字串，或在無法判定時
+        回傳 None（絕不拋例外——找不到 IP 不得中斷心跳）。
+        """
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))  # 不送封包，僅用於選出對外介面
+            return s.getsockname()[0]
+        except Exception:
+            return None
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     def _get_cpu_temp(self) -> float:
         """

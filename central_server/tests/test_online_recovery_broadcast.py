@@ -87,6 +87,39 @@ def _node_status_msgs(msgs):
     return [m for (_loop, m) in msgs if m.get("type") == "node_status"]
 
 
+# ----- heartbeat carries the node's LAN ip + hostname into node_states -----
+# The server only ever sees a node's egress/proxy IP; the node self-reports its
+# LAN address in the heartbeat so the dashboard can show where the Pi actually
+# is (find it / SSH to it). Follows the same store-in-node_states path as
+# cpu_temp; /api/nodes reads node_states for glass telemetry.
+
+def test_heartbeat_stores_ip_and_hostname(monkeypatch):
+    _install_upsert_recorder(monkeypatch)
+    _install_broadcast_recorder(monkeypatch)
+    svc = make_service()
+
+    svc._handle_heartbeat("glass_node_01", json.dumps(
+        {"cpu_temp": 50.0, "ip": "172.16.37.42", "hostname": "sdprs-glass-01"}))
+
+    st = svc.node_states["glass_node_01"]
+    assert st["ip"] == "172.16.37.42"
+    assert st["hostname"] == "sdprs-glass-01"
+
+
+def test_heartbeat_without_ip_stores_none(monkeypatch):
+    # An older node (heartbeat with no ip) must yield ip=None, never crash — the
+    # field is always present so the dashboard renders it consistently.
+    _install_upsert_recorder(monkeypatch)
+    _install_broadcast_recorder(monkeypatch)
+    svc = make_service()
+
+    svc._handle_heartbeat("glass_node_01", json.dumps({"cpu_temp": 50.0}))
+
+    st = svc.node_states["glass_node_01"]
+    assert st["ip"] is None
+    assert st["hostname"] is None
+
+
 # ----- (a) first heartbeat from unknown node -> exactly one ONLINE broadcast -----
 
 def test_first_heartbeat_unknown_node_broadcasts_online(monkeypatch):

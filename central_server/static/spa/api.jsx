@@ -343,6 +343,12 @@
       heartbeat: hb != null ? Math.round(hb) : null,
       upload: up != null ? Math.round(up) : null,
       temp: roundOrNull(n.cpu_temp),
+      // Glass node's self-reported LAN address + hostname (heartbeat telemetry).
+      // The server only sees the node's egress/proxy IP, so this is how the
+      // dashboard shows where a Pi actually is (to find / SSH to it). null until
+      // a heartbeat carries it.
+      ip: n.ip || null,
+      hostname: n.hostname || null,
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
              : ss.bitrate != null ? ss.bitrate : 0,
