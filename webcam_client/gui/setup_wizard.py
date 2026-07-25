@@ -115,6 +115,39 @@ def _camera_rows_from_config(config: dict) -> list:
     return rows
 
 
+def _client_identity_changed(existing_config: Optional[dict], server_url: str,
+                             api_key: str) -> bool:
+    """True when the entered server_url or api_key differs from the config the
+    cameras were last registered under.
+
+    A camera's node_id is owned by the webcam CLIENT whose key registered it.
+    If the operator changes the API Key (or Server URL) in the settings window,
+    the key now authenticates as a different client, and reusing the old
+    node_ids makes the server reject every snapshot/command with
+    403 "Camera not owned by this client". When the identity changes the old
+    node_ids must be dropped so the cameras re-register under the new client.
+    """
+    old = existing_config or {}
+    return (api_key != old.get("api_key", "")
+            or server_url != normalize_server_url(old.get("server_url", "")))
+
+
+def _build_cameras_for_registration(selected_rows: list, identity_changed: bool) -> list:
+    """Build the camera dicts to hand register_cameras. Preserve a row's node_id
+    ONLY when the client identity is unchanged (idempotent — no duplicate tile);
+    drop it when the identity changed so the camera re-registers under, and is
+    owned by, the new client. A row that never had a node_id never gains one."""
+    cameras = []
+    for r in selected_rows:
+        cam = {"device_index": r["device_index"],
+               "name": r["name"],
+               "resolution": [640, 480], "jpeg_quality": 40, "target_fps": 8}
+        if r.get("node_id") and not identity_changed:
+            cam["node_id"] = r["node_id"]
+        cameras.append(cam)
+    return cameras
+
+
 def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-run") -> Optional[dict]:
     result = {"config": None}
     root = tk.Tk()
@@ -228,16 +261,16 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         if not server_url or not api_key:
             messagebox.showerror("錯誤", "請填入 Server URL 和 API Key")
             return
-        selected = []
-        for row, v, nv in cam_vars:
-            if not v.get():
-                continue
-            cam = {"device_index": row["device_index"],
-                   "name": nv.get().strip() or f"Webcam {row['device_index']}",
-                   "resolution": [640, 480], "jpeg_quality": 40, "target_fps": 8}
-            if row.get("node_id"):
-                cam["node_id"] = row["node_id"]  # preserve -> idempotent register
-            selected.append(cam)
+        # Re-home cameras when the client identity changed: reusing node_ids
+        # owned by the OLD client makes the new key 403 "Camera not owned".
+        identity_changed = _client_identity_changed(config, server_url, api_key)
+        selected_rows = [
+            {"device_index": row["device_index"],
+             "name": nv.get().strip() or f"Webcam {row['device_index']}",
+             "node_id": row.get("node_id")}
+            for row, v, nv in cam_vars if v.get()
+        ]
+        selected = _build_cameras_for_registration(selected_rows, identity_changed)
         if not selected:
             messagebox.showerror("錯誤", "請至少選擇一支攝影機")
             return

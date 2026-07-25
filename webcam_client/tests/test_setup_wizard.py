@@ -20,6 +20,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from webcam_client.gui.setup_wizard import normalize_server_url, register_cameras
 
 
+# ---------------------------------------------------------------------------
+# Re-home cameras when the client identity changes.
+#
+# The idempotent register_cameras keeps a camera's existing node_id so repeated
+# edits under the SAME client don't mint duplicate dashboard tiles. But a
+# node_id is owned by the client that registered it: if the operator changes the
+# API Key (or Server URL) in the settings window, the key now authenticates as a
+# DIFFERENT webcam client, and reusing the old node_ids makes the server reject
+# every snapshot/command with 403 "Camera not owned by this client". So when the
+# identity changes, the old node_ids must be dropped and the cameras
+# re-registered under the new client.
+# ---------------------------------------------------------------------------
+
+def test_identity_unchanged_when_url_and_key_match():
+    from webcam_client.gui.setup_wizard import _client_identity_changed
+    cfg = {"server_url": "https://msc-sdprs.zeabur.app", "api_key": "sk-webcam-aaa"}
+    assert _client_identity_changed(cfg, "https://msc-sdprs.zeabur.app", "sk-webcam-aaa") is False
+    # config server_url is stored normalized; a trailing slash on input still matches
+    assert _client_identity_changed(cfg, normalize_server_url("https://msc-sdprs.zeabur.app/"),
+                                    "sk-webcam-aaa") is False
+
+
+def test_identity_changed_when_key_or_url_differs():
+    from webcam_client.gui.setup_wizard import _client_identity_changed
+    cfg = {"server_url": "https://msc-sdprs.zeabur.app", "api_key": "sk-webcam-aaa"}
+    assert _client_identity_changed(cfg, "https://msc-sdprs.zeabur.app", "sk-webcam-BBB") is True
+    assert _client_identity_changed(cfg, "https://other.example.com", "sk-webcam-aaa") is True
+    # first-run: no prior config -> treated as changed (harmless; rows have no node_id)
+    assert _client_identity_changed({}, "https://x", "sk-webcam-aaa") is True
+
+
+def test_build_cameras_preserves_node_id_only_when_identity_unchanged():
+    from webcam_client.gui.setup_wizard import _build_cameras_for_registration
+    rows = [{"device_index": 0, "name": "前門", "node_id": "webcam_b4a4f203"}]
+    # same client -> keep node_id (idempotent, no duplicate tile)
+    kept = _build_cameras_for_registration(rows, identity_changed=False)
+    assert kept[0]["node_id"] == "webcam_b4a4f203"
+    assert kept[0]["name"] == "前門" and kept[0]["device_index"] == 0
+    assert kept[0]["resolution"] == [640, 480]
+    # identity changed -> DROP node_id so it re-registers under the new client
+    rehomed = _build_cameras_for_registration(rows, identity_changed=True)
+    assert "node_id" not in rehomed[0]
+    assert rehomed[0]["name"] == "前門" and rehomed[0]["device_index"] == 0
+
+
+def test_build_cameras_never_invents_node_id_for_new_rows():
+    from webcam_client.gui.setup_wizard import _build_cameras_for_registration
+    rows = [{"device_index": 1, "name": "後門", "node_id": None}]
+    for changed in (False, True):
+        out = _build_cameras_for_registration(rows, identity_changed=changed)
+        assert "node_id" not in out[0]
+
+
+
 def test_normalize_prepends_http_when_scheme_missing():
     # THE trigger: user pastes host:port with no scheme.
     assert normalize_server_url("localhost:8000") == "http://localhost:8000"
