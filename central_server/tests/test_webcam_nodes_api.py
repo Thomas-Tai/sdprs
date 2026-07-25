@@ -551,6 +551,80 @@ async def test_node_list_staleness_computed_for_datetime_last_upload(client, mon
 
 
 # =============================================================================
+# Webcam liveness is UPLOAD freshness, not the webcam_cameras.status column.
+#   The column defaults 'OFFLINE' and touch_webcam_upload stamps ONLY
+#   last_upload (never status), so a camera pushing 1Hz frames stayed 'OFFLINE'.
+#   The SPA reads `offline = status != 'ONLINE'`, marked the tile offline, and
+#   SnapshotImage froze it -> a blank/grey tile that never showed the live frame
+#   even though snapshots were landing (204). Status is derived from freshness.
+# =============================================================================
+
+@pytest.mark.anyio
+async def test_node_list_reports_fresh_webcam_online_despite_offline_column(client, monkeypatch):
+    """A webcam uploading within STALE_THRESHOLD must report ONLINE even though
+    its webcam_cameras.status column is the un-updated default 'OFFLINE'."""
+    import central_server.api.nodes as nodes_api
+    import central_server.database as db
+    from central_server.timeutil import utcnow
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    fresh = utcnow()  # just uploaded
+    webcam_row = {
+        "node_id": "webcam_cam00010", "client_id": "webcam_cli00010",
+        "name": "前門", "status": "OFFLINE",   # the REAL column value (never updated)
+        "last_upload": fresh, "client_name": "櫃台電腦",
+    }
+    monkeypatch.setattr(db, "get_backend", lambda: "postgresql")
+    monkeypatch.setattr(
+        db, "_pg_fetch_many_sync",
+        lambda sql, params: [dict(webcam_row)] if "FROM webcam_cameras c" in sql else [])
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200, listed.text
+    row = [n for n in listed.json() if n["node_type"] == "webcam"][0]
+    assert row["is_stale"] is False
+    # Pre-fix this was 'OFFLINE' (the column) -> SPA froze the tile blank.
+    assert row["status"] == "ONLINE", row
+
+
+@pytest.mark.anyio
+async def test_node_list_reports_stale_or_never_uploaded_webcam_offline(client, monkeypatch):
+    """A webcam that stopped uploading (or never did) must report OFFLINE so a
+    dead camera is not shown live. Freshness decides — even a stray 'ONLINE'
+    column value must not keep a stale camera looking alive."""
+    import datetime as _dt
+    import central_server.api.nodes as nodes_api
+    import central_server.database as db
+    from central_server.timeutil import utcnow
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqttForNodeList())
+
+    old = utcnow() - _dt.timedelta(hours=1)  # well past STALE_THRESHOLD_SECONDS
+    stale_row = {
+        "node_id": "webcam_cam00011", "client_id": "webcam_cli00011",
+        "name": "後門", "status": "ONLINE", "last_upload": old,  # column lies
+        "client_name": "櫃台電腦",
+    }
+    never_row = {
+        "node_id": "webcam_cam00012", "client_id": "webcam_cli00012",
+        "name": "側門", "status": "ONLINE", "last_upload": None,  # never uploaded
+        "client_name": "櫃台電腦",
+    }
+    monkeypatch.setattr(db, "get_backend", lambda: "postgresql")
+    monkeypatch.setattr(
+        db, "_pg_fetch_many_sync",
+        lambda sql, params: [dict(stale_row), dict(never_row)] if "FROM webcam_cameras c" in sql else [])
+
+    listed = await client.get("/api/nodes")
+    assert listed.status_code == 200, listed.text
+    rows = {n["node_id"]: n for n in listed.json() if n["node_type"] == "webcam"}
+    assert rows["webcam_cam00011"]["is_stale"] is True
+    assert rows["webcam_cam00011"]["status"] == "OFFLINE", rows["webcam_cam00011"]
+    assert rows["webcam_cam00012"]["status"] == "OFFLINE", rows["webcam_cam00012"]
+
+
+# =============================================================================
 # Clientless webcam client — created via 新增 Webcam Client but never provisioned
 # by the wizard, so it has NO camera rows. GET /api/nodes lists CAMERAS, so
 # without a dedicated surface such a client is invisible in the node list, which

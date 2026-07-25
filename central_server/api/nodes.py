@@ -434,7 +434,16 @@ async def list_nodes(
             # The client PC's own display name (LEFT JOIN — may be None).
             # What the delete confirm dialog shows the operator.
             client_name=wc.get("client_name"),
-            status=wc.get("status") or "OFFLINE",
+            # A webcam's liveness is its UPLOAD freshness, not the
+            # webcam_cameras.status column: that column defaults 'OFFLINE' and
+            # touch_webcam_upload stamps ONLY last_upload (never flips status),
+            # so a camera actively pushing 1Hz frames still read 'OFFLINE'. The
+            # SPA does `offline = status != 'ONLINE'`, marked the tile offline,
+            # and SnapshotImage then froze it -> a blank/grey tile that never
+            # showed the live frame despite snapshots landing. Derive it from the
+            # freshness computed just above: fresh upload = ONLINE, stale /
+            # never-uploaded = OFFLINE (same signal `is_stale` already carries).
+            status=("ONLINE" if (last_upload and not is_stale) else "OFFLINE"),
             # `name` here is the CAMERA's name, not the client's.
             location=wc.get("name"),
             last_heartbeat=last_upload_iso,

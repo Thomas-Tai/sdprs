@@ -125,7 +125,11 @@ async def test_webcam_camera_appears_as_webcam_node(client):
     row = by_id[cam_id]
     assert row["node_type"] == "webcam"
     assert row["location"] == "Front Door"
-    assert row["status"] == "OFFLINE"          # webcam_cameras default
+    # Liveness is derived from upload freshness, NOT the webcam_cameras.status
+    # column (which stays 'OFFLINE' — touch_webcam_upload never flips it). A
+    # fresh upload is ONLINE; asserting the raw column here codified the
+    # blank-tile bug (SPA froze the tile because status != 'ONLINE').
+    assert row["status"] == "ONLINE"
     assert row["last_heartbeat"] == fresh
     assert row["snapshot_timestamp"] == fresh
     assert row["is_stale"] is False
@@ -146,6 +150,7 @@ async def test_webcam_camera_stale_when_upload_old(client):
     row = by_id[cam_id]
     assert row["node_type"] == "webcam"
     assert row["is_stale"] is True
+    assert row["status"] == "OFFLINE"          # stale upload -> not live
     assert row["last_heartbeat"] == old
 
 
