@@ -14,14 +14,26 @@ except ImportError:
 
 
 def _create_icon(color: str = "green") -> "Image.Image":
-    # Transparent background needs RGBA + a (0,0,0,0) fill. "transparent" is NOT
-    # a valid color for Image.new and raises ValueError, which crashed startup
-    # the moment the tray icon was built.
+    # Transparent background needs RGBA + (0,0,0,0); "transparent" is not a valid
+    # PIL color and raises ValueError (that crashed startup once).
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    c = (0, 200, 0, 255) if color == "green" else (220, 50, 50, 255)
+    palette = {"green": (0, 200, 0, 255), "red": (220, 50, 50, 255),
+               "amber": (230, 160, 0, 255)}
+    c = palette.get(color, palette["green"])
     draw.ellipse([8, 8, 56, 56], fill=c)
     return img
+
+
+def _pause_label(paused: bool) -> str:
+    return "恢復推送" if paused else "暫停推送"
+
+
+def _icon_color(paused: bool, connected: bool) -> str:
+    # Paused is the operator's most important state, so it wins over connection.
+    if paused:
+        return "amber"
+    return "green" if connected else "red"
 
 
 class TrayApp:
@@ -33,11 +45,15 @@ class TrayApp:
         self._on_resume = on_resume
         self._icon: Optional["pystray.Icon"] = None
         self._paused = False
+        self._connected = False
+
+    def _refresh_icon(self) -> None:
+        if self._icon and TRAY_AVAILABLE:
+            self._icon.icon = _create_icon(_icon_color(self._paused, self._connected))
 
     def set_status(self, connected: bool) -> None:
-        if self._icon and TRAY_AVAILABLE:
-            color = "green" if connected else "red"
-            self._icon.icon = _create_icon(color)
+        self._connected = connected
+        self._refresh_icon()
 
     def start(self) -> None:
         if not TRAY_AVAILABLE:
@@ -45,11 +61,13 @@ class TrayApp:
             return
         menu = pystray.Menu(
             pystray.MenuItem("開啟設定", lambda: self._on_open_settings()),
-            pystray.MenuItem("暫停推送", lambda: self._toggle_pause()),
+            pystray.MenuItem(lambda item: _pause_label(self._paused),
+                             lambda: self._toggle_pause()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("離開", lambda: self._quit()),
         )
-        self._icon = pystray.Icon("SDPRS Webcam", _create_icon("green"), "SDPRS Webcam", menu)
+        self._icon = pystray.Icon("SDPRS Webcam", _create_icon("green"),
+                                  "SDPRS Webcam", menu)
         threading.Thread(target=self._icon.run, daemon=True).start()
 
     def _toggle_pause(self) -> None:
@@ -58,6 +76,9 @@ class TrayApp:
             self._on_pause()
         else:
             self._on_resume()
+        self._refresh_icon()
+        if self._icon and TRAY_AVAILABLE:
+            self._icon.update_menu()
 
     def _quit(self) -> None:
         if self._icon:

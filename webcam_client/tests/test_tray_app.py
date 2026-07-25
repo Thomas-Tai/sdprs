@@ -31,3 +31,22 @@ def test_create_icon_does_not_raise_and_is_transparent_rgba():
 def test_create_icon_colors_track_status():
     assert _create_icon("green").getpixel((32, 32))[:3] == (0, 200, 0)
     assert _create_icon("red").getpixel((32, 32))[:3] == (220, 50, 50)
+
+
+def test_pause_label_reflects_state():
+    from webcam_client.gui.tray_app import _pause_label
+    assert _pause_label(False) == "暫停推送"
+    assert _pause_label(True) == "恢復推送"
+
+
+def test_icon_color_paused_beats_connection():
+    from webcam_client.gui.tray_app import _icon_color
+    assert _icon_color(paused=False, connected=True) == "green"
+    assert _icon_color(paused=False, connected=False) == "red"
+    assert _icon_color(paused=True, connected=True) == "amber"
+    assert _icon_color(paused=True, connected=False) == "amber"
+
+
+@pytest.mark.skipif(not TRAY_AVAILABLE, reason="PIL/pystray not installed")
+def test_create_icon_amber():
+    assert _create_icon("amber").getpixel((32, 32))[:3] == (230, 160, 0)
