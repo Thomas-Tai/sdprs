@@ -14,7 +14,18 @@ camera:
 buffer:
   duration_seconds: 10
 
+# Event capture: non-blocking encode so an event never freezes the loop
+# (record 5s + encode ~15s of 720p) — snapshots + detection keep running.
+capture:
+  async_encode: true
+  pre_roll_seconds: 4
+  post_roll_seconds: 5
+  encode_queue_size: 2
+
 visual:
+  detect_fps: 5                        # Run CV at this rate, not every camera frame (the Pi's
+                                       # main heat source). Camera still captures at camera.fps
+                                       # for the buffer+snapshots. Clamped to [1, camera.fps].
   edge_density_threshold: 1.5
   baseline_window_seconds: 60
   brightness_anomaly_percent: 50
@@ -62,6 +73,7 @@ server:
   mqtt_username: "sdprs"
   mqtt_password: "CHANGE_ME"              # TODO: 與 Zeabur MQTT_PASSWORD 一致
   mqtt_use_tls: false         # Zeabur TCP 轉發為純 TCP；WebSocket 模式改 true
+  heartbeat_interval: 10      # 心跳間隔（秒）：調低讓儀表板狀態／CPU 溫度更即時；仍遠小於伺服器約 90 秒離線逾時
 
   api_key: "CHANGE_ME"                    # TODO: 與 Zeabur EDGE_API_KEY 一致
 

@@ -198,6 +198,25 @@ def compute_visual_health(thermal_paused: bool, visual_blinded: bool) -> str:
     return "ok"
 
 
+def resolve_detect_fps(config: dict) -> int:
+    """有效視覺偵測幀率。
+
+    每幀跑 Canny／輪廓分析是 Pi 上最主要的 CPU／發熱來源，而玻璃破裂偵測不需要
+    每一幀（相關窗 2 秒、冷卻 30 秒）。因此視覺偵測以 visual.detect_fps 執行，而
+    非 camera.fps；攝像頭仍以 camera.fps 擷取，供錄影緩衝區與快照使用。
+
+    未設定時預設為 camera.fps（維持舊行為，不造成意外），並夾在 [1, camera.fps]：
+    偵測不可能快過攝像頭實際交付的幀，0／負值會讓偵測完全停擺，非數值不得使節點崩潰。
+    """
+    camera_fps = max(1, int(config.get("camera", {}).get("fps", 15)))
+    raw = config.get("visual", {}).get("detect_fps", camera_fps)
+    try:
+        detect_fps = int(raw)
+    except (TypeError, ValueError):
+        detect_fps = camera_fps
+    return max(1, min(detect_fps, camera_fps))
+
+
 def main():
     """主函式。"""
     global _running
@@ -250,10 +269,20 @@ def main():
         duration_seconds=config["buffer"]["duration_seconds"],
     )
 
+    # 視覺偵測以 detect_fps 執行（見 resolve_detect_fps）。偵測器的內部節奏
+    # （基線視窗、每秒基線更新、異常復原幀數）都以 fps 計數，所以用 detect_fps
+    # 建構它，這些時間才會維持正確的牆鐘秒數。
+    detect_fps = resolve_detect_fps(config)
     visual_detector = VisualDetector(
         config["visual"],
-        fps=config["camera"]["fps"],
+        fps=detect_fps,
     )
+    if detect_fps < int(config["camera"]["fps"]):
+        logger.info(
+            f"Visual detection throttled: {detect_fps} fps "
+            f"(camera {config['camera']['fps']} fps) — CV runs on ~1 of every "
+            f"{max(1, round(int(config['camera']['fps']) / detect_fps))} frames"
+        )
 
     audio_detector = AudioDetector(config["audio"])
 
@@ -394,6 +423,9 @@ def main():
 
     # 初始化熱管理共享變數（來自 Thread 6）
     last_snapshot_time = time.time()
+    # 視覺偵測節流：以 detect_fps 執行 analyze()，而非每一幀。0.0 讓第一幀立即偵測。
+    detect_interval = 1.0 / detect_fps
+    last_detect_time = 0.0
     last_health_time = time.time()       # 偵測器健康上報節流計時器（約每 5 秒）
     last_degraded_warn_time = 0.0        # 降級警告節流計時器（約每 30 秒）
     cooldown_until = 0
@@ -460,12 +492,16 @@ def main():
         # 2. 寫入循環緩衝區
         buffer.append(timestamp, frame)
 
-        # 3. 視覺偵測（受熱管理控制）
+        # 3. 視覺偵測（受熱管理 + 偵測節流控制）
+        #    以 detect_fps 執行，而非每一幀：CV 是 Pi 的主要發熱來源，玻璃破裂
+        #    偵測不需要 15fps。被跳過的幀 visual_result=None，trigger_engine 已能
+        #    容忍（與熱管理暫停同一路徑）。攝像頭仍以 camera.fps 擷取供緩衝／快照。
         visual_result = None
-        if not thermal_monitor.visual_paused:
-            visual_result = visual_detector.analyze(frame)
-        else:
+        if thermal_monitor.visual_paused:
             logger.debug("Visual processing paused due to high temperature")
+        elif timestamp - last_detect_time >= detect_interval:
+            visual_result = visual_detector.analyze(frame)
+            last_detect_time = timestamp
 
         # 4. 音訊偵測
         audio_result = audio_detector.analyze()

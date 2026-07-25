@@ -19,13 +19,20 @@ buffer:
 
 # Event capture settings (non-blocking async encode path)
 capture:
-  async_encode: false                 # false = legacy blocking encode (unchanged). true = non-blocking buffer+worker path.
+  async_encode: true                  # true = non-blocking buffer+worker path: an event no longer freezes
+                                      # the loop (record 5s + encode ~15s of 720p) for tens of seconds, so
+                                      # snapshots + detection keep running through events. false = legacy blocking encode.
   pre_roll_seconds: 4                 # Seconds of pre-trigger footage (from the circular buffer)
   post_roll_seconds: 5                # Seconds of post-trigger footage (from the buffer, once elapsed)
   encode_queue_size: 2                # Bounded encode-worker queue; drop-newest + WARNING when full
 
 # Visual detection settings
 visual:
+  detect_fps: 5                       # Run CV at this rate, not every camera frame.
+                                      # CV (Canny/contour) is the Pi's main heat source;
+                                      # glass-break detection does not need 15fps. Camera
+                                      # still captures at camera.fps for the buffer+snapshots.
+                                      # Clamped to [1, camera.fps]; unset = camera.fps.
   edge_density_threshold: 1.5         # Multiplier relative to baseline
   baseline_window_seconds: 60         # Adaptive baseline window
   brightness_anomaly_percent: 50      # Brightness anomaly exclusion threshold
@@ -70,6 +77,9 @@ server:
   api_key: "changeme-random-secret-key"      # CHANGE THIS! Must match server EDGE_API_KEY
   mqtt_broker: "central-server"              # MQTT broker address
   mqtt_port: 1883                           # MQTT broker port
+  heartbeat_interval: 10                    # Seconds between heartbeats (status/CPU-temp/health).
+                                            # Lower = fresher dashboard telemetry; still well under the
+                                            # server's ~90s offline timeout. Default 30 if unset.
 
 # Stream settings
 stream:

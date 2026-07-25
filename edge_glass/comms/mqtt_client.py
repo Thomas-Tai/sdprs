@@ -97,6 +97,16 @@ class MQTTClient:
         self._node_id = config.get("node_id", "edge_node")
         self._broker = config.get("server", {}).get("mqtt_broker", "localhost")
         self._port = config.get("server", {}).get("mqtt_port", 1883)
+        # 心跳間隔可由 server.heartbeat_interval 覆寫（預設維持 30 秒）。調低讓
+        # 儀表板的節點狀態／CPU 溫度／健康更即時；仍遠小於伺服器約 90 秒的離線逾時。
+        try:
+            self._heartbeat_interval = float(
+                config.get("server", {}).get("heartbeat_interval", self.HEARTBEAT_INTERVAL)
+            )
+        except (TypeError, ValueError):
+            self._heartbeat_interval = float(self.HEARTBEAT_INTERVAL)
+        if self._heartbeat_interval <= 0:
+            self._heartbeat_interval = float(self.HEARTBEAT_INTERVAL)
         self._username = config.get("server", {}).get("mqtt_username", "")
         self._password = config.get("server", {}).get("mqtt_password", "")
         self._use_tls = config.get("server", {}).get("mqtt_use_tls", False)
@@ -270,7 +280,7 @@ class MQTTClient:
         def heartbeat_loop():
             while self._running:
                 self._publish_heartbeat()
-                time.sleep(self.HEARTBEAT_INTERVAL)
+                time.sleep(self._heartbeat_interval)
 
         self._heartbeat_timer = threading.Thread(target=heartbeat_loop, daemon=True)
         self._heartbeat_timer.start()

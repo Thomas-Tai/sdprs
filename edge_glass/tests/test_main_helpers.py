@@ -11,7 +11,42 @@ edge_glass_main 純函式輔助工具單元測試
 
 import pytest
 
-from edge_glass_main import compute_audio_health, compute_visual_health
+from edge_glass_main import (
+    compute_audio_health,
+    compute_visual_health,
+    resolve_detect_fps,
+)
+
+
+# ========== resolve_detect_fps ==========
+# Visual CV is the Pi's dominant heat source; detection runs at visual.detect_fps
+# instead of every camera frame. Effective rate defaults to camera.fps (unchanged
+# behaviour when unset) and is clamped to [1, camera.fps].
+
+
+def test_resolve_detect_fps_defaults_to_camera_fps():
+    # Unset -> detect on every camera frame (old behaviour, no surprise).
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {}}) == 15
+
+
+def test_resolve_detect_fps_uses_configured_value():
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {"detect_fps": 5}}) == 5
+
+
+def test_resolve_detect_fps_clamped_to_camera_fps():
+    # Cannot analyze faster than the camera delivers frames.
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {"detect_fps": 30}}) == 15
+
+
+def test_resolve_detect_fps_floors_at_one():
+    # 0 / negative would stall detection entirely -> floor at 1.
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {"detect_fps": 0}}) == 1
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {"detect_fps": -3}}) == 1
+
+
+def test_resolve_detect_fps_bad_value_falls_back_to_camera_fps():
+    # Garbage (non-numeric) must not crash the node -> fall back to camera.fps.
+    assert resolve_detect_fps({"camera": {"fps": 15}, "visual": {"detect_fps": "abc"}}) == 15
 
 
 # ========== compute_audio_health 真值表 ==========

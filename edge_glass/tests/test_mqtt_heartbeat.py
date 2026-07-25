@@ -83,3 +83,20 @@ class TestDetectorHealthTelemetry:
         client.set_detector_health(audio="stale")
         assert client._visual_health == "paused"  # 未被覆寫
         assert client._audio_health == "stale"
+
+    def test_heartbeat_interval_defaults_to_30(self):
+        """未設定時維持歷史預設 30 秒（不造成意外）。"""
+        client = _make_client()
+        assert client._heartbeat_interval == 30
+
+    def test_heartbeat_interval_configurable(self):
+        """server.heartbeat_interval 可覆寫心跳間隔——調低讓儀表板的狀態／溫度更即時。"""
+        config = {
+            "node_id": "glass_node_01",
+            "server": {"mqtt_broker": "localhost", "mqtt_port": 1883,
+                       "heartbeat_interval": 10},
+        }
+        with mock.patch("comms.mqtt_client.PAHO_AVAILABLE", True), \
+                mock.patch.object(MQTTClient, "_init_client", lambda self: None):
+            client = MQTTClient(config)
+        assert client._heartbeat_interval == 10
