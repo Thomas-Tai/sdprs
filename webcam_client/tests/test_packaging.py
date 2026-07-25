@@ -61,3 +61,16 @@ def test_build_spec_entry_is_the_launcher_not_a_package_module():
     assert "'app.py'" in spec or '"app.py"' in spec, "spec must build the launcher"
     assert "['main.py']" not in spec and '["main.py"]' not in spec, \
         "spec entry must NOT be the package module main.py (relative-import crash)"
+
+
+def test_build_spec_disables_upx_for_faster_launch():
+    # UPX decompression runs on every onefile launch; turning it off trades a
+    # slightly larger exe for a faster cold start.
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "upx=False" in spec, "UPX must be off — decompression slows cold start"
+
+
+def test_build_spec_stays_onefile():
+    # Single-file drop is a hard product requirement: no onedir COLLECT.
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "COLLECT(" not in spec, "must remain a one-file build (no onedir COLLECT)"
