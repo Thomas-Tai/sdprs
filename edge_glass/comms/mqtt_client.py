@@ -289,6 +289,7 @@ class MQTTClient:
     def _publish_heartbeat(self):
         """發布心跳訊息。"""
         # 收集心跳資料
+        local_ip = self._get_local_ip()  # 計算一次，供 ip 與 mac 共用
         heartbeat_data = {
             "node_id": self._node_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -301,8 +302,10 @@ class MQTTClient:
             "memory_usage_percent": self._get_memory_usage(),
             # LAN 位址與主機名（telemetry-only）：伺服器只看得到節點的對外／代理 IP，
             # 心跳裡沒有這兩項就無從得知該台 Pi 的 SSH 可達位址。讓儀表板顯示「找節點」。
-            "ip": self._get_local_ip(),
+            "ip": local_ip,
             "hostname": socket.gethostname(),
+            # 承載該 IP 之網卡的 MAC——讓儀表板能對照硬體清冊辨識實體機。
+            "mac": self._get_mac(local_ip),
         }
 
         # 發布
@@ -333,6 +336,29 @@ class MQTTClient:
                     s.close()
                 except Exception:
                     pass
+
+    def _get_mac(self, ip: Optional[str] = None) -> Optional[str]:
+        """回傳承載 `ip` 之網卡（即 LAN 介面）的 MAC，冒號分隔小寫，如
+        `dc:a6:32:2e:37:7f`；找不到或 psutil 不可用時回傳 None。絕不拋例外——
+        取不到 MAC 不得中斷心跳。用 IP 對應介面，才不會回報 VPN／回環等錯的網卡。
+        """
+        if not ip or not PSUTIL_AVAILABLE:
+            return None
+        try:
+            addrs = psutil.net_if_addrs()
+            target_iface = None
+            for iface, addr_list in addrs.items():
+                if any(a.family == socket.AF_INET and a.address == ip for a in addr_list):
+                    target_iface = iface
+                    break
+            if target_iface is None:
+                return None
+            for a in addrs[target_iface]:
+                if a.family == psutil.AF_LINK and a.address:
+                    return a.address.replace("-", ":").lower()
+        except Exception:
+            return None
+        return None
 
     def _get_cpu_temp(self) -> float:
         """

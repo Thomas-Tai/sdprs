@@ -265,6 +265,7 @@ class MQTTService:
                     # the latest heartbeat, not persisted (a stale IP has no value).
                     "ip": data.get("ip"),
                     "hostname": data.get("hostname"),
+                    "mac": data.get("mac"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
 

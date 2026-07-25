@@ -78,6 +78,7 @@ class NodeStatus(BaseModel):
     # / SSH to it). None until the first heartbeat carrying it.
     ip: Optional[str] = None
     hostname: Optional[str] = None
+    mac: Optional[str] = None
     buffer_health: Optional[str] = None
     visual_health: Optional[str] = None
     audio_health: Optional[str] = None
@@ -336,6 +337,7 @@ async def list_nodes(
             uptime_seconds=state.get("uptime_seconds"),
             ip=state.get("ip"),
             hostname=state.get("hostname"),
+            mac=state.get("mac"),
             buffer_health=state.get("buffer_health"),
             visual_health=state.get("visual_health"),
             audio_health=state.get("audio_health"),
@@ -658,6 +660,7 @@ async def get_node(
         uptime_seconds=state.get("uptime_seconds"),
         ip=state.get("ip"),
         hostname=state.get("hostname"),
+        mac=state.get("mac"),
         buffer_health=state.get("buffer_health"),
         visual_health=state.get("visual_health"),
         audio_health=state.get("audio_health"),

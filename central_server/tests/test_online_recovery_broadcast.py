@@ -99,11 +99,13 @@ def test_heartbeat_stores_ip_and_hostname(monkeypatch):
     svc = make_service()
 
     svc._handle_heartbeat("glass_node_01", json.dumps(
-        {"cpu_temp": 50.0, "ip": "172.16.37.42", "hostname": "sdprs-glass-01"}))
+        {"cpu_temp": 50.0, "ip": "172.16.37.42", "hostname": "sdprs-glass-01",
+         "mac": "dc:a6:32:2e:37:7f"}))
 
     st = svc.node_states["glass_node_01"]
     assert st["ip"] == "172.16.37.42"
     assert st["hostname"] == "sdprs-glass-01"
+    assert st["mac"] == "dc:a6:32:2e:37:7f"
 
 
 def test_heartbeat_without_ip_stores_none(monkeypatch):
@@ -118,6 +120,7 @@ def test_heartbeat_without_ip_stores_none(monkeypatch):
     st = svc.node_states["glass_node_01"]
     assert st["ip"] is None
     assert st["hostname"] is None
+    assert st["mac"] is None
 
 
 # ----- (a) first heartbeat from unknown node -> exactly one ONLINE broadcast -----

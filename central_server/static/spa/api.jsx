@@ -349,6 +349,7 @@
       // a heartbeat carries it.
       ip: n.ip || null,
       hostname: n.hostname || null,
+      mac: n.mac || null,
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
              : ss.bitrate != null ? ss.bitrate : 0,

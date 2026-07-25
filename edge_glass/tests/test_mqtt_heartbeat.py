@@ -116,3 +116,17 @@ class TestDetectorHealthTelemetry:
         client = _make_client()
         ip = client._get_local_ip()
         assert ip is None or (isinstance(ip, str) and ip.count(".") == 3)
+
+    def test_heartbeat_includes_mac(self):
+        """心跳帶入節點 MAC，讓儀表板能對照硬體清冊辨識實體機。"""
+        client = _make_client()
+        client._publish_heartbeat()
+        payload = json.loads(client._client.last_payload)
+        assert "mac" in payload
+
+    def test_get_mac_returns_colon_mac_or_none(self):
+        """_get_mac 回傳冒號分隔小寫 MAC，或 None（絕不拋例外）。"""
+        import re
+        client = _make_client()
+        mac = client._get_mac(client._get_local_ip())
+        assert mac is None or re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", mac)
