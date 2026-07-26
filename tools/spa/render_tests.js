@@ -766,6 +766,60 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------- components.jsx: SnapshotImage live self-refresh --------
+// Root cause 2026-07-26: the snapshot <img> URL was keyed only to
+// snapshotTimestamp, which advances on the ~20s /api/nodes poll — so a live
+// camera tile updated at ~0.1 fps even though the edge pushes 1 fps. Fix: a live
+// camera/webcam tile self-refreshes its <img> ~1/s (paused when hidden, cleared
+// on unmount) so the picture tracks the source rate. A pump and a
+// never-uploaded (frozen) tile must arm NO interval (scope guard).
+const TEST_SNAPSHOT_LIVE_REFRESH = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const intervals = [];
+    const origSetInterval = window.setInterval;
+    window.setInterval = function (fn, ms) { intervals.push({ fn: fn, ms: ms }); return origSetInterval.call(window, fn, ms); };
+    const ivMs = () => JSON.stringify(intervals.map(i => i.ms));
+    const imgSrc = () => { const im = container.querySelector('img'); return im ? im.getAttribute('src') : null; };
+    const render = (node) => ReactDOM.flushSync(() => root.render(React.createElement(SnapshotImage, { node })));
+
+    // --- a live camera tile self-refreshes ~1/s (tracks the edge's 1 fps upload,
+    //     not the ~20s node poll: the 0.1 fps bug) ---
+    render({ id: 'CAM-9', name: '西灣橋', type: 'camera', status: 'online', upload: 2, snapshotTimestamp: '2026-07-25T08:01:00Z' });
+    await settle();
+    const src0 = imgSrc();
+    A('a live camera tile renders the snapshot img', !!src0 && src0.indexOf('CAM-9/snapshot/latest') !== -1, src0);
+    const liveIv = intervals.find(i => i.ms >= 500 && i.ms <= 2000);
+    A('a ~1s self-refresh interval is armed for a live camera tile', !!liveIv, ivMs());
+
+    // firing the tick advances the img URL -> browser re-fetches the freshest frame
+    if (liveIv) { ReactDOM.flushSync(() => liveIv.fn()); }
+    const src1 = imgSrc();
+    A('firing the refresh tick changes the snapshot img URL', !!src1 && src1 !== src0, String(src0) + ' -> ' + String(src1));
+
+    // --- scope guard: a pump arms NO refresh interval ---
+    ReactDOM.flushSync(() => root.render(null));
+    intervals.length = 0;
+    render({ id: 'pump-9', name: '泵站', type: 'pump', status: 'online', upload: 2, snapshotTimestamp: '2026-07-25T08:01:00Z' });
+    await settle();
+    A('a pump arms no self-refresh interval', intervals.length === 0, ivMs());
+
+    // --- scope guard: a camera with no snapshot yet arms NO interval ---
+    ReactDOM.flushSync(() => root.render(null));
+    intervals.length = 0;
+    render({ id: 'CAM-cold', name: '停機', type: 'camera', status: 'online', upload: null, snapshotTimestamp: null });
+    await settle();
+    A('a camera with no snapshot yet arms no refresh interval', intervals.length === 0, ivMs());
+
+    window.setInterval = origSetInterval;
+  } catch (e) {
+    results.push({ name: 'snapshot live-refresh suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ------------------------------------ status.jsx: webcam columns (Task 5) ---
 // Step 0c headline-bug guard: a webcam row must not be rendered as a pump. Its
 // 類型 cell shows "Webcam" (never 「抽水站」), its 電源 cell is not "PoE", and its
@@ -1003,6 +1057,7 @@ const SUITES = [
   { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'Wall feed                   components.jsx (webcam snapshot)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_WEBCAM },
+  { name: 'Live refresh                components.jsx (snapshot 1fps)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_LIVE_REFRESH },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },
   { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },

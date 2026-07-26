@@ -261,6 +261,11 @@ const Pill = React.memo(({ tone = 'neutral', children, dot, pulse, className = '
 // Server encoding: picamera2's misnamed "RGB888" numpy array is already
 // B,G,R; the edge adapter passes it straight through to cv2.imencode.
 // If colours ever look magenta again, check edge_glass/utils/camera.py.
+// Live self-refresh cadence for camera snapshot tiles. Matches the edge's
+// snapshot.fps (1 fps) — going faster would only re-fetch identical frames and
+// waste bandwidth; going slower reintroduces the sluggish tile.
+const SNAPSHOT_REFRESH_MS = 1000;
+
 const SnapshotImage = ({ node, iconSize = 48 }) => {
   // Contract A: `upload` is `number | null`; null means no snapshot has ever
   // been received. `null > 60` is false, so a camera that has never uploaded
@@ -274,14 +279,31 @@ const SnapshotImage = ({ node, iconSize = 48 }) => {
   // tile on the fallback icon with no live frame. Mirror mapNode's `cameraLike`.
   const cameraLike = node.type === 'camera' || node.type === 'webcam';
   const wantsLiveImg = cameraLike && !frozen;
-  const src = `/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}`;
+  const [failedSrc, setFailedSrc] = useState(null);
+  // Live self-refresh: advance a local tick ~1/s so the browser re-fetches the
+  // freshest frame. Without it the <img> URL only changed on the ~20s /api/nodes
+  // poll (via snapshotTimestamp), capping a live tile at ~0.1 fps even though the
+  // edge pushes 1 fps (systematic-debug 2026-07-26). Gated to live camera/webcam
+  // tiles, paused while the tab is hidden (no wasted bandwidth on a background /
+  // NOC-wall tab), and cleared on unmount / when the tile stops being live.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!(wantsLiveImg && node.snapshotTimestamp)) return undefined;
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      setTick(t => (t + 1) % 1000000);
+    }, SNAPSHOT_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [wantsLiveImg, node.snapshotTimestamp, node.id]);
+  // Cache-buster: the edge's snapshotTimestamp (advances per uploaded frame) plus
+  // the local tick (~1/s while visible) — both change → the browser pulls a fresh
+  // frame each second, not just each node poll.
+  const src = `/api/edge/${node.id}/snapshot/latest?t=${node.snapshotTimestamp}_${tick}`;
   // CMP-F14: a snapshot fetch that 404s / times out / returns a truncated JPEG
   // used to leave the browser's broken-image glyph on the monitor wall, which
   // reads as "the camera is fine, the dashboard is broken". Remember which URL
-  // failed (not just a boolean) so the next pushed frame — a new
-  // snapshotTimestamp, hence a new URL — retries automatically instead of
-  // pinning the tile to the fallback until remount.
-  const [failedSrc, setFailedSrc] = useState(null);
+  // failed (not just a boolean) so the next frame — a new URL — retries
+  // automatically instead of pinning the tile to the fallback until remount.
   if (wantsLiveImg && node.snapshotTimestamp && failedSrc !== src) {
     return (
       <img
