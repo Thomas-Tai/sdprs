@@ -5,11 +5,14 @@ import signal
 
 from .config import load_config, save_config, is_first_run
 from .app_controller import AppController
+from .gui.notifier import notify_state
 from .gui.setup_wizard import run_setup_wizard
+from .gui.status_window import open_status_window, open_log_folder
 from .gui.tray_app import TrayApp
 from .logging_setup import setup_logging, add_secret
 from .single_instance import SingleInstance
-from .status import Health
+from .status import StatusHub, CONTROL_SOURCE
+from .strings import ALREADY_RUNNING, TRAY_TOOLTIP_PREFIX
 
 logger = logging.getLogger("webcam_client.main")
 
@@ -43,6 +46,93 @@ def _acquire_single_instance() -> bool:
 def _signal_handler(sig, frame):
     global _running
     _running = False
+
+
+def _handle_health(hub, tray) -> None:
+    """Repaint the tray from the hub's CURRENT state.
+
+    Deliberately re-reads hub.state rather than trusting a state carried on the
+    queue: several transitions can be enqueued before the loop drains them, and
+    painting a stale one would leave the light showing a state that has already
+    passed. The queue message is only a wake-up.
+    """
+    tray.set_health(hub.state)
+
+
+def _handle_notify(hub, icon) -> None:
+    notify_state(icon, hub.state)
+
+
+def _enabled_cameras(config) -> list:
+    """The cameras currently in play, read from the LIVE config.
+
+    Not the list captured at startup: an OPEN_SETTINGS edit can add or remove
+    cameras in-process, and a window whose whole purpose is telling the guard
+    the truth must not report a stale count.
+    """
+    return [c for c in (config or {}).get("cameras", []) if c.get("enabled", True)]
+
+
+def _camera_display_names(sources, cameras) -> list:
+    """Translate the hub's INTERNAL fault source keys into names a guard knows.
+
+    hub.faulty_sources() returns raw keys -- node_ids, plus the literal
+    CONTROL_SOURCE ("__control__") when the control channel is what is failing
+    -- while the status window joins the names it is given into a Chinese
+    sentence. Passing the keys through unchanged would show a security guard
+    "__control__", or a server-side UUID, in the middle of that sentence.
+
+    Two kinds of source are therefore dropped rather than rendered:
+
+    * CONTROL_SOURCE. It is not a camera, so listing it among camera names
+      would be a lie. Nothing is lost by dropping it: control_channel.py only
+      ever reports NO_SERVER or BAD_KEY, both of which outrank CAMERA_DOWN in
+      the hub's precedence, and CAMERA_DOWN's text is the ONLY one that
+      interpolates camera names at all. Whenever the control channel is at
+      fault the guard is reading "無法連線到伺服器" or "連線密碼已失效", whose
+      wording never mentions a camera -- so there is no sentence for it to be
+      missing from.
+    * A node_id with no camera in the config (a settings edit racing an
+      in-flight worker). The id itself is meaningless to the guard, so it is
+      dropped and logged for the technician instead.
+    """
+    by_id = {}
+    for cam in cameras:
+        node_id = cam.get("node_id")
+        if node_id:
+            by_id[node_id] = cam.get("name") or f"Webcam {cam.get('device_index')}"
+    names = []
+    for source in sources:
+        if source == CONTROL_SOURCE:
+            continue
+        name = by_id.get(source)
+        if name is None:
+            logger.debug("Fault reported by a source with no camera in config: %s",
+                         source)
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _handle_open_status(hub, controller, q) -> None:
+    """Open the guard-facing status window on the MAIN thread.
+
+    Guarded like OPEN_SETTINGS: a Tk failure here must cost the guard a window,
+    never the dispatch loop that keeps the cameras uploading.
+    """
+    cameras = _enabled_cameras(controller.config)
+    try:
+        open_status_window(
+            hub.state,
+            camera_count=len(cameras),
+            faulty_names=_camera_display_names(hub.faulty_sources(), cameras),
+            on_open_logs=open_log_folder,
+            on_reconnect=lambda: controller.apply(controller.config),
+            on_settings=lambda: q.put("OPEN_SETTINGS"),
+        )
+    except Exception:
+        logger.exception("Unexpected error opening the status window")
 
 
 def _handle_request(req, controller, settings_fn) -> bool:
@@ -117,7 +207,7 @@ def main():
         logger.info("Another instance is already running; exiting")
         try:
             from tkinter import messagebox
-            messagebox.showinfo("SDPRS 監控", "SDPRS 監控已在執行中。")
+            messagebox.showinfo(TRAY_TOOLTIP_PREFIX, ALREADY_RUNNING)
         except Exception:
             pass
         return
@@ -140,11 +230,19 @@ def main():
         logger.error("No cameras configured")
         return
 
-    controller = AppController(config)
-
+    # The queue must exist BEFORE the hub, because the hub's callbacks enqueue
+    # onto it -- and they fire from worker threads, inside the hub's lock.
+    # Workers never touch Tk or pystray; every UI action happens on this
+    # thread, in the dispatch loop below.
     q: "queue.Queue[str]" = queue.Queue()
+    hub = StatusHub(on_change=lambda state: q.put("HEALTH"),
+                    on_notify=lambda state: q.put("NOTIFY"))
+
+    controller = AppController(config, status_hub=hub)
+
     tray = TrayApp(
         on_open_settings=lambda: q.put("OPEN_SETTINGS"),
+        on_open_status=lambda: q.put("OPEN_STATUS"),
         on_quit=lambda: q.put("QUIT"),
         on_pause=controller.pause_all,
         on_resume=controller.resume_all,
@@ -153,10 +251,10 @@ def main():
     # camera (0.5-2s apiece). Show the icon first, then do the slow work.
     # AppController.__init__ touches no hardware, so building it above is free.
     tray.start()
-    # Task 6 wires real StatusHub health into the tray; nothing has reported
-    # yet at this point in startup, so STARTING (grey) is the honest state --
-    # NOT the old hardcoded "connected=True" (always green) lie.
-    tray.set_health(Health.STARTING)
+    # Nothing has reported yet at this point in startup, so the hub is still
+    # STARTING (grey) -- the honest state, NOT the old hardcoded
+    # "connected=True" (always green) lie.
+    tray.set_health(hub.state)
     _close_splash()
 
     controller.start_engines()
@@ -167,6 +265,18 @@ def main():
         try:
             req = q.get(timeout=1.0)
         except queue.Empty:
+            # The 1s idle tick is what promotes a sustained fault into a toast.
+            # No extra thread or timer is needed -- this loop already wakes here.
+            hub.tick()
+            continue
+        if req == "HEALTH":
+            _handle_health(hub, tray)
+            continue
+        if req == "NOTIFY":
+            _handle_notify(hub, tray.icon)
+            continue
+        if req == "OPEN_STATUS":
+            _handle_open_status(hub, controller, q)
             continue
         running = _handle_request(
             req, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"))

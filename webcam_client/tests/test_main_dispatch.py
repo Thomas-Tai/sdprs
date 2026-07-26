@@ -186,7 +186,9 @@ def test_main_proceeds_when_setup_logging_raises(monkeypatch):
     order = []
 
     class FakeCtrl:
-        def __init__(self, cfg):
+        # **kw absorbs status_hub= (main() now hands the controller the hub so
+        # its workers can report faults).
+        def __init__(self, cfg, **kw):
             self._config = cfg
 
         @property
@@ -256,7 +258,8 @@ def test_tray_starts_before_engines(monkeypatch):
     order = []
 
     class FakeCtrl:
-        def __init__(self, cfg):
+        # **kw absorbs status_hub= (see the note in the test above).
+        def __init__(self, cfg, **kw):
             self._config = cfg
 
         @property
@@ -294,3 +297,359 @@ def test_tray_starts_before_engines(monkeypatch):
 
     m.main()
     assert order == ["tray", "engines"], f"got {order}"
+
+
+# --------------------------------------------------------------------------
+# Task 6: StatusHub wired into the dispatch loop
+# --------------------------------------------------------------------------
+
+class _FakeCtrl:
+    """AppController stand-in for the tests below that run main() end-to-end."""
+
+    def __init__(self, cfg, **kw):
+        self._config = cfg
+        self.status_hub = kw.get("status_hub")
+        self.applied = []
+        self.on_start_engines = None
+
+    @property
+    def config(self):
+        return self._config
+
+    def start_engines(self):
+        if self.on_start_engines is not None:
+            self.on_start_engines()
+
+    def stop_engines(self): pass
+    def apply(self, cfg): self.applied.append(cfg)
+    def shutdown(self): pass
+    def pause_all(self): pass
+    def resume_all(self): pass
+
+
+def _boot(monkeypatch, m, tray_cls, cameras=None, on_start_engines=None):
+    """Stub everything main() touches before its dispatch loop, so a test can
+    drive the loop itself. Returns a dict that gains "ctrl" once main() builds
+    the controller."""
+    made = {}
+    monkeypatch.setattr(m, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_acquire_single_instance", lambda: True)
+    monkeypatch.setattr(m, "is_first_run", lambda: False)
+    monkeypatch.setattr(m, "add_secret", lambda s: None)
+    monkeypatch.setattr(m, "_close_splash", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": cameras if cameras is not None else [
+            {"device_index": 0, "enabled": True,
+             "node_id": "n1", "name": "前門攝影機"}]})
+
+    def ctrl_factory(cfg, **kw):
+        ctrl = _FakeCtrl(cfg, **kw)
+        ctrl.on_start_engines = on_start_engines
+        made["ctrl"] = ctrl
+        return ctrl
+
+    monkeypatch.setattr(m, "AppController", ctrl_factory)
+    monkeypatch.setattr(m, "TrayApp", tray_cls)
+    # The loop reads this module global every iteration; set it through
+    # monkeypatch so a test may flip it to False and still have it restored.
+    monkeypatch.setattr(m, "_running", True)
+    return made
+
+
+def test_health_message_repaints_the_tray(monkeypatch):
+    """Workers only enqueue; the tray is repainted on the MAIN thread."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Fault, Health
+
+    hub = StatusHub()
+    painted = []
+
+    class FakeTray:
+        def set_health(self, state):
+            painted.append(state)
+
+    hub.report("n1", Fault.BAD_KEY)
+    m._handle_health(hub, FakeTray())
+    assert painted == [Health.BAD_KEY]
+
+
+def test_notify_message_toasts_current_state(monkeypatch):
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Fault, Health
+
+    sent = []
+    monkeypatch.setattr(m, "notify_state",
+                        lambda icon, state: sent.append(state) or True)
+    hub = StatusHub()
+    hub.report("n1", Fault.NO_SERVER)
+    m._handle_notify(hub, object())
+    assert sent == [Health.NO_SERVER]
+
+
+def test_camera_display_names_maps_node_ids_to_names():
+    """hub.faulty_sources() speaks in node_ids; the guard speaks in the camera
+    names they typed in the settings window."""
+    import webcam_client.main as m
+
+    cams = [{"node_id": "n1", "name": "前門攝影機", "device_index": 0},
+            {"node_id": "n2", "device_index": 3}]
+    assert m._camera_display_names(["n1"], cams) == ["前門攝影機"]
+    # A camera saved without a name falls back to the same default the wizard
+    # shows the operator, so the two windows agree on what it is called.
+    assert m._camera_display_names(["n2"], cams) == ["Webcam 3"]
+    assert m._camera_display_names(["n1", "n2"], cams) == ["前門攝影機", "Webcam 3"]
+
+
+def test_control_source_never_reaches_the_operator():
+    """hub.faulty_sources() returns raw KEYS -- node_ids plus the literal
+    "__control__" -- while build_status_lines takes DISPLAY names and joins
+    them into a Chinese sentence. Passing the keys straight through would put
+    "__control__" in front of a security guard.
+
+    The control channel is not a camera, so it is dropped here. Nothing is lost:
+    control_channel.py only ever reports NO_SERVER or BAD_KEY, both of which
+    outrank CAMERA_DOWN in the hub's precedence, and CAMERA_DOWN's text is the
+    only one that interpolates camera names at all."""
+    import webcam_client.main as m
+    from webcam_client.status import CONTROL_SOURCE, Health
+    from webcam_client.gui.status_window import build_status_lines
+
+    cams = [{"node_id": "n1", "name": "前門攝影機", "device_index": 0}]
+    names = m._camera_display_names([CONTROL_SOURCE, "n1"], cams)
+    assert CONTROL_SOURCE not in names
+    assert names == ["前門攝影機"]
+
+    for state in Health:
+        joined = " ".join(build_status_lines(state, 1, names))
+        assert "__control__" not in joined
+        assert "_" not in joined, f"an internal token leaked: {joined!r}"
+
+    # ...and when the control channel is the ONLY thing failing, the guard gets
+    # a clean sentence rather than an empty subject.
+    alone = m._camera_display_names([CONTROL_SOURCE], cams)
+    assert alone == []
+    for state in Health:
+        joined = " ".join(build_status_lines(state, 1, alone))
+        assert "__control__" not in joined and "_" not in joined
+
+
+def test_a_fault_source_with_no_camera_is_never_shown_raw():
+    """node_ids are server-side identifiers. If a fault arrives for a camera
+    that is no longer in the config (a settings edit racing an in-flight
+    worker), drop it -- never print the id at a guard."""
+    import webcam_client.main as m
+
+    names = m._camera_display_names(
+        ["8f3c9a12-not-in-config"],
+        [{"node_id": "n1", "name": "前門攝影機", "device_index": 0}])
+    assert names == []
+
+
+def test_enabled_cameras_are_read_from_the_live_config():
+    """The count in the window must come from the CURRENT config, not from the
+    list captured at startup: after a settings edit the startup list is stale
+    and the window would tell the guard the wrong number of cameras."""
+    import webcam_client.main as m
+
+    cfg = {"cameras": [{"node_id": "a", "enabled": True},
+                       {"node_id": "b", "enabled": False},
+                       {"node_id": "c"}]}
+    assert [c["node_id"] for c in m._enabled_cameras(cfg)] == ["a", "c"]
+    assert m._enabled_cameras({}) == []
+
+
+def test_tray_open_status_menu_reaches_the_status_window(monkeypatch):
+    """Task 4 gave TrayApp.on_open_status a no-op default and NO test exercised
+    the menu/double-click path. Had main() forgotten to pass a real callback,
+    the status window would have been unreachable -- no error, no log line, a
+    silently dead feature. This drives the whole path: the tray callback (fired
+    by pystray on ITS OWN daemon thread) may only enqueue, and the MAIN loop is
+    what opens the window."""
+    import webcam_client.main as m
+
+    opened = []
+    monkeypatch.setattr(m, "open_status_window",
+                        lambda state, **kw: opened.append((state, kw)))
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            self._kw = kw
+
+        def start(self):
+            # the guard clicking 監控狀態 in the tray menu, then 離開
+            self._kw["on_open_status"]()
+            self._kw["on_quit"]()
+
+        def set_health(self, state):
+            pass
+
+    _boot(monkeypatch, m, FakeTray)
+    m.main()
+
+    assert opened, "the tray's 監控狀態 callback never reached open_status_window"
+    _, kw = opened[0]
+    assert kw["camera_count"] == 1
+    assert kw["faulty_names"] == []
+    for name in ("on_open_logs", "on_reconnect", "on_settings"):
+        assert callable(kw[name]), f"the {name} button is wired to nothing"
+
+
+def test_status_window_reconnect_button_rebuilds_engines(monkeypatch):
+    """重新連線 must be the same in-process rebuild the OPEN_SETTINGS error path
+    uses -- not a restart the guard has to perform by hand."""
+    import webcam_client.main as m
+
+    captured = {}
+    monkeypatch.setattr(m, "open_status_window",
+                        lambda state, **kw: captured.update(kw))
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            self._kw = kw
+
+        def start(self):
+            self._kw["on_open_status"]()
+            self._kw["on_quit"]()
+
+        def set_health(self, state):
+            pass
+
+    made = _boot(monkeypatch, m, FakeTray)
+    m.main()
+    captured["on_reconnect"]()
+    assert made["ctrl"].applied == [made["ctrl"].config]
+
+
+def test_a_worker_fault_repaints_the_tray_from_the_main_loop(monkeypatch):
+    """End to end: the hub's on_change fires INSIDE the hub's lock on the
+    WORKER's thread, so it may only enqueue -- the repaint has to happen on the
+    dispatch loop. Drops the fault after startup's first paint so the assertion
+    cannot be satisfied by that initial set_health() alone."""
+    import webcam_client.main as m
+    from webcam_client.status import Fault, Health
+
+    made = {}
+    real_hub_cls = m.StatusHub
+
+    def hub_factory(**kw):
+        made["hub"] = real_hub_cls(**kw)
+        return made["hub"]
+
+    monkeypatch.setattr(m, "StatusHub", hub_factory)
+    painted = []
+    tray_kw = {}
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            tray_kw.update(kw)
+
+        def start(self):
+            pass
+
+        def set_health(self, state):
+            painted.append(state)
+
+    def a_camera_fails():
+        # start_engines() runs AFTER the tray's first paint, which is exactly
+        # where a real worker would first report.
+        made["hub"].report("n1", Fault.CAMERA_DOWN)
+        tray_kw["on_quit"]()
+
+    _boot(monkeypatch, m, FakeTray, on_start_engines=a_camera_fails)
+    m.main()
+
+    assert painted == [Health.STARTING, Health.CAMERA_DOWN], \
+        f"the loop did not repaint the tray from the hub: {painted}"
+
+
+def test_the_idle_loop_ticks_the_hub(monkeypatch):
+    """hub.tick() is what promotes a sustained fault into a toast, and NOTHING
+    else calls it -- there is no timer thread. If the queue.Empty branch drops
+    it, every notification in the app silently stops working."""
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    ticks = []
+
+    class FakeHub:
+        def __init__(self, **kw):
+            self.state = Health.STARTING
+
+        def faulty_sources(self):
+            return []
+
+        def report(self, source, fault): pass
+        def set_paused(self, paused): pass
+        def clear_all(self): pass
+
+        def tick(self):
+            ticks.append(True)
+            m._running = False      # restored by _boot's monkeypatch.setattr
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw): pass
+        def start(self): pass
+        def set_health(self, state): pass
+
+    monkeypatch.setattr(m, "StatusHub", FakeHub)
+    _boot(monkeypatch, m, FakeTray)
+    m.main()
+    assert ticks, "the idle dispatch loop never called hub.tick()"
+
+
+def test_hub_callbacks_only_enqueue(monkeypatch):
+    """The hub invokes on_change/on_notify while HOLDING its lock, from worker
+    threads. Anything more than a q.put() there re-enters the hub or touches Tk
+    off the main thread -- the exact bug class this design exists to prevent."""
+    import queue
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    captured = {}
+
+    class FakeHub:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.state = Health.STARTING
+
+        def faulty_sources(self): return []
+        def report(self, source, fault): pass
+        def set_paused(self, paused): pass
+        def clear_all(self): pass
+
+        def tick(self):
+            m._running = False
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw): pass
+        def start(self): pass
+        def set_health(self, state): pass
+
+    puts = []
+
+    class RecordingQueue(queue.Queue):
+        def put(self, item, *a, **kw):
+            puts.append(item)
+            super().put(item, *a, **kw)
+
+    monkeypatch.setattr(m.queue, "Queue", RecordingQueue)
+    monkeypatch.setattr(m, "StatusHub", FakeHub)
+    _boot(monkeypatch, m, FakeTray)
+    m.main()
+
+    assert callable(captured.get("on_change")) and callable(captured.get("on_notify"))
+    captured["on_change"](Health.BAD_KEY)
+    assert puts[-1] == "HEALTH", "on_change must ONLY enqueue"
+    captured["on_notify"](Health.BAD_KEY)
+    assert puts[-1] == "NOTIFY", "on_notify must ONLY enqueue"

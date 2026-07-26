@@ -69,6 +69,18 @@ class TrayApp:
         self._paused = False
         self._state: Health = Health.STARTING
 
+    @property
+    def icon(self):
+        """The underlying pystray icon, or None before start() has run.
+
+        The toast notifier sends through this object (pystray._win32.Icon has
+        HAS_NOTIFICATION = True), so it needs a way to reach it. Read-only on
+        purpose: the icon's lifecycle belongs to start()/stop(). notify_state()
+        already treats None as "no toast channel yet", which is the honest
+        answer during the startup window before the tray exists.
+        """
+        return self._icon
+
     def _refresh_icon(self) -> None:
         if self._icon and TRAY_AVAILABLE:
             self._icon.icon = _create_icon(_health_color(self._state))
