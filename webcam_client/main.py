@@ -7,12 +7,36 @@ from .config import load_config, save_config, is_first_run
 from .app_controller import AppController
 from .gui.setup_wizard import run_setup_wizard
 from .gui.tray_app import TrayApp
+from .logging_setup import setup_logging, add_secret
+from .single_instance import SingleInstance
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("webcam_client.main")
 
 _running = True
+_splash_closed = False
+_instance = SingleInstance()
+
+
+def _close_splash() -> None:
+    """Dismiss the PyInstaller splash once real UI is up. Idempotent.
+
+    pyi_splash is injected ONLY into a frozen build that declared a Splash, so
+    the import failing is the normal dev case, not an error.
+    """
+    global _splash_closed
+    if _splash_closed:
+        return
+    _splash_closed = True
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
+def _acquire_single_instance() -> bool:
+    """False when another copy already owns the slot."""
+    return _instance.acquire()
 
 
 def _signal_handler(sig, frame):
@@ -60,14 +84,29 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    if not _acquire_single_instance():
+        _close_splash()
+        logger.info("Another instance is already running; exiting")
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo("SDPRS 監控", "SDPRS 監控已在執行中。")
+        except Exception:
+            pass
+        return
+
+    setup_logging()
+
     config = load_config()
+    add_secret(config.get("api_key", ""))
     if is_first_run() or not config.get("server_url"):
+        _close_splash()                    # wizard is the first real UI
         new_config = run_setup_wizard(config, mode="first-run")
         if new_config is None:
             logger.info("Setup cancelled, exiting")
             return
         config = new_config
         save_config(config)
+        add_secret(config.get("api_key", ""))
 
     enabled = [c for c in config.get("cameras", []) if c.get("enabled", True)]
     if not enabled:
@@ -75,7 +114,6 @@ def main():
         return
 
     controller = AppController(config)
-    controller.start_engines()
 
     q: "queue.Queue[str]" = queue.Queue()
     tray = TrayApp(
@@ -84,8 +122,14 @@ def main():
         on_pause=controller.pause_all,
         on_resume=controller.resume_all,
     )
+    # S6: the tray icon is the ONLY sign of life, and start_engines() opens each
+    # camera (0.5-2s apiece). Show the icon first, then do the slow work.
+    # AppController.__init__ touches no hardware, so building it above is free.
     tray.start()
     tray.set_status(True)
+    _close_splash()
+
+    controller.start_engines()
     logger.info(f"SDPRS Webcam Client running ({len(enabled)} cameras)")
 
     running = True
