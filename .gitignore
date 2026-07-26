@@ -183,4 +183,8 @@ docs/ui_redesign_v2_prompt.md
 # a deliverable). Scoped to brainstorm/ only — .superpowers/sdd/
 # briefs stay visible in `git status`.
 # ------------------------------------------------------------
-.superpowers/brainstorm/
+.superpowers/
+# ^ whole tree: brainstorm/ holds visual-companion mockups and sdd/ holds
+# subagent-driven-development ledgers, briefs and review packages. Both are
+# session scratch, and leaving them untracked-but-visible makes `git add -A`
+# liable to sweep them into a commit.
