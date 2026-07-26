@@ -113,3 +113,27 @@ def test_rotation_is_configured(monkeypatch, tmp_path):
     handler = ls.setup_logging()
     assert handler.maxBytes == ls.MAX_BYTES
     assert handler.backupCount == ls.BACKUP_COUNT
+
+
+def test_httpx_info_chatter_does_not_reach_the_log(monkeypatch, tmp_path):
+    # httpx emits one INFO record per HTTP request, which propagates to root
+    # and into the file handler now that basicConfig() (stdout, discarded
+    # under console=False) is gone. The ring (MAX_BYTES x BACKUP_COUNT) is
+    # sized against the CLIENT's own ~1Hz failure warnings (see comment at
+    # top of module) -- with 2 cameras pushing at ~1Hz plus command polling,
+    # httpx's per-request INFO noise alone drains the ring in 1-10 hours on
+    # the HEALTHY path, evicting the diagnostic line an operator needs before
+    # anyone reads it. httpx (and httpcore) must be quieted to WARNING so
+    # only the client's own diagnostics occupy the ring, while a genuine
+    # httpx WARNING (or the client's own INFO) must still get through.
+    logfile = _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    logging.getLogger("httpx").info('HTTP Request: POST /snapshot "200 OK"')
+    logging.getLogger("httpx").warning("httpx real problem")
+    logging.getLogger("webcam_client.test").info("client's own info survives")
+    handler.flush()
+    body = logfile.read_text(encoding="utf-8")
+    assert "HTTP Request" not in body, "httpx INFO chatter must not reach the log file"
+    assert "httpx real problem" in body, "an httpx WARNING must still reach the log file"
+    assert "client's own info survives" in body, \
+        "the client's own INFO records must still reach the log file"

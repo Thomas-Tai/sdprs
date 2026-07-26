@@ -111,6 +111,16 @@ def setup_logging(level=logging.INFO):
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(handler)
+    # The ring above is sized against THIS CLIENT's own ~1Hz failure warnings
+    # (see MAX_BYTES/BACKUP_COUNT comment). httpx emits one INFO record per
+    # HTTP request and propagates to root; before this branch that landed in
+    # basicConfig()'s stdout handler, which console=False silently discards.
+    # Now it reaches this file handler too, and with 2 cameras pushing at
+    # ~1Hz plus command polling, that per-request noise alone drains the
+    # ring in 1-10 hours ON THE HEALTHY PATH -- evicting the one diagnostic
+    # line an operator needs before anyone reads it. Quiet it at the source.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     _handler = handler
     return handler
 
