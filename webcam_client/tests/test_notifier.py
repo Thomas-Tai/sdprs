@@ -42,3 +42,43 @@ def test_backend_failure_is_swallowed():
 
 def test_missing_icon_is_safe():
     assert notify_state(None, Health.NO_SERVER) is False
+
+
+# --------------------------------------------------------------------------
+# Ledger row 11: the two untested paths.
+# --------------------------------------------------------------------------
+
+def test_a_healthy_state_toasts_without_an_action_line():
+    """This is the path EVERY recovery toast takes -- the most frequent toast
+    in normal operation -- and nothing drove it. Healthy states carry an empty
+    action, so notify_state must send the detail alone rather than gluing a
+    bare newline onto the end of the message."""
+    icon = FakeIcon()
+    assert notify_state(icon, Health.RUNNING) is True
+    title, message = icon.calls[0]
+    assert "監控中" in title
+    assert "運作正常" in message
+    assert message == message.strip(), \
+        f"an empty action leaked a dangling separator into the toast: {message!r}"
+    assert "\n" not in message, "a healthy state has no action line to append"
+
+
+def test_paused_toasts_its_action():
+    """PAUSED is healthy but DOES carry an action (how to resume), so the
+    separator logic must still join the two halves for it."""
+    icon = FakeIcon()
+    assert notify_state(icon, Health.PAUSED) is True
+    _, message = icon.calls[0]
+    assert "恢復推送" in message
+
+
+def test_an_object_without_notify_is_not_a_toast_channel():
+    """The None check is not enough on its own: TrayApp.icon is a pystray Icon
+    only on Windows, and the guard clause exists precisely because some backends
+    expose no notify(). A non-None object lacking it must return False, not
+    raise AttributeError into the dispatch loop."""
+    class NotAToastChannel:
+        pass
+
+    assert notify_state(NotAToastChannel(), Health.NO_SERVER) is False
+    assert notify_state(object(), Health.CAMERA_DOWN) is False

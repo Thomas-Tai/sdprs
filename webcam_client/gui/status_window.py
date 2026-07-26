@@ -22,7 +22,7 @@ from tkinter import ttk
 
 from ..logging_setup import get_log_dir
 from ..strings import (describe, WINDOW_TITLE, BTN_OPEN_LOGS, BTN_RECONNECT,
-                       BTN_SETTINGS)
+                       BTN_SETTINGS, LOG_FOLDER_FAILED)
 from .tray_app import _health_color
 
 logger = logging.getLogger("webcam_client.gui.status_window")
@@ -63,12 +63,33 @@ def build_status_lines(state, camera_count, faulty_names):
                     camera_names=names or None)
 
 
+def _warn_log_folder_failed() -> None:
+    """Tell the guard the 開啟記錄 button could not do its job.
+
+    Without this the button is simply inert: nothing opens, nothing is said,
+    and the guard -- who is pressing it because a technician on the phone asked
+    them to -- has no idea whether they mis-clicked, whether it is still
+    loading, or whether the app is broken. The log line this failure already
+    wrote goes to the very folder that would not open, so it reaches nobody.
+
+    Itself best-effort: if the dialog cannot be shown either, there is nothing
+    further to try and the caller must still return normally.
+    """
+    try:
+        from tkinter import messagebox
+        messagebox.showwarning(WINDOW_TITLE, LOG_FOLDER_FAILED)
+    except Exception:
+        logger.warning("Could not show the log-folder failure dialog",
+                       exc_info=True)
+
+
 def open_log_folder() -> bool:
     """Open the log directory in Explorer for whoever the guard phoned.
 
     Best effort: os.startfile does not exist off Windows and raises when the
     shell has no handler. A technician convenience bolted onto a guard-facing
-    button must never take the window (or the dispatch loop) down with it.
+    button must never take the window (or the dispatch loop) down with it --
+    but it must not fail SILENTLY either, hence the dialog.
     """
     try:
         path = get_log_dir()
@@ -77,6 +98,7 @@ def open_log_folder() -> bool:
         return True
     except Exception:
         logger.warning("Could not open the log folder", exc_info=True)
+        _warn_log_folder_failed()
         return False
 
 

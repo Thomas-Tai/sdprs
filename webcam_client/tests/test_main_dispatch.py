@@ -374,17 +374,148 @@ def test_health_message_repaints_the_tray(monkeypatch):
     assert painted == [Health.BAD_KEY]
 
 
-def test_notify_message_toasts_current_state(monkeypatch):
+def test_notify_message_toasts_the_state_it_was_handed(monkeypatch):
+    """I-2: the toast announces the state carried ON THE TOKEN, not hub.state.
+
+    (This test previously drove _handle_notify(hub, icon) and asserted it
+    re-read hub.state -- i.e. it pinned the defective behaviour, which is why
+    the defect survived review. The state on the token is now the contract.)"""
     import webcam_client.main as m
-    from webcam_client.status import StatusHub, Fault, Health
+    from webcam_client.status import Health
 
     sent = []
     monkeypatch.setattr(m, "notify_state",
                         lambda icon, state: sent.append(state) or True)
-    hub = StatusHub()
-    hub.report("n1", Fault.NO_SERVER)
-    m._handle_notify(hub, object())
+    m._handle_notify(object(), Health.NO_SERVER)
     assert sent == [Health.NO_SERVER]
+
+
+def test_split_token_handles_both_token_shapes():
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    assert m._split_token("QUIT") == ("QUIT", None)
+    assert m._split_token("HEALTH") == ("HEALTH", None)
+    assert m._split_token(("NOTIFY", Health.BAD_KEY)) == ("NOTIFY", Health.BAD_KEY)
+
+
+# --------------------------------------------------------------------------
+# I-2: a matured notification must survive the trip through the queue.
+#
+# tick() decides WHICH state matured past the 30s debounce and latches
+# _notified to it at FIRE time, but the token used to be the bare string
+# "NOTIFY" -- so _handle_notify toasted whatever hub.state happened to be at
+# DRAIN time. The window is wide in practice: the status window and the
+# settings wizard both BLOCK this loop, so every transition that happens while
+# one is open accumulates and drains at once when it closes.
+#
+# The three cases below are the reviewer's probe, driving the real StatusHub
+# and the real _handle_notify with a fake clock.
+# --------------------------------------------------------------------------
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, secs):
+        self.now += secs
+
+
+def _matured_no_server(monkeypatch):
+    """Build a hub wired exactly as main() wires it, drive NO_SERVER past the
+    debounce and let tick() fire. Returns (hub, q, clock, toasts, drain)."""
+    import queue
+    import webcam_client.main as m
+    from webcam_client.status import (StatusHub, Fault, CONTROL_SOURCE,
+                                      NOTIFY_DEBOUNCE_SECONDS)
+
+    toasts = []
+    monkeypatch.setattr(m, "notify_state",
+                        lambda icon, state: toasts.append(state) or True)
+    clock = _FakeClock()
+    q = queue.Queue()
+    hub = StatusHub(on_change=lambda state: q.put("HEALTH"),
+                    on_notify=lambda state: q.put(("NOTIFY", state)),
+                    clock=clock)
+
+    def drain():
+        """What the dispatch loop does once the blocking window closes."""
+        while not q.empty():
+            name, payload = m._split_token(q.get_nowait())
+            if name == "NOTIFY":
+                m._handle_notify(None, payload)
+
+    hub.report(CONTROL_SOURCE, Fault.NO_SERVER)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()                      # NO_SERVER matured and fired
+    return hub, q, clock, toasts, drain
+
+
+def test_a_matured_notification_is_not_lost_when_recovery_beats_the_drain(monkeypatch):
+    """Case A. The server was down for 30+ seconds and came back while the
+    status window was open. Re-reading hub.state told the guard 監控中 TWICE
+    and never mentioned the outage -- the notification was simply lost."""
+    from webcam_client.status import Fault, Health, CONTROL_SOURCE
+
+    hub, q, clock, toasts, drain = _matured_no_server(monkeypatch)
+    hub.report(CONTROL_SOURCE, Fault.NONE)      # recovery, before the drain
+    drain()
+
+    assert toasts == [Health.NO_SERVER, Health.RUNNING], (
+        "the outage must still be announced, then the recovery -- not two "
+        f"identical 監控中 toasts: {toasts}")
+    assert hub.state is Health.RUNNING
+
+
+def test_a_new_fault_before_the_drain_does_not_bypass_the_debounce(monkeypatch):
+    """Case B. A DIFFERENT fault arrived before the drain. Re-reading hub.state
+    toasted CAMERA_DOWN 0 seconds after it began -- the exact "toast for a blip
+    shorter than the debounce" this design exists to prevent -- and then again
+    30s later, because _notified had been latched to the OLD state."""
+    from webcam_client.status import Fault, Health, CONTROL_SOURCE, NOTIFY_DEBOUNCE_SECONDS
+
+    hub, q, clock, toasts, drain = _matured_no_server(monkeypatch)
+    # Report the camera fault FIRST, while NO_SERVER still outranks it, so
+    # clearing the server fault steps straight from NO_SERVER to CAMERA_DOWN
+    # without passing through RUNNING -- one degradation, no recovery in it.
+    hub.report("n1", Fault.CAMERA_DOWN)
+    assert hub.state is Health.NO_SERVER, "precondition: NO_SERVER still outranks"
+    hub.report(CONTROL_SOURCE, Fault.NONE)      # now CAMERA_DOWN, 0s old
+    assert hub.state is Health.CAMERA_DOWN
+    drain()
+
+    assert toasts == [Health.NO_SERVER], (
+        f"CAMERA_DOWN started 0s ago and must not be toasted yet: {toasts}")
+
+    hub.tick()                                   # still inside its own debounce
+    drain()
+    assert toasts == [Health.NO_SERVER], "still inside CAMERA_DOWN's debounce"
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    drain()
+    assert toasts == [Health.NO_SERVER, Health.CAMERA_DOWN], \
+        f"CAMERA_DOWN must be announced exactly once, on its own clock: {toasts}"
+
+
+def test_a_matured_notification_survives_an_uneventful_drain(monkeypatch):
+    """Case C, the control: nothing changes between fire and drain, so the
+    behaviour is unchanged. Guards against a fix that breaks the common path."""
+    from webcam_client.status import Health, NOTIFY_DEBOUNCE_SECONDS
+
+    hub, q, clock, toasts, drain = _matured_no_server(monkeypatch)
+    drain()
+    assert toasts == [Health.NO_SERVER]
+
+    for _ in range(3):                           # ordinary idle ticks after it
+        clock.advance(NOTIFY_DEBOUNCE_SECONDS)
+        hub.tick()
+        drain()
+    assert toasts == [Health.NO_SERVER], \
+        f"a stable fault must be announced once, not forever: {toasts}"
 
 
 def test_camera_display_names_maps_node_ids_to_names():
@@ -455,8 +586,29 @@ def test_enabled_cameras_are_read_from_the_live_config():
     cfg = {"cameras": [{"node_id": "a", "enabled": True},
                        {"node_id": "b", "enabled": False},
                        {"node_id": "c"}]}
-    assert [c["node_id"] for c in m._enabled_cameras(cfg)] == ["a", "c"]
-    assert m._enabled_cameras({}) == []
+    assert [c["node_id"] for c in m.enabled_cameras(cfg)] == ["a", "c"]
+    assert m.enabled_cameras({}) == []
+    assert m.enabled_cameras(None) == []
+
+
+def test_main_and_the_controller_share_one_enabled_cameras_filter():
+    """m-1: this filter existed twice -- one copy decided which cameras RUN,
+    the other decided what the guard is TOLD. They agreed, but nothing made
+    them, so any divergence would make the status window lie about how many
+    cameras are being watched. Identity, not equality: two functions that
+    merely happen to behave the same today is the bug."""
+    import webcam_client.main as m
+    from webcam_client import app_controller
+
+    assert m.enabled_cameras is app_controller.enabled_cameras
+    assert not hasattr(m, "_enabled_cameras"), \
+        "main must not keep a private second copy of the filter"
+
+    cfg = {"cameras": [{"node_id": "a", "enabled": True},
+                       {"node_id": "b", "enabled": False}]}
+    ctrl = app_controller.AppController(cfg, engine_factory=lambda *a, **k: None,
+                                        control_factory=lambda *a, **k: None)
+    assert ctrl._enabled_cameras() == app_controller.enabled_cameras(cfg)
 
 
 def test_tray_open_status_menu_reaches_the_status_window(monkeypatch):
@@ -635,6 +787,89 @@ def test_the_reconnect_button_cannot_strand_the_guard(monkeypatch):
     assert made_hub["hub"].state is not Health.STARTING
 
 
+def test_a_failed_startup_never_leaves_the_light_claiming_startup(monkeypatch):
+    """m-3: startup's start_engines() was the one call site with no backstop.
+
+    Both rebuild paths already report CONTROL_SOURCE/NO_SERVER when they cannot
+    get engines running, so the light stops claiming the app is still starting.
+    Unguarded at startup, an exception leaves main() entirely: the traceback
+    goes to a sys.stderr that is None in the windowed build, so the guard sees
+    the tray icon appear and then vanish, with no log line and no dialog."""
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    made_hub = {}
+    real_hub_cls = m.StatusHub
+
+    def hub_factory(**kw):
+        made_hub["hub"] = real_hub_cls(**kw)
+        return made_hub["hub"]
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw): pass
+        def start(self): pass
+        def set_health(self, state): pass
+
+    class ExplodingCtrl:
+        def __init__(self, cfg, **kw):
+            self._config = cfg
+
+        @property
+        def config(self):
+            return self._config
+
+        def start_engines(self):
+            raise RuntimeError("camera 0 will not open")
+
+        def apply(self, cfg):
+            raise RuntimeError("camera 0 still will not open")
+
+        def stop_engines(self): pass
+        def shutdown(self): pass
+        def pause_all(self): pass
+        def resume_all(self): pass
+
+    _boot(monkeypatch, m, FakeTray)
+    monkeypatch.setattr(m, "StatusHub", hub_factory)
+    monkeypatch.setattr(m, "AppController", ExplodingCtrl)
+    monkeypatch.setattr(m, "_running", False)   # skip the dispatch loop
+
+    m.main()      # must not raise: the exception must never leave main()
+
+    assert made_hub["hub"].state is not Health.STARTING, \
+        "the tray would sit grey on 啟動中 forever, with no toast to correct it"
+
+
+def test_a_successful_startup_does_not_invent_a_fault(monkeypatch):
+    """The m-3 backstop must not fire on the happy path."""
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    made_hub = {}
+    real_hub_cls = m.StatusHub
+
+    def hub_factory(**kw):
+        made_hub["hub"] = real_hub_cls(**kw)
+        return made_hub["hub"]
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw): pass
+        def start(self): pass
+        def set_health(self, state): pass
+
+    _boot(monkeypatch, m, FakeTray)
+    monkeypatch.setattr(m, "StatusHub", hub_factory)
+    monkeypatch.setattr(m, "_running", False)
+
+    m.main()
+    assert made_hub["hub"].faulty_sources() == []
+    assert made_hub["hub"].state is Health.STARTING
+
+
 def test_open_settings_recovery_failure_also_reports_to_the_hub():
     """The OPEN_SETTINGS error path strands the hub the same way (it too ends
     in stop_engines() -> clear_all()), so it shares the same helper."""
@@ -783,5 +1018,10 @@ def test_hub_callbacks_only_enqueue(monkeypatch):
     assert callable(captured.get("on_change")) and callable(captured.get("on_notify"))
     captured["on_change"](Health.BAD_KEY)
     assert puts[-1] == "HEALTH", "on_change must ONLY enqueue"
+    # I-2: on_notify still ONLY enqueues -- the load-bearing invariant is
+    # untouched -- but the token now CARRIES the state, because the state that
+    # matured cannot be recovered at drain time. Assert both halves: the
+    # payload is there, and nothing but a put() happened.
     captured["on_notify"](Health.BAD_KEY)
-    assert puts[-1] == "NOTIFY", "on_notify must ONLY enqueue"
+    assert puts[-1] == ("NOTIFY", Health.BAD_KEY), \
+        "on_notify must ONLY enqueue, and must carry the state that matured"

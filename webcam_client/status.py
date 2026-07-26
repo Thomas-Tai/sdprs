@@ -137,6 +137,20 @@ class StatusHub:
         self._state = new
         self._state_since = self._clock()
         self._on_change(new)
+        # PAUSED is in _HEALTHY (uploads are intentionally stopped, so no fault
+        # can be "occurring"), but it is NOT a recovery: it is the guard's own
+        # click. Toasting 已暫停上傳 back at them is unsolicited, and when a
+        # fault was live at the moment they paused it reads as "problem solved"
+        # while the problem is still there.
+        #
+        # Returning here rather than merely suppressing the toast deliberately
+        # leaves _notified untouched, which is what makes the resume side
+        # correct too: a fault that SURVIVES the pause is still the last thing
+        # _notified holds, so tick() will not re-announce it on resume; a fault
+        # that CLEARED during the pause leaves _notified on that fault, so the
+        # RUNNING transition on resume is still seen as a recovery and toasts.
+        if new is Health.PAUSED:
+            return
         # Recovery is NOT debounced: the operator should learn at once that the
         # problem cleared. Degradation waits for tick() so a blip stays silent.
         #

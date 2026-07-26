@@ -51,6 +51,24 @@ def test_health_colors_cover_every_state():
         assert _health_color(state) in {"green", "red", "amber", "grey"}
 
 
+def test_every_health_state_has_an_explicit_colour_entry():
+    """Ledger rows 7+8 / m-5: _health_color() ends in .get(state, "grey"), and
+    grey is the STARTING colour. A Health member added with no _HEALTH_COLORS
+    entry therefore paints the tray "still starting up" forever -- the exact
+    silent lie this whole branch exists to remove -- while every existing
+    assertion stays green, because they only check that the result is SOME
+    valid colour and grey always is one.
+
+    Pin the table itself, in both directions: no state without a colour, and no
+    colour entry for a state that no longer exists."""
+    from webcam_client.gui.tray_app import _HEALTH_COLORS
+    from webcam_client.status import Health
+
+    assert set(_HEALTH_COLORS) == set(Health), (
+        "every Health state needs an explicit colour; the .get() fallback "
+        "would silently paint a new state grey (= 啟動中) forever")
+
+
 def test_faults_are_red_and_paused_is_amber():
     from webcam_client.gui.tray_app import _health_color
     from webcam_client.status import Health
@@ -60,11 +78,15 @@ def test_faults_are_red_and_paused_is_amber():
         assert _health_color(bad) == "red", f"{bad} must be red"
 
 
-def test_starting_is_not_green():
-    """Green before anything has reported is the original lie."""
+def test_starting_is_grey():
+    """Green before anything has reported is the original lie.
+
+    Asserted positively (== "grey") rather than as != "green": the negative
+    form is also satisfied by the .get() fallback, so it could not tell a
+    deliberate grey from a missing table entry."""
     from webcam_client.gui.tray_app import _health_color
     from webcam_client.status import Health
-    assert _health_color(Health.STARTING) != "green"
+    assert _health_color(Health.STARTING) == "grey"
 
 
 def test_set_status_is_gone():

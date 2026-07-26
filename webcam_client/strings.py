@@ -22,6 +22,13 @@ BTN_OPEN_LOGS = "開啟記錄"
 BTN_RECONNECT = "重新連線"
 BTN_SETTINGS = "設定"
 
+# Shown when 開啟記錄 cannot hand the folder to the shell. The guard pressing
+# this button is almost always already on the phone with a technician who asked
+# for it, so a button that silently does nothing leaves them with nothing to
+# say. No path is quoted here: a filesystem path is developer text, and the
+# technician can be told where the folder is by other means.
+LOG_FOLDER_FAILED = "無法開啟記錄資料夾，請通知管理員。"
+
 # state value -> (title, detail template, action). Templates use str.format;
 # describe() supplies defaults so a missing key can never raise.
 _TEXT = {
@@ -45,15 +52,31 @@ _TEXT = {
         "畫面目前無法上傳。",
         "請檢查網路連線是否正常；若網路正常仍無法連線，請通知管理員。",
     ),
+    # Both of the actions below NAME the 重新連線 button on purpose.
+    #
+    # A worker that hits either of these faults STOPS: open_camera() returning
+    # None ends the push engine's thread, and a rejected key stops the control
+    # channel. So the physical fix -- re-seating the USB cable, or the
+    # administrator resetting the key -- recovers nothing on its own, because
+    # no worker is left alive to reopen the device or retry the connection.
+    # 重新連線 is the one action that does, and it sits three centimetres below
+    # this text in the status window. Text that describes the physical fix and
+    # then sends the guard straight to "通知管理員" turns every re-seated cable
+    # into an avoidable escalation, on the single most likely fault a guard
+    # meets. The button is located ("「監控狀態」視窗下方") rather than merely
+    # named because this same action line is also the body of the toast, where
+    # there is no button below anything.
     "bad_key": (
         "連線密碼已失效",
         "伺服器不接受這台電腦目前的連線密碼。",
-        "請通知管理員重新設定連線密碼。",
+        "請通知管理員重新設定連線密碼；設定好之後，"
+        "請按「監控狀態」視窗下方的「重新連線」。",
     ),
     "camera_down": (
         "攝影機沒有畫面",
         "{camera_names} 目前沒有畫面。",
-        "請檢查攝影機的 USB 線是否鬆脫；重新插好後仍沒有畫面，請通知管理員。",
+        "請檢查攝影機的 USB 線是否鬆脫；重新插好後，"
+        "請按「監控狀態」視窗下方的「重新連線」；仍沒有畫面請通知管理員。",
     ),
 }
 

@@ -4,7 +4,7 @@ import queue
 import signal
 
 from .config import load_config, save_config, is_first_run
-from .app_controller import AppController
+from .app_controller import AppController, enabled_cameras
 from .gui.notifier import notify_state
 from .gui.setup_wizard import run_setup_wizard
 from .gui.status_window import open_status_window, open_log_folder
@@ -59,18 +59,44 @@ def _handle_health(hub, tray) -> None:
     tray.set_health(hub.state)
 
 
-def _handle_notify(hub, icon) -> None:
-    notify_state(icon, hub.state)
+def _handle_notify(icon, state) -> None:
+    """Toast the state this token was HANDED -- never hub.state.
 
+    The opposite of _handle_health, and deliberately so. tick() decides which
+    state matured past the 30s debounce and latches it at FIRE time; if the
+    toast re-read hub.state at DRAIN time it would announce whatever happened to
+    be true by then. Three things break at once when it does, and the window is
+    wide open in practice because the status window and the settings wizard both
+    block this loop, so every transition that occurs while one is open piles up
+    and drains at once on close:
 
-def _enabled_cameras(config) -> list:
-    """The cameras currently in play, read from the LIVE config.
+      * the matured notification is LOST -- the server was down for 30+ seconds,
+        the guard is told 監控中 and never learns there was an outage at all;
+      * the debounce is BYPASSED -- a fault that started 0 seconds ago gets
+        toasted because it is what hub.state says now, which is exactly the
+        "toast for a 2-second blip" this design exists to prevent;
+      * the toast DUPLICATES -- _notified was latched to the old state, so the
+        new one matures and toasts again 30 seconds later.
 
-    Not the list captured at startup: an OPEN_SETTINGS edit can add or remove
-    cameras in-process, and a window whose whole purpose is telling the guard
-    the truth must not report a stale count.
+    Coalescing is right for the tray light (one repaint, newest state) and wrong
+    for notifications (each one is a distinct event the guard must see once).
     """
-    return [c for c in (config or {}).get("cameras", []) if c.get("enabled", True)]
+    notify_state(icon, state)
+
+
+def _split_token(req):
+    """(name, payload) for any dispatch-queue token.
+
+    Most tokens are a bare string -- they are pure wake-ups with nothing to
+    carry. NOTIFY is the exception: it carries the Health state that matured,
+    because that state cannot be recovered later (see _handle_notify). Rather
+    than make the loop test types inline, every token is normalised here, so the
+    loop reads the same way for both shapes.
+    """
+    if isinstance(req, tuple):
+        name, payload = req
+        return name, payload
+    return req, None
 
 
 def _camera_display_names(sources, cameras) -> list:
@@ -107,8 +133,12 @@ def _camera_display_names(sources, cameras) -> list:
             continue
         name = by_id.get(source)
         if name is None:
-            logger.debug("Fault reported by a source with no camera in config: %s",
-                         source)
+            # INFO, not DEBUG: the root logger is configured at INFO, so a DEBUG
+            # line here is dropped and logged NOWHERE -- while the docstring
+            # above promises the technician gets it. This is the only trace that
+            # a fault was reported for a camera the config no longer knows.
+            logger.info("Fault reported by a source with no camera in config: %s",
+                        source)
             continue
         if name not in names:
             names.append(name)
@@ -160,7 +190,7 @@ def _handle_open_status(hub, controller, q) -> None:
     Guarded like OPEN_SETTINGS: a Tk failure here must cost the guard a window,
     never the dispatch loop that keeps the cameras uploading.
     """
-    cameras = _enabled_cameras(controller.config)
+    cameras = enabled_cameras(controller.config)
     try:
         open_status_window(
             hub.state,
@@ -266,7 +296,7 @@ def main():
         save_config(config)
         add_secret(config.get("api_key", ""))
 
-    enabled = _enabled_cameras(config)
+    enabled = enabled_cameras(config)
     if not enabled:
         _close_splash()
         logger.error("No cameras configured")
@@ -276,9 +306,13 @@ def main():
     # onto it -- and they fire from worker threads, inside the hub's lock.
     # Workers never touch Tk or pystray; every UI action happens on this
     # thread, in the dispatch loop below.
-    q: "queue.Queue[str]" = queue.Queue()
+    #
+    # Token shape: a bare string is a pure wake-up; ("NOTIFY", state) carries
+    # the state that matured, because unlike the tray repaint it CANNOT be
+    # re-derived at drain time. _split_token() normalises both.
+    q: "queue.Queue" = queue.Queue()
     hub = StatusHub(on_change=lambda state: q.put("HEALTH"),
-                    on_notify=lambda state: q.put("NOTIFY"))
+                    on_notify=lambda state: q.put(("NOTIFY", state)))
 
     controller = AppController(config, status_hub=hub)
 
@@ -299,7 +333,17 @@ def main():
     tray.set_health(hub.state)
     _close_splash()
 
-    controller.start_engines()
+    # Guarded for the same reason both rebuild paths are (see _rebuild_engines):
+    # if this raises, the exception leaves main(), the traceback goes to a
+    # sys.stderr that is None in the windowed (console=False) build, and the
+    # tray icon the guard just watched appear vanishes again with no log line
+    # and no dialog. Unguarded, this was the ONE start_engines() call site
+    # without the backstop that stops the light sitting on grey forever.
+    try:
+        controller.start_engines()
+    except Exception:
+        logger.exception("Engine startup failed")
+        _rebuild_engines(controller, hub)
     logger.info(f"SDPRS Webcam Client running ({len(enabled)} cameras)")
 
     running = True
@@ -311,17 +355,18 @@ def main():
             # No extra thread or timer is needed -- this loop already wakes here.
             hub.tick()
             continue
-        if req == "HEALTH":
+        name, payload = _split_token(req)
+        if name == "HEALTH":
             _handle_health(hub, tray)
             continue
-        if req == "NOTIFY":
-            _handle_notify(hub, tray.icon)
+        if name == "NOTIFY":
+            _handle_notify(tray.icon, payload)
             continue
-        if req == "OPEN_STATUS":
+        if name == "OPEN_STATUS":
             _handle_open_status(hub, controller, q)
             continue
         running = _handle_request(
-            req, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"), hub)
+            name, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"), hub)
     controller.shutdown()
     logger.info("Shutdown complete")
 

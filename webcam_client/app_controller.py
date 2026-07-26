@@ -23,6 +23,22 @@ class _NoOpStatusHub:
         pass
 
 
+def enabled_cameras(config: Optional[dict]) -> List[dict]:
+    """The cameras currently in play, read from a LIVE config dict.
+
+    THE single definition, on purpose. This filter used to exist twice -- here,
+    deciding which cameras actually RUN, and again in main.py, deciding what the
+    status window TELLS the guard. The two agreed, but nothing made them: any
+    divergence (a new "disabled" spelling, a different default for a missing
+    `enabled` key) would make the window quietly lie about how many cameras are
+    being watched, which is precisely the class of untruth this phase exists to
+    remove. main.py imports this rather than keeping its own copy.
+
+    Tolerates None/{} so an error path with no config to hand still gets a list.
+    """
+    return [c for c in (config or {}).get("cameras", []) if c.get("enabled", True)]
+
+
 def _default_engine_factory(cam: dict, server_url: str, api_key: str,
                             on_fault: Optional[Callable] = None):
     from .push_engine import PushEngine
@@ -60,7 +76,7 @@ class AppController:
         return self._config
 
     def _enabled_cameras(self) -> List[dict]:
-        return [c for c in self._config.get("cameras", []) if c.get("enabled", True)]
+        return enabled_cameras(self._config)
 
     def start_engines(self) -> None:
         server_url = self._config.get("server_url", "")

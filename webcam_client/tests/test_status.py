@@ -2,6 +2,7 @@
 """StatusHub is the single source of truth for app health. It is deliberately
 pure -- no Tk, no pystray, injected clock -- so all of this is unit-testable."""
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -177,3 +178,141 @@ def test_callbacks_are_optional():
     hub = StatusHub()
     hub.report("cam1", Fault.NO_SERVER)   # must not raise
     hub.tick()
+
+
+# --------------------------------------------------------------------------
+# Ledger row 4: CAMERA_DOWN is the only fault->health entry never asserted on
+# its own. Every other mapping is pinned by a precedence test that happens to
+# exercise it; CAMERA_DOWN is only ever seen LOSING a precedence contest, so
+# _FAULT_TO_HEALTH[Fault.CAMERA_DOWN] could be wired to any state at all and
+# the suite would stay green. push_engine now reports it from two places, so
+# pin the mapping in isolation.
+# --------------------------------------------------------------------------
+
+def test_camera_down_alone_maps_to_the_camera_down_health():
+    hub, changes, _, _ = make()
+    hub.report("cam1", Fault.CAMERA_DOWN)
+    assert hub.state is Health.CAMERA_DOWN
+    assert changes == [Health.CAMERA_DOWN]
+    assert hub.faulty_sources() == ["cam1"]
+    hub.report("cam1", Fault.NONE)
+    assert hub.state is Health.RUNNING
+
+
+# --------------------------------------------------------------------------
+# m-7 (linked to ledger row 3): pausing during a live fault must not toast.
+#
+# PAUSED lives in _HEALTHY, so entering it used to count as a "recovery" and
+# fire the immediate recovery toast -- 已暫停上傳, unsolicited, in response to
+# the guard's OWN click, and reading as "problem solved" while the problem is
+# still there. STARTING is already excluded for the same family of reason.
+#
+# The minimal fix is to leave _notified untouched when entering PAUSED, which
+# also gets the resume side right for free -- hence the three tests below,
+# which pin BOTH directions.
+# --------------------------------------------------------------------------
+
+def test_pausing_during_a_live_fault_does_not_toast_a_recovery():
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    assert notifies == [Health.NO_SERVER], "precondition: the fault was announced"
+    notifies.clear()
+
+    hub.set_paused(True)
+
+    assert hub.state is Health.PAUSED
+    assert notifies == [], (
+        "pausing is the guard's own click, not a recovery -- toasting 已暫停上傳 "
+        "here reads as 'problem solved' while the server is still unreachable")
+
+
+def test_resuming_with_the_fault_still_present_does_not_re_announce_it():
+    """The other half of the same fix: the guard was already told about this
+    fault before they paused. Pausing and resuming must not make the app repeat
+    itself 30 seconds later as though the outage were new."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    notifies.clear()
+
+    hub.set_paused(True)
+    hub.set_paused(False)
+    assert hub.state is Health.NO_SERVER, "the fault never went away"
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    assert notifies == [], "an already-announced fault must not be re-announced"
+
+
+def test_a_fault_that_cleared_during_the_pause_still_toasts_its_recovery():
+    """...and the fix must not swallow a REAL recovery. The guard paused while
+    the server was down, the server came back while paused; on resume they must
+    still learn that uploads are working again."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    notifies.clear()
+
+    hub.set_paused(True)
+    hub.report("cam1", Fault.NONE)       # the server came back while paused
+    assert hub.state is Health.PAUSED, "PAUSED still outranks everything"
+    notifies.clear()
+
+    hub.set_paused(False)
+    assert hub.state is Health.RUNNING
+    assert notifies == [Health.RUNNING], "a real recovery must still be announced"
+
+
+# --------------------------------------------------------------------------
+# Ledger row A: the branch's central design claim, under real threads.
+# --------------------------------------------------------------------------
+
+def test_final_notification_matches_final_state_under_concurrent_reports():
+    """This is the ONE guarantee "notify inside the lock" exists to provide.
+
+    on_change fires INSIDE the hub's lock, together with the mutation that
+    caused it. Move it outside (the obvious "don't call user code under a
+    lock" refactor) and two workers with crossing transitions -- one
+    recovering as another starts failing -- can deliver their notifications in
+    the opposite order to the real state sequence, latching the tray to a
+    state that has already passed, permanently. Until now that was protected
+    by code inspection alone: grepping the suite for threading returned zero
+    matches.
+
+    Deterministic by construction, not by timing: every state change appends to
+    `seen` while the lock is held, so seen[-1] is ALWAYS the current state --
+    reports that change nothing append nothing and leave the invariant intact.
+    A barrier (not a sleep) is what creates the contention."""
+    seen = []
+    hub = StatusHub(on_change=seen.append)
+
+    faults = (Fault.NONE, Fault.NO_SERVER, Fault.BAD_KEY, Fault.CAMERA_DOWN)
+    n_threads, n_iterations = 8, 300
+    start = threading.Barrier(n_threads)
+    errors = []
+
+    def worker(i):
+        try:
+            start.wait()
+            for j in range(n_iterations):
+                hub.report(f"cam{i}", faults[(i + j) % len(faults)])
+        except BaseException as exc:      # a barrier/lock failure must not hide
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,))
+               for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not any(t.is_alive() for t in threads), "a worker deadlocked in report()"
+    assert not errors, f"a worker raised: {errors!r}"
+    assert seen, "no state change was ever notified"
+    assert seen[-1] is hub.state, (
+        f"the last notification said {seen[-1]} but the hub settled on "
+        f"{hub.state} -- the tray would be latched to a state that has passed")

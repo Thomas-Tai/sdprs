@@ -123,6 +123,57 @@ def test_camera_down_names_the_camera():
     assert "前門攝影機" in detail
 
 
+def test_recoverable_faults_name_the_reconnect_button():
+    """I-5: BAD_KEY and CAMERA_DOWN both STOP their worker -- open_camera()
+    returning None ends the push engine's thread, a rejected key stops the
+    control channel. So the physical fix the text asks for (re-seat the cable,
+    have the administrator reset the key) recovers nothing by itself: no worker
+    is left alive to reopen the device or retry. 重新連線 is the only action
+    that does, and it sits three centimetres below this text -- unnamed, while
+    the text sent the guard to escalate instead. Every re-seated cable became
+    an unnecessary escalation, on the most likely fault a guard ever meets.
+
+    Asserted against the BTN_RECONNECT constant, not a literal, so the label
+    and the instruction that points at it cannot drift apart."""
+    for state in (Health.BAD_KEY, Health.CAMERA_DOWN):
+        _, _, action = strings.describe(state, camera_count=2,
+                                        camera_names="前門攝影機")
+        assert strings.BTN_RECONNECT in action, \
+            f"{state} never names the one button that recovers it: {action!r}"
+
+
+def test_the_reconnect_instruction_is_true_in_a_toast_too():
+    """The same action line is also the BODY of the toast (notifier.py joins
+    detail + action), where there is no button below anything. So it must say
+    WHERE the button is, not just "press the one below"."""
+    for state in (Health.BAD_KEY, Health.CAMERA_DOWN):
+        _, _, action = strings.describe(state, camera_count=2,
+                                        camera_names="前門攝影機")
+        assert strings.MENU_STATUS in action, \
+            f"{state} names the button but not the window holding it: {action!r}"
+
+
+def test_camera_down_still_names_the_physical_action_first():
+    """Naming the button must not have displaced the physical fix: re-seating
+    the cable is what the guard does with their hands, and it must come before
+    the software action, in both the startup case (camera never opened) and the
+    mid-run case (sustained read failure)."""
+    _, _, action = strings.describe(Health.CAMERA_DOWN, camera_count=2,
+                                    camera_names="前門攝影機")
+    assert "USB" in action
+    assert action.index("USB") < action.index(strings.BTN_RECONNECT), \
+        f"the software action must not precede the physical one: {action!r}"
+    assert "管理員" in action, "escalation must remain available as the last resort"
+
+
+def test_log_folder_failure_is_explained_in_plain_language():
+    """Ledger row 15: 開啟記錄 failing used to do nothing at all -- no dialog,
+    and its only log line goes to the folder that would not open."""
+    assert strings.LOG_FOLDER_FAILED.strip()
+    assert "記錄" in strings.LOG_FOLDER_FAILED
+    assert "管理員" in strings.LOG_FOLDER_FAILED, "a failure with no action is unactionable"
+
+
 def test_describe_tolerates_missing_context():
     """Callers in error paths may not have context to hand; a missing key must
     not raise and blank the UI."""

@@ -74,7 +74,15 @@ def test_every_state_has_its_own_banner_colour_rather_than_a_fallback():
     own palette fallback) while the banner paints grey, which is the exact
     disagreement importing _health_color was meant to make impossible. Pin the
     mapping itself: every colour the tray can name must exist in _HEX."""
+    from webcam_client.gui.tray_app import _HEALTH_COLORS
+
     for state in Health:
+        # `color in _HEX` alone is satisfied by "grey", which _health_color()
+        # returns as its .get() FALLBACK -- so a state missing from the tray
+        # table passes this check while painting the startup colour. Assert the
+        # entry exists before trusting the colour it produced.
+        assert state in _HEALTH_COLORS, \
+            f"{state} has no tray colour; it would fall back to grey (= 啟動中)"
         color = _health_color(state)
         assert color in _HEX, \
             f"{state} paints {color!r} on the tray, which the banner cannot render"
@@ -103,6 +111,7 @@ def test_open_log_folder_returns_false_when_the_shell_refuses(monkeypatch, tmp_p
     """os.startfile does not exist off Windows and raises when the shell has no
     handler. This is a technician convenience bolted to a guard-facing button;
     it must degrade to False + a log line, never take the window down."""
+    import tkinter.messagebox as messagebox
     import webcam_client.gui.status_window as sw
 
     def boom(path):
@@ -110,4 +119,62 @@ def test_open_log_folder_returns_false_when_the_shell_refuses(monkeypatch, tmp_p
 
     monkeypatch.setattr(sw, "get_log_dir", lambda: tmp_path / "logs")
     monkeypatch.setattr(sw.os, "startfile", boom, raising=False)
+    # The failure now pops a dialog; stub it so this suite never opens a real
+    # window (and never blocks on a display-less build machine).
+    monkeypatch.setattr(messagebox, "showwarning", lambda *a, **k: None)
     assert open_log_folder() is False
+
+
+def test_a_failed_open_log_folder_tells_the_guard(monkeypatch, tmp_path):
+    """Ledger row 15: the button used to fail completely silently -- nothing
+    opened, nothing was said. The guard pressing it is normally already on the
+    phone with a technician who asked for the logs, so an inert button leaves
+    them with nothing to report, and the log line this failure writes goes into
+    the very folder that would not open."""
+    import tkinter.messagebox as messagebox
+    import webcam_client.gui.status_window as sw
+    from webcam_client.strings import LOG_FOLDER_FAILED, WINDOW_TITLE
+
+    def boom(path):
+        raise OSError("no application is associated with this file")
+
+    shown = []
+    monkeypatch.setattr(sw, "get_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(sw.os, "startfile", boom, raising=False)
+    monkeypatch.setattr(messagebox, "showwarning",
+                        lambda title, message, *a, **k: shown.append((title, message)))
+
+    assert open_log_folder() is False
+    assert shown, "the 開啟記錄 button failed silently"
+    title, message = shown[0]
+    assert title == WINDOW_TITLE
+    assert message == LOG_FOLDER_FAILED
+
+
+def test_a_failing_dialog_does_not_take_the_button_down(monkeypatch, tmp_path):
+    """The dialog is itself best-effort: a Tk failure while REPORTING a failure
+    must not propagate into the window's _guarded() wrapper and beyond."""
+    import tkinter.messagebox as messagebox
+    import webcam_client.gui.status_window as sw
+
+    def boom(*a, **k):
+        raise RuntimeError("no display and no message loop")
+
+    monkeypatch.setattr(sw, "get_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(sw.os, "startfile", boom, raising=False)
+    monkeypatch.setattr(messagebox, "showwarning", boom)
+    assert open_log_folder() is False    # must not raise
+
+
+def test_open_log_folder_shows_no_dialog_on_success(monkeypatch, tmp_path):
+    """A dialog on the happy path would be worse than the silence it replaces."""
+    import tkinter.messagebox as messagebox
+    import webcam_client.gui.status_window as sw
+
+    shown = []
+    monkeypatch.setattr(sw, "get_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(sw.os, "startfile", lambda p: None, raising=False)
+    monkeypatch.setattr(messagebox, "showwarning",
+                        lambda *a, **k: shown.append(a))
+    assert open_log_folder() is True
+    assert shown == []
