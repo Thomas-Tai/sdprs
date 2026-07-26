@@ -47,11 +47,13 @@
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: `SingleInstance(name: str = DEFAULT_MUTEX_NAME)` with `.acquire() -> bool` and `.release() -> None`; module constant `DEFAULT_MUTEX_NAME: str`
+- Produces: `SingleInstance(base_name: str = DEFAULT_BASE_NAME)` with `.acquire() -> bool` and `.release() -> None`; module constant `DEFAULT_BASE_NAME: str`
 
-**Why fail-open:** a bug in the guard must never stop the monitoring client from running. If `CreateMutexW` itself fails, we allow the launch.
+**Why fail-open:** a bug in the guard must never stop the monitoring client from running. If the mutex machinery itself fails, we allow the launch.
 
-**Why `Local\` not `Global\`:** the `Global\` namespace needs `SeCreateGlobalPrivilege`, which a standard (non-admin) guard account does not have. `Local\` is per-login-session, which is the semantics we actually want.
+**Why Global-then-Local:** the camera is a *machine* resource, so `Global\` is the semantically correct scope — it also blocks a second instance started from a second login or RDP session, which would fight for the same DSHOW device. But `Global\` needs `SeCreateGlobalPrivilege`, which a standard (non-admin) guard account may not hold. So: try `Global\`, fall back to `Local\`.
+
+**The ambiguity that must be handled:** `CreateMutexW` on a `Global\` name returns `ERROR_ACCESS_DENIED` (5) in **two different** situations — (a) the object exists but was created by another session and we can't open it → *another instance is running, refuse*; (b) we lack the privilege to create a global object → *fall back to Local*. These demand opposite responses, so `acquire()` disambiguates with `OpenMutexW`: only `ERROR_FILE_NOT_FOUND` (2) proves the object is genuinely absent.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -69,13 +71,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from webcam_client.single_instance import SingleInstance, DEFAULT_MUTEX_NAME
+import webcam_client.single_instance as si_mod
+from webcam_client.single_instance import SingleInstance, DEFAULT_BASE_NAME
 
 
 def _unique(tag):
     # Unique per test AND per run, so a crashed prior run cannot leak a held
     # mutex into this one and make the suite flaky.
-    return f"Local\\SDPRSTest_{tag}_{os.getpid()}"
+    return f"SDPRSTest_{tag}_{os.getpid()}"
 
 
 def test_first_acquire_succeeds():
@@ -87,8 +90,8 @@ def test_first_acquire_succeeds():
 
 
 def test_second_acquire_fails_while_first_holds():
-    name = _unique("second")
-    a, b = SingleInstance(name), SingleInstance(name)
+    base = _unique("second")
+    a, b = SingleInstance(base), SingleInstance(base)
     try:
         assert a.acquire() is True
         assert b.acquire() is False, "second instance must be refused"
@@ -98,11 +101,11 @@ def test_second_acquire_fails_while_first_holds():
 
 
 def test_slot_is_reusable_after_release():
-    name = _unique("reuse")
-    a = SingleInstance(name)
+    base = _unique("reuse")
+    a = SingleInstance(base)
     assert a.acquire() is True
     a.release()
-    b = SingleInstance(name)
+    b = SingleInstance(base)
     try:
         assert b.acquire() is True, "releasing must free the slot"
     finally:
@@ -113,10 +116,56 @@ def test_release_without_acquire_is_safe():
     SingleInstance(_unique("norelease")).release()  # must not raise
 
 
-def test_default_name_is_session_local_not_global():
-    # Global\ requires SeCreateGlobalPrivilege, which a standard guard account
-    # does not have -- it would fail on exactly the machines this ships to.
-    assert DEFAULT_MUTEX_NAME.startswith("Local\\")
+def test_falls_back_to_local_when_global_is_not_permitted(monkeypatch):
+    """A standard (non-admin) account may lack SeCreateGlobalPrivilege. That
+    must degrade to a session-local guard, NOT disable the guard."""
+    tried = []
+    real = si_mod._try_create
+
+    def fake(name):
+        tried.append(name)
+        if name.startswith("Global\\"):
+            return None, False, si_mod._ERROR_ACCESS_DENIED
+        return real(name)
+
+    monkeypatch.setattr(si_mod, "_try_create", fake)
+    # Global create was denied AND the object does not exist -> privilege issue.
+    monkeypatch.setattr(si_mod, "_exists", lambda name: False)
+
+    si = SingleInstance(_unique("fallback"))
+    try:
+        assert si.acquire() is True
+        assert any(n.startswith("Global\\") for n in tried), "must try Global first"
+        assert any(n.startswith("Local\\") for n in tried), "must fall back to Local"
+    finally:
+        si.release()
+
+
+def test_access_denied_on_an_EXISTING_global_refuses_the_launch(monkeypatch):
+    """The dangerous ambiguity: ACCESS_DENIED means either 'no privilege' or
+    'another session owns it'. When the object EXISTS, a second instance must be
+    refused -- falling back to Local here would let two copies fight the camera."""
+    monkeypatch.setattr(
+        si_mod, "_try_create",
+        lambda name: (None, False, si_mod._ERROR_ACCESS_DENIED))
+    monkeypatch.setattr(si_mod, "_exists", lambda name: True)
+    assert SingleInstance(_unique("denied")).acquire() is False
+
+
+def test_fails_open_when_both_namespaces_error(monkeypatch):
+    """A guard bug must never keep the monitoring client off the air."""
+    monkeypatch.setattr(si_mod, "_try_create", lambda name: (None, False, 1337))
+    monkeypatch.setattr(si_mod, "_exists", lambda name: False)
+    assert SingleInstance(_unique("failopen")).acquire() is True
+
+
+def test_exists_is_false_for_an_absent_object():
+    assert si_mod._exists(f"Local\\{_unique('absent')}") is False
+
+
+def test_default_base_name_is_unqualified():
+    # The class adds the Global\ / Local\ prefixes itself.
+    assert not DEFAULT_BASE_NAME.startswith(("Global\\", "Local\\"))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -147,11 +196,13 @@ from ctypes import wintypes
 
 logger = logging.getLogger("webcam_client.single_instance")
 
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_ACCESS_DENIED = 5
 _ERROR_ALREADY_EXISTS = 183
+_SYNCHRONIZE = 0x00100000
 
-# Local\ = per-login-session. Global\ would need SeCreateGlobalPrivilege, which a
-# standard (non-admin) operator account does not hold.
-DEFAULT_MUTEX_NAME = "Local\\SDPRSWebcamClient"
+# Unqualified; SingleInstance adds the Global\ / Local\ prefix itself.
+DEFAULT_BASE_NAME = "SDPRSWebcamClient"
 
 # use_last_error=True routes the Win32 error into ctypes.get_last_error(), which
 # a later ctypes call cannot clobber -- calling kernel32.GetLastError() directly
@@ -161,31 +212,78 @@ _kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCW
 # HANDLE is pointer-sized; leaving the default c_int restype TRUNCATES it on
 # 64-bit and then CloseHandle fails on the truncated value.
 _kernel32.CreateMutexW.restype = wintypes.HANDLE
+_kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32.OpenMutexW.restype = wintypes.HANDLE
 _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 _kernel32.CloseHandle.restype = wintypes.BOOL
 
 
+def _try_create(name):
+    """Create the named mutex. Returns (handle_or_None, already_existed, err)."""
+    ctypes.set_last_error(0)
+    handle = _kernel32.CreateMutexW(None, False, name)
+    err = ctypes.get_last_error()
+    if handle and err == _ERROR_ALREADY_EXISTS:
+        _kernel32.CloseHandle(handle)
+        return None, True, err
+    if handle:
+        return handle, False, 0
+    return None, False, err
+
+
+def _exists(name) -> bool:
+    """True if the named mutex is present.
+
+    ACCESS_DENIED here means it EXISTS but this account may not open it (another
+    session created it). Only FILE_NOT_FOUND proves genuine absence.
+    """
+    ctypes.set_last_error(0)
+    handle = _kernel32.OpenMutexW(_SYNCHRONIZE, False, name)
+    err = ctypes.get_last_error()
+    if handle:
+        _kernel32.CloseHandle(handle)
+        return True
+    return err != _ERROR_FILE_NOT_FOUND
+
+
 class SingleInstance:
-    def __init__(self, name: str = DEFAULT_MUTEX_NAME):
-        self._name = name
+    def __init__(self, base_name: str = DEFAULT_BASE_NAME):
+        self._global_name = f"Global\\{base_name}"
+        self._local_name = f"Local\\{base_name}"
         self._handle = None
 
     def acquire(self) -> bool:
         """True if this process now owns the single-instance slot.
 
-        Fails OPEN: if the mutex machinery itself errors, allow the launch. A
-        guard bug must never keep the monitoring client off the air.
+        Tries Global\\ first: the camera is a MACHINE resource, so a second
+        instance in another login/RDP session must also be refused. Falls back to
+        Local\\ when the account lacks SeCreateGlobalPrivilege.
+
+        Fails OPEN if both namespaces error -- a guard bug must never keep the
+        monitoring client off the air.
         """
-        ctypes.set_last_error(0)
-        handle = _kernel32.CreateMutexW(None, False, self._name)
-        err = ctypes.get_last_error()
-        if not handle:
-            logger.warning("CreateMutexW failed (err=%s); allowing launch", err)
-            return True
-        if err == _ERROR_ALREADY_EXISTS:
-            _kernel32.CloseHandle(handle)
+        handle, existed, err = _try_create(self._global_name)
+        if existed:
             return False
-        self._handle = handle
+        if handle:
+            self._handle = handle
+            return True
+
+        # Global create failed. ACCESS_DENIED is ambiguous: either the object
+        # exists and belongs to another session (refuse!) or we lack the
+        # privilege to create a global object (fall back). Disambiguate.
+        if err == _ERROR_ACCESS_DENIED and _exists(self._global_name):
+            return False
+
+        logger.info("Global mutex unavailable (err=%s); using session-local", err)
+        handle, existed, err = _try_create(self._local_name)
+        if existed:
+            return False
+        if handle:
+            self._handle = handle
+            return True
+
+        logger.warning("Mutex creation failed (err=%s); allowing launch", err)
         return True
 
     def release(self) -> None:
@@ -197,14 +295,16 @@ class SingleInstance:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_single_instance.py -q -p no:cacheprovider`
-Expected: PASS — 5 passed
+Expected: PASS — 9 passed
+
+Note which namespace won: if the log line `Global mutex unavailable ... using session-local` appears during a real run, this account lacks `SeCreateGlobalPrivilege` and the guard is session-scoped. That is the accepted fallback, not a failure — record it in the Task 6 notes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd sdprs
 git add webcam_client/single_instance.py webcam_client/tests/test_single_instance.py
-git commit -m "feat(webcam): single-instance mutex guard (fail-open, session-local)"
+git commit -m "feat(webcam): single-instance mutex guard (Global with Local fallback, fail-open)"
 ```
 
 ---
@@ -330,8 +430,12 @@ import logging.handlers
 from .config import get_config_dir
 
 LOG_FILENAME = "webcam.log"
-MAX_BYTES = 1_000_000
-BACKUP_COUNT = 3
+# A failing client logs a warning per failed snapshot push (~1Hz), which rolls a
+# small log in under an hour and destroys the ORIGIN of the fault -- the part
+# that is actually diagnostic. 2MB x 5 = 10MB buys roughly a day of noisy
+# failure and is trivial on any disk.
+MAX_BYTES = 2_000_000
+BACKUP_COUNT = 5
 REDACTED = "***REDACTED***"
 
 _handler = None
@@ -431,7 +535,7 @@ git commit -m "feat(webcam): rotating file log with API-key redaction"
 - Test: `webcam_client/tests/test_main_dispatch.py` (extend)
 
 **Interfaces:**
-- Consumes: `SingleInstance`, `DEFAULT_MUTEX_NAME`, `setup_logging`, `add_secret`
+- Consumes: `SingleInstance` (constructed with its default base name), `setup_logging`, `add_secret`
 - Produces: `_close_splash() -> None` (idempotent, safe when not frozen)
 
 **Two behaviour changes:**
@@ -896,6 +1000,26 @@ def test_assets_exist():
     assert (WEBCAM_DIR / "assets" / "splash.png").is_file()
 
 
+def test_icon_16px_is_handtuned_not_a_downsample():
+    """Naive downsampling of the 256px master closes the aperture into an
+    unreadable dot and reduces the mount nub to a stray pixel -- at 16px, the
+    size Windows uses in the taskbar. Pin that the .ico carries DISTINCT small
+    artwork rather than a resample."""
+    from PIL import Image
+
+    ico = WEBCAM_DIR / "assets" / "sdprs.ico"
+    with Image.open(ico) as im:
+        im.size = (256, 256)          # ICO frame selection
+        im.load()
+        naive = im.convert("RGBA").resize((16, 16), Image.LANCZOS)
+    with Image.open(ico) as im:
+        im.size = (16, 16)
+        im.load()
+        actual = im.convert("RGBA")
+    assert list(actual.getdata()) != list(naive.getdata()), \
+        "16px frame is just a downsample -- hand-tuned artwork did not make it in"
+
+
 def test_build_spec_declares_a_splash():
     """S4: console=False + ~20s onefile extraction = a completely blank screen.
     The bootloader paints the splash before Python starts."""
@@ -913,7 +1037,7 @@ def test_build_spec_sets_an_icon():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_packaging.py -q -p no:cacheprovider`
-Expected: FAIL — 3 failed, 10 passed
+Expected: FAIL — 4 failed, 10 passed
 
 - [ ] **Step 3: Write the asset generator and run it**
 
@@ -936,6 +1060,10 @@ BG = (18, 32, 52)
 ACCENT = (63, 138, 224)
 TEXT = (238, 242, 248)
 MUTED = (150, 168, 190)
+# Small-size palette: the 256px navy body disappears against a dark taskbar once
+# downsampled, and the thin ring closes up. Lift both for 16/24px.
+BG_SMALL = (30, 52, 84)
+ACCENT_SMALL = (99, 170, 246)
 
 # PIL's default bitmap font renders CJK as boxes, so find a real CJK face.
 # Absent one, the splash falls back to ASCII rather than shipping tofu.
@@ -956,16 +1084,49 @@ def _font(size, prefer_cjk=True):
         return ImageFont.load_default(), False
 
 
-def make_icon():
-    # 256px master; Pillow downsamples to the smaller sizes for the .ico.
+def _icon_detailed():
+    """256px master: full lens with mount nub. Reads well at 32px and up."""
     img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle([8, 8, 248, 248], radius=52, fill=BG)
     d.ellipse([76, 76, 180, 180], fill=ACCENT)          # lens
     d.ellipse([104, 104, 152, 152], fill=BG)            # aperture
     d.rounded_rectangle([112, 34, 144, 62], radius=8, fill=ACCENT)  # mount
-    img.save(HERE / "sdprs.ico",
-             sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+    return img
+
+
+def _icon_compact(size):
+    """Hand-tuned 16/24px artwork.
+
+    Naive downsampling of the master closes the aperture into a dot and reduces
+    the mount nub to a stray pixel, so it reads as a blob rather than a camera.
+    This drops the nub, thickens the ring, and lifts both colours for contrast on
+    a dark taskbar. Drawn at 8x then downsampled -- drawing directly at 16px
+    gives jagged, uneven strokes.
+    """
+    s = size * 8
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = s * 0.02
+    d.rounded_rectangle([pad, pad, s - pad, s - pad], radius=s * 0.22, fill=BG_SMALL)
+    inset = s * 0.20
+    d.ellipse([inset, inset, s - inset, s - inset],
+              outline=ACCENT_SMALL, width=int(s * 0.15))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def make_icon():
+    """Write a multi-resolution .ico with DIFFERENT artwork at small sizes.
+
+    Pillow's ICO writer uses an entry from `append_images` verbatim when its size
+    matches a requested size exactly, and otherwise resamples the master -- so
+    16/24 come from _icon_compact and the rest from the 256px master.
+    (Verified against Pillow 12.1.1 IcoImagePlugin._save.)
+    """
+    master = _icon_detailed()
+    sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (24, 24), (16, 16)]
+    master.save(HERE / "sdprs.ico", sizes=sizes,
+                append_images=[_icon_compact(16), _icon_compact(24)])
     print("wrote sdprs.ico")
 
 
