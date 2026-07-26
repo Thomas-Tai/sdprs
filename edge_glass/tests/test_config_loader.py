@@ -41,3 +41,19 @@ def test_node_override_wins_over_default_detect_fps():
     from utils.config_loader import _deep_merge, DEFAULTS
     merged = _deep_merge(DEFAULTS, {"visual": {"detect_fps": 3}})
     assert merged["visual"]["detect_fps"] == 3
+
+
+def test_defaults_deliver_detect_scale_to_lean_config():
+    cfg = load_config(_ZEABUR_CFG)
+    assert cfg["visual"]["detect_scale"] == 0.5
+
+
+def test_defaults_deliver_stabilize_to_lean_config():
+    cfg = load_config(_ZEABUR_CFG)
+    assert cfg["visual"]["stabilize"] is True
+
+
+def test_defaults_deliver_camera_fps_12_to_lean_config():
+    # config.zeabur.yaml no longer pins camera.fps, so it inherits the 12 default.
+    cfg = load_config(_ZEABUR_CFG)
+    assert cfg["camera"]["fps"] == 12

@@ -24,7 +24,9 @@ DEFAULTS: Dict[str, Any] = {
     "camera": {
         "source": 0,
         "resolution": [1280, 720],
-        "fps": 15,
+        # 擷取幀率（供緩衝與快照）；偵測以 visual.detect_fps 執行。15→12 降低擷取/ISP
+        # 負載，對事件回放平順度幾乎無感。節點可在自己的 config 覆寫。
+        "fps": 12,
     },
     "buffer": {
         "duration_seconds": 10,
@@ -42,6 +44,10 @@ DEFAULTS: Dict[str, Any] = {
         # 發熱來源，玻璃破裂偵測不需要 15fps。攝像頭仍以 camera.fps 擷取供緩衝／快照。
         # 夾在 [1, camera.fps]（見 edge_glass_main.resolve_detect_fps）。
         "detect_fps": 5,
+        # 偵測降採樣：偵測管線在半解析度工作副本上執行（約 ¼ 畫素）。錄影/快照仍原尺寸。
+        "detect_scale": 0.5,
+        # 防震對齊開關：預設開啟。剛性固定攝像頭可關閉以省下最貴的 ORB 階段。
+        "stabilize": True,
         "edge_density_threshold": 1.5,
         "baseline_window_seconds": 60,
         "brightness_anomaly_percent": 50,

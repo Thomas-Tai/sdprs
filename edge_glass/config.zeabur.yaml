@@ -9,7 +9,8 @@ node_id: "glass_node_01"
 camera:
   source: 0
   resolution: [1280, 720]
-  fps: 15
+  # fps 不在此固定：由 config_loader.DEFAULTS 提供（12），讓調校值隨更新下發。
+  # 偵測降採樣/防震（detect_scale / stabilize）同樣來自 DEFAULTS，節點不需列出。
 
 buffer:
   duration_seconds: 10

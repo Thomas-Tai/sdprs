@@ -11,7 +11,7 @@ node_id: "glass_node_01"              # Unique node identifier
 camera:
   source: 0                           # 0 = default camera, or device path
   resolution: [1280, 720]             # 720p resolution
-  fps: 15                             # Frame rate
+  fps: 12                             # capture rate (buffer + snapshots); detection runs at detect_fps
 
 # Circular buffer settings
 buffer:
@@ -33,6 +33,8 @@ visual:
                                       # glass-break detection does not need 15fps. Camera
                                       # still captures at camera.fps for the buffer+snapshots.
                                       # Clamped to [1, camera.fps]; unset = camera.fps.
+  detect_scale: 0.5                   # run detection on a half-res working copy (¼ pixels); 1.0 = full-res
+  stabilize: true                     # ORB affine stabilization; false skips it (only safe on rigid mounts)
   edge_density_threshold: 1.5         # Multiplier relative to baseline
   baseline_window_seconds: 60         # Adaptive baseline window
   brightness_anomaly_percent: 50      # Brightness anomaly exclusion threshold
