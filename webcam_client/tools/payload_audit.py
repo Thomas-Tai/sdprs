@@ -1,5 +1,5 @@
 """Sum the on-disk size of everything PyInstaller put in the onefile payload,
-grouped by component, so the <=200MB target stays verifiable instead of assumed.
+grouped by component, so the <=250MB target stays verifiable instead of assumed.
 
     /c/Python314/python tools/payload_audit.py build/build/PKG-00.toc
 """

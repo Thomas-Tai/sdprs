@@ -179,9 +179,7 @@ docs/sdpr_UI_V2.zip
 docs/sdpr_UI_V2/
 docs/ui_redesign_v2_prompt.md
 # ------------------------------------------------------------
-# Brainstorming visual-companion mockups (session scratch, not
-# a deliverable). Scoped to brainstorm/ only — .superpowers/sdd/
-# briefs stay visible in `git status`.
+# Superpowers scratch tree (session scratch, not a deliverable)
 # ------------------------------------------------------------
 .superpowers/
 # ^ whole tree: brainstorm/ holds visual-companion mockups and sdd/ holds
