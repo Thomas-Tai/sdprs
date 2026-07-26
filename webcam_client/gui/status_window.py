@@ -54,7 +54,13 @@ def build_status_lines(state, camera_count, faulty_names):
     nothing and render a sentence with no subject.
     """
     names = "、".join(str(n) for n in faulty_names if n)
-    return describe(state, camera_count=camera_count, camera_names=names or None)
+    # `camera_count or None` for the same reason as `names or None`: describe()
+    # only swaps in its "no count to hand" wording when camera_count IS None, so
+    # a literal 0 renders "0 支攝影機運作正常。" -- the self-contradiction
+    # strings.py documents (claiming zero cameras work while saying all is
+    # well). Reachable whenever the live config has no enabled camera left.
+    return describe(state, camera_count=camera_count or None,
+                    camera_names=names or None)
 
 
 def open_log_folder() -> bool:

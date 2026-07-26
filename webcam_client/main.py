@@ -11,7 +11,7 @@ from .gui.status_window import open_status_window, open_log_folder
 from .gui.tray_app import TrayApp
 from .logging_setup import setup_logging, add_secret
 from .single_instance import SingleInstance
-from .status import StatusHub, CONTROL_SOURCE
+from .status import StatusHub, CONTROL_SOURCE, Fault
 from .strings import ALREADY_RUNNING, TRAY_TOOLTIP_PREFIX
 
 logger = logging.getLogger("webcam_client.main")
@@ -115,6 +115,45 @@ def _camera_display_names(sources, cameras) -> list:
     return names
 
 
+def _rebuild_engines(controller, hub=None) -> bool:
+    """Rebuild every engine in-process from the controller's CURRENT config.
+    Returns True when the rebuild succeeded. Never raises.
+
+    apply() is stop_engines() + start_engines(), and stop_engines() ends in
+    hub.clear_all() -- which resets _seen_any_report and drops the hub back to
+    STARTING. If start_engines() then raises (a camera that will not open, a
+    server URL the control channel cannot use -- and the control channel is
+    built LAST, so it never gets built at all), NOTHING is left alive to report
+    a fault. The hub sits on STARTING for the rest of the process: a grey tray
+    reading 啟動中 / 正在連線並開啟攝影機，請稍候。 forever, with no toast,
+    because tick() never announces a healthy state.
+
+    That is precisely the silent lie this phase exists to remove -- and the
+    guard reaches it by pressing 重新連線, the button they press to FIX things.
+    So: retry once (the same best-effort recovery the OPEN_SETTINGS error path
+    has always used -- apply() stops first, so a retry cleans up any partial
+    engine set instead of stacking a second one on top of it), and if that
+    fails too, tell the hub, so the light stops claiming the app is still
+    starting up.
+    """
+    for attempt in (1, 2):
+        try:
+            controller.apply(controller.config)
+            return True
+        except Exception:
+            logger.exception("Engine rebuild failed (attempt %d)", attempt)
+    if hub is not None:
+        # Nothing is running and nothing will report. CONTROL_SOURCE is the
+        # honest owner: start_engines() builds the control channel last, so a
+        # failed rebuild always leaves it down. NO_SERVER is the state whose
+        # text says what the guard can actually observe -- 畫面目前無法上傳 --
+        # and outranks CAMERA_DOWN, so a later camera fault cannot mask it.
+        # _camera_display_names() already drops this key before any text
+        # reaches the guard.
+        hub.report(CONTROL_SOURCE, Fault.NO_SERVER)
+    return False
+
+
 def _handle_open_status(hub, controller, q) -> None:
     """Open the guard-facing status window on the MAIN thread.
 
@@ -128,14 +167,14 @@ def _handle_open_status(hub, controller, q) -> None:
             camera_count=len(cameras),
             faulty_names=_camera_display_names(hub.faulty_sources(), cameras),
             on_open_logs=open_log_folder,
-            on_reconnect=lambda: controller.apply(controller.config),
+            on_reconnect=lambda: _rebuild_engines(controller, hub),
             on_settings=lambda: q.put("OPEN_SETTINGS"),
         )
     except Exception:
         logger.exception("Unexpected error opening the status window")
 
 
-def _handle_request(req, controller, settings_fn) -> bool:
+def _handle_request(req, controller, settings_fn, hub=None) -> bool:
     """Service one queued request on the MAIN thread. Returns False to quit.
 
     The tray (daemon thread) only enqueues; opening the settings window and
@@ -169,11 +208,14 @@ def _handle_request(req, controller, settings_fn) -> bool:
             # the partial one. apply() stops first -- cleaning up any partial
             # set and releasing cameras -- then rebuilds from the current
             # config, so there is never a duplicate set.
+            #
+            # _rebuild_engines() is that same recovery, shared with the status
+            # window's 重新連線 button: this path ends in stop_engines() ->
+            # hub.clear_all() too, so if the recovery ALSO fails it strands the
+            # hub on STARTING in exactly the same way, and needs exactly the
+            # same "tell the hub" backstop.
             logger.exception("Unexpected error handling OPEN_SETTINGS")
-            try:
-                controller.apply(controller.config)
-            except Exception:
-                logger.exception("Failed to resume engines after OPEN_SETTINGS error")
+            _rebuild_engines(controller, hub)
     return True
 
 
@@ -224,7 +266,7 @@ def main():
         save_config(config)
         add_secret(config.get("api_key", ""))
 
-    enabled = [c for c in config.get("cameras", []) if c.get("enabled", True)]
+    enabled = _enabled_cameras(config)
     if not enabled:
         _close_splash()
         logger.error("No cameras configured")
@@ -279,7 +321,7 @@ def main():
             _handle_open_status(hub, controller, q)
             continue
         running = _handle_request(
-            req, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"))
+            req, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"), hub)
     controller.shutdown()
     logger.info("Shutdown complete")
 

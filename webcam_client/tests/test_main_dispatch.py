@@ -525,6 +525,138 @@ def test_status_window_reconnect_button_rebuilds_engines(monkeypatch):
     assert made["ctrl"].applied == [made["ctrl"].config]
 
 
+def test_a_failed_rebuild_never_leaves_the_light_claiming_startup():
+    """apply() is stop_engines() + start_engines(), and stop_engines() ends in
+    hub.clear_all() -- which resets the hub to STARTING. If start_engines()
+    then raises, nothing is left alive to report a fault (the control channel
+    is built LAST, so it never gets built at all): the hub stays on STARTING
+    for the rest of the process. Grey tray, "啟動中 / 正在連線並開啟攝影機，
+    請稍候。" forever, and no toast either, because tick() never announces a
+    healthy state. The guard reaches that dead end by pressing 重新連線 -- the
+    button they press to FIX things."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+    attempts = []
+
+    class ExplodingCtrl:
+        config = {"cameras": []}
+
+        def apply(self, cfg):
+            attempts.append(cfg)
+            hub.clear_all()          # stop_engines() got this far...
+            raise RuntimeError("camera 0 will not open")
+
+    assert m._rebuild_engines(ExplodingCtrl(), hub) is False
+    assert len(attempts) == 2, "a failed rebuild must be retried once"
+    assert hub.state is not Health.STARTING, \
+        "the tray would sit grey on 啟動中 forever, with no toast to correct it"
+
+
+def test_a_successful_rebuild_leaves_the_hub_alone():
+    """The backstop above must not invent a fault on the happy path."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+
+    class Ctrl:
+        config = {"cameras": []}
+
+        def apply(self, cfg): pass
+
+    assert m._rebuild_engines(Ctrl(), hub) is True
+    assert hub.state is Health.STARTING
+    assert hub.faulty_sources() == []
+
+
+def test_a_second_attempt_recovers_without_reporting_a_fault():
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+    calls = []
+
+    class FlakyCtrl:
+        config = {"cameras": []}
+
+        def apply(self, cfg):
+            calls.append(cfg)
+            if len(calls) == 1:
+                hub.clear_all()
+                raise RuntimeError("device busy")
+
+    assert m._rebuild_engines(FlakyCtrl(), hub) is True
+    assert hub.state is Health.STARTING and hub.faulty_sources() == []
+
+
+def test_the_reconnect_button_cannot_strand_the_guard(monkeypatch):
+    """End to end through the callback main() actually hands the window: a bare
+    controller.apply() there is swallowed by the window's _guarded() wrapper,
+    so the failure is invisible AND the light lies. Drive the real callback."""
+    import webcam_client.main as m
+    from webcam_client.status import Health
+
+    captured = {}
+    monkeypatch.setattr(m, "open_status_window",
+                        lambda state, **kw: captured.update(kw))
+    made_hub = {}
+    real_hub_cls = m.StatusHub
+
+    def hub_factory(**kw):
+        made_hub["hub"] = real_hub_cls(**kw)
+        return made_hub["hub"]
+
+    monkeypatch.setattr(m, "StatusHub", hub_factory)
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            self._kw = kw
+
+        def start(self):
+            self._kw["on_open_status"]()
+            self._kw["on_quit"]()
+
+        def set_health(self, state):
+            pass
+
+    made = _boot(monkeypatch, m, FakeTray)
+    m.main()
+
+    def exploding_apply(cfg):
+        made_hub["hub"].clear_all()      # stop_engines() already ran
+        raise RuntimeError("camera 0 will not open")
+
+    made["ctrl"].apply = exploding_apply
+    captured["on_reconnect"]()           # must not raise
+    assert made_hub["hub"].state is not Health.STARTING
+
+
+def test_open_settings_recovery_failure_also_reports_to_the_hub():
+    """The OPEN_SETTINGS error path strands the hub the same way (it too ends
+    in stop_engines() -> clear_all()), so it shares the same helper."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+
+    class ExplodingCtrl:
+        config = {"server_url": "old"}
+
+        def stop_engines(self): hub.clear_all()
+        def apply(self, cfg): raise RuntimeError("still broken")
+
+    def raising_fn(cfg):
+        raise RuntimeError("boom: settings window blew up")
+
+    keep = m._handle_request("OPEN_SETTINGS", ExplodingCtrl(), raising_fn, hub)
+    assert keep is True, "the dispatch loop must survive"
+    assert hub.state is not Health.STARTING
+
+
 def test_a_worker_fault_repaints_the_tray_from_the_main_loop(monkeypatch):
     """End to end: the hub's on_change fires INSIDE the hub's lock on the
     WORKER's thread, so it may only enqueue -- the repaint has to happen on the
