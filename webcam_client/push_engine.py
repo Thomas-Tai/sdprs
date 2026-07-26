@@ -13,6 +13,20 @@ from .status import Fault
 
 logger = logging.getLogger("webcam_client.push_engine")
 
+# How long a camera may deliver nothing before the operator is told.
+#
+# cap.read() returning False is routine for a frame or two (USB re-enumeration,
+# a driver hiccup, a device waking up), so a single bad read must not flap the
+# tray. But a pulled USB cable ALSO shows up as nothing but failed reads, and
+# the old loop just slept and retried forever without ever reporting -- the tray
+# stayed green on a camera that had been dead for hours.
+#
+# BAD_READ_LIMIT consecutive failures x BAD_READ_SLEEP each = ~3 seconds of no
+# picture before we say so. Keep these two together: the wall-clock figure is
+# what the comment and the operator-facing behaviour are argued from.
+BAD_READ_SLEEP = 0.1
+BAD_READ_LIMIT = 30
+
 
 def _classify(exc) -> Fault:
     """Map a failed upload to the fault the operator needs to act on.
@@ -110,13 +124,34 @@ class PushEngine(threading.Thread):
         last_snapshot_time = 0.0
         last_encode_time = 0.0
         last_hls_upload = 0.0
+        bad_reads = 0
 
         try:
             while not self._stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    time.sleep(0.1)
+                    # A camera that stopped delivering frames is the ONLY signal
+                    # we get for a pulled USB cable: _push_snapshot is never
+                    # reached from here, so without this the engine's last
+                    # report (Fault.NONE) would stand forever. _report dedups,
+                    # so re-asserting it every iteration is a pointer compare.
+                    bad_reads += 1
+                    if bad_reads == BAD_READ_LIMIT:
+                        logger.error(
+                            "Camera %s delivered no frame for %.1fs",
+                            self._node_id, BAD_READ_LIMIT * BAD_READ_SLEEP)
+                    if bad_reads >= BAD_READ_LIMIT:
+                        self._report(Fault.CAMERA_DOWN)
+                    time.sleep(BAD_READ_SLEEP)
                     continue
+
+                if bad_reads >= BAD_READ_LIMIT:
+                    # Cable plugged back in: clear our own CAMERA_DOWN at once.
+                    # Only clear what we actually reported -- an unconditional
+                    # NONE here would fight _push_snapshot's fault at ~1Hz.
+                    logger.info("Camera %s is delivering frames again", self._node_id)
+                    self._report(Fault.NONE)
+                bad_reads = 0
 
                 motion = compute_motion(frame, prev_frame, self._motion_threshold)
                 prev_frame = frame
@@ -163,6 +198,20 @@ class PushEngine(threading.Thread):
                 # (the old snapshot path slept 0.05 here). While streaming, keep
                 # the loop tight so the encoder still gets frames at target fps.
                 time.sleep(0.05 if (static_recent and not streaming) else 0.01)
+        except Exception:
+            # Without this the exception leaves run() and threading.excepthook
+            # writes it to sys.stderr -- which is None in the console=False
+            # onefile build. A dead engine thread left ZERO evidence and its
+            # last report (usually Fault.NONE) stood forever.
+            #
+            # CAMERA_DOWN is not literally true of a crashed worker, but it is
+            # true of what the operator can observe and act on: this camera has
+            # no picture, and strings.py's action for it -- check the USB cable,
+            # then press 重新連線, then call the administrator -- is exactly the
+            # right instruction, since 重新連線 is what rebuilds this dead thread.
+            # NO_SERVER would send the guard to a network that is fine.
+            logger.exception("Push engine for %s stopped unexpectedly", self._node_id)
+            self._report(Fault.CAMERA_DOWN)
         finally:
             cap.release()
             self._stop_encoder()

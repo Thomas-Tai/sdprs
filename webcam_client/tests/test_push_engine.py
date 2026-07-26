@@ -266,6 +266,152 @@ def test_push_engine_dedups_repeated_snapshot_faults():
     assert seen == [Fault.NO_SERVER], "repeat identical faults must report once"
 
 
+def test_push_engine_reports_camera_down_after_sustained_read_failures(monkeypatch):
+    """I-1 scenario A: the guard pulls the USB cable while the app is running.
+
+    cap.read() then returns (False, None) forever. The old loop slept 100ms and
+    `continue`d without ever reaching _push_snapshot, so the engine's LAST report
+    (Fault.NONE) stood for the life of the process: tray green, status window
+    saying the camera is fine, camera dead for hours. Sustained read failure must
+    reach the hub as CAMERA_DOWN.
+    """
+    from webcam_client import push_engine as pe
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+
+    calls = {"n": 0}
+
+    def failing_read():
+        calls["n"] += 1
+        # Run a few iterations past the threshold to prove the dedup holds.
+        if calls["n"] > pe.BAD_READ_LIMIT + 5:
+            engine._stop_event.set()
+        return False, None
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: failing_read()
+
+    monkeypatch.setattr(pe.time, "sleep", lambda *_a, **_k: None)
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap):
+        engine.run()
+
+    assert seen == [Fault.CAMERA_DOWN], "a camera that stopped delivering frames must be reported once"
+    fake_cap.release.assert_called_once()
+
+
+def test_push_engine_clears_camera_down_on_first_good_read(monkeypatch):
+    """Recovery half of I-1: the guard plugs the cable back in. The first good
+    read after a reported CAMERA_DOWN must clear it, or the tray stays red on a
+    camera that is working again."""
+    import numpy as np
+    from webcam_client import push_engine as pe
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    calls = {"n": 0}
+
+    def reads():
+        calls["n"] += 1
+        if calls["n"] <= pe.BAD_READ_LIMIT:
+            return False, None
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: reads()
+
+    monkeypatch.setattr(pe.time, "sleep", lambda *_a, **_k: None)
+    # _push_snapshot is patched out so the NONE below can only come from the
+    # read-recovery path, not from a successful upload.
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot"):
+        engine.run()
+
+    assert seen == [Fault.CAMERA_DOWN, Fault.NONE]
+
+
+def test_push_engine_ignores_a_brief_read_hiccup(monkeypatch):
+    """The threshold exists so a USB re-enumeration or a single dropped frame
+    does not flap the tray. Below the threshold: report NOTHING."""
+    import numpy as np
+    from webcam_client import push_engine as pe
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    calls = {"n": 0}
+
+    def reads():
+        calls["n"] += 1
+        if calls["n"] <= pe.BAD_READ_LIMIT - 1:
+            return False, None
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: reads()
+
+    monkeypatch.setattr(pe.time, "sleep", lambda *_a, **_k: None)
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot"):
+        engine.run()
+
+    assert seen == [], "a sub-threshold read hiccup must not touch the hub"
+
+
+def test_push_engine_reports_camera_down_when_run_loop_crashes(caplog):
+    """I-1 scenario B: any exception in the loop body (cv2.error out of
+    compute_motion / cv2.resize, an OpenCV teardown error) used to propagate out
+    of run(). threading.excepthook writes to sys.stderr, which is None in the
+    console=False onefile build -- so a crashed engine left NO evidence at all
+    and NO hub report. It must log with a traceback and tell the operator that
+    camera has no picture."""
+    import logging
+    import numpy as np
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def read_once():
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: read_once()
+
+    with caplog.at_level(logging.ERROR, logger="webcam_client.push_engine"), \
+         patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch("webcam_client.push_engine.compute_motion",
+               side_effect=RuntimeError("cv2 exploded")):
+        engine.run()          # must NOT propagate
+
+    assert seen == [Fault.CAMERA_DOWN]
+    assert any(r.exc_info for r in caplog.records), "the traceback must reach the log file"
+    fake_cap.release.assert_called_once()
+
+
+def test_bad_read_threshold_is_about_three_seconds():
+    """The threshold is documented in wall-clock terms to the operator-facing
+    reviewer; pin the two constants it is derived from so a later tweak to the
+    sleep cannot silently turn '3 seconds' into 30."""
+    from webcam_client import push_engine as pe
+
+    delay = pe.BAD_READ_LIMIT * pe.BAD_READ_SLEEP
+    assert 2.0 <= delay <= 5.0, f"read-failure grace period is {delay}s"
+
+
 def test_classify_maps_401_and_403_to_bad_key():
     """These are the two the guard can act on: 'call the administrator'."""
     from webcam_client.push_engine import _classify
