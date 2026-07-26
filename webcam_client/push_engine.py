@@ -2,19 +2,34 @@
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import httpx
 
 from .camera_manager import open_camera, compute_motion, adaptive_fps
 from .hls_encoder import HlsEncoder
+from .status import Fault
 
 logger = logging.getLogger("webcam_client.push_engine")
 
 
+def _classify(exc) -> Fault:
+    """Map a failed upload to the fault the operator needs to act on.
+
+    401/403 mean the key is rejected -> the guard must call the administrator.
+    Everything else (transport failure, 5xx, 404) means the server is not
+    usefully reachable -> the guard should check the network first.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) in (401, 403):
+        return Fault.BAD_KEY
+    return Fault.NO_SERVER
+
+
 class PushEngine(threading.Thread):
-    def __init__(self, camera_config: dict, server_url: str, api_key: str):
+    def __init__(self, camera_config: dict, server_url: str, api_key: str,
+                 on_fault: Optional[Callable[[Fault], None]] = None):
         super().__init__(daemon=True)
         self._cam_config = camera_config
         self._server_url = server_url.rstrip("/")
@@ -31,6 +46,18 @@ class PushEngine(threading.Thread):
         self._stream_lock = threading.Lock()
         self._encoder: Optional[HlsEncoder] = None
         self._client: Optional[httpx.Client] = None
+
+        # Dedup locally: a failing poll runs continuously, and calling the hub
+        # every cycle would swamp it. Report only on change.
+        self._on_fault = on_fault
+        self._last_fault = None
+
+    def _report(self, fault: Fault) -> None:
+        if fault is self._last_fault:
+            return
+        self._last_fault = fault
+        if self._on_fault is not None:
+            self._on_fault(fault)
 
     def set_paused(self, enabled: bool) -> None:
         """Local, tray-driven pause. When paused the run loop keeps the camera
@@ -76,6 +103,7 @@ class PushEngine(threading.Thread):
         cap = open_camera(self._cam_config.get("device_index", 0), *self._resolution)
         if cap is None:
             logger.error(f"Cannot open camera {self._cam_config.get('device_index')}")
+            self._report(Fault.CAMERA_DOWN)
             return
 
         prev_frame = None
@@ -154,7 +182,13 @@ class PushEngine(threading.Thread):
             # the tray green and the dashboard tile permanently blank — surface it.
             resp.raise_for_status()
         except Exception as e:
+            # The technician still gets the real status code, in the log file.
+            # The OPERATOR only ever sees the plain-language string this Fault
+            # maps to -- see strings.py.
+            self._report(_classify(e))
             logger.warning(f"Snapshot push to {self._node_id} failed: {e}")
+        else:
+            self._report(Fault.NONE)
 
     def _upload_segments(self) -> None:
         if not self._encoder:

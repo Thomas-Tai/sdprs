@@ -52,9 +52,13 @@ class FakeControl:
 
 def _controller(config):
     made = {"engines": [], "controls": []}
-    def ef(cam, s, k):
+    # Both factories accept -- and ignore -- the on_fault kwarg AppController now
+    # always passes. These fakes predate fault reporting (Task 3) and none of the
+    # pre-existing tests below care about it; only the new hub-forwarding tests
+    # further down build fakes that capture it.
+    def ef(cam, s, k, on_fault=None):
         e = FakeEngine(cam, s, k); made["engines"].append(e); return e
-    def cf(s, k, ids, cb):
+    def cf(s, k, ids, cb, on_fault=None):
         c = FakeControl(s, k, ids, cb); made["controls"].append(c); return c
     return AppController(config, engine_factory=ef, control_factory=cf), made
 
@@ -245,3 +249,64 @@ def test_on_command_routes_stream_toggles_to_matching_engine():
     assert made["engines"][1].streaming is True
     cb("webcam_b", "stream_stop", None)
     assert made["engines"][1].streaming is False
+
+
+def test_controller_forwards_worker_faults_to_the_hub():
+    from webcam_client.app_controller import AppController
+    from webcam_client.status import StatusHub, Fault, Health
+
+    hub = StatusHub()
+    captured = {}
+
+    class FakeEngine:
+        def __init__(self, cam, url, key, on_fault=None):
+            captured["on_fault"] = on_fault
+            self._node_id = cam.get("node_id")
+
+        def start(self): pass
+        def set_paused(self, v): pass
+        def stop(self): pass
+
+    ctrl = AppController(
+        {"cameras": [{"device_index": 0, "node_id": "n1", "enabled": True}]},
+        engine_factory=lambda cam, url, key, on_fault=None: FakeEngine(
+            cam, url, key, on_fault),
+        control_factory=lambda url, key, ids, cb, on_fault=None: type(
+            "C", (), {"start": lambda s: None, "stop": lambda s: None})(),
+        status_hub=hub,
+    )
+    ctrl.start_engines()
+    captured["on_fault"](Fault.BAD_KEY)
+    assert hub.state is Health.BAD_KEY
+
+
+def test_stop_engines_clears_stale_faults_from_the_hub():
+    """A red light must never outlive the worker that reported it."""
+    from webcam_client.app_controller import AppController
+    from webcam_client.status import StatusHub, Fault, Health
+
+    hub = StatusHub()
+    hub.report("n1", Fault.BAD_KEY)
+    ctrl = AppController(
+        {"cameras": []},
+        engine_factory=lambda *a, **k: None,
+        control_factory=lambda *a, **k: type(
+            "C", (), {"start": lambda s: None, "stop": lambda s: None})(),
+        status_hub=hub,
+    )
+    ctrl.stop_engines()
+    assert hub.state is Health.STARTING
+    assert hub.faulty_sources() == []
+
+
+def test_pause_and_resume_reach_the_hub():
+    from webcam_client.app_controller import AppController
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+    ctrl = AppController({"cameras": []}, engine_factory=lambda *a, **k: None,
+                         control_factory=lambda *a, **k: None, status_hub=hub)
+    ctrl.pause_all()
+    assert hub.state is Health.PAUSED
+    ctrl.resume_all()
+    assert hub.state is not Health.PAUSED

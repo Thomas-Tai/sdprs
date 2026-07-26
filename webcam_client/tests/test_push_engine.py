@@ -201,3 +201,33 @@ def test_streaming_still_pushes_snapshot():
 
     assert mock_push.called, "snapshot must still be pushed while streaming"
     assert mock_encoder.write_frame.called, "encoder must still be fed while streaming"
+
+
+def test_classify_maps_401_and_403_to_bad_key():
+    """These are the two the guard can act on: 'call the administrator'."""
+    from webcam_client.push_engine import _classify
+    from webcam_client.status import Fault
+
+    for code in (401, 403):
+        exc = Exception("rejected")
+        exc.response = type("R", (), {"status_code": code})()
+        assert _classify(exc) is Fault.BAD_KEY, f"{code} must be BAD_KEY"
+
+
+def test_classify_maps_transport_failure_to_no_server():
+    from webcam_client.push_engine import _classify
+    from webcam_client.status import Fault
+    import httpx
+
+    assert _classify(httpx.ConnectError("refused")) is Fault.NO_SERVER
+
+
+def test_classify_maps_5xx_to_no_server():
+    """A 500 is not a key problem -- telling the guard to call the admin about
+    their password would send them down the wrong path."""
+    from webcam_client.push_engine import _classify
+    from webcam_client.status import Fault
+
+    exc = Exception("boom")
+    exc.response = type("R", (), {"status_code": 500})()
+    assert _classify(exc) is Fault.NO_SERVER

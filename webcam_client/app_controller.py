@@ -3,18 +3,36 @@ import logging
 import threading
 from typing import Callable, List, Optional
 
+from .status import CONTROL_SOURCE
+
 logger = logging.getLogger("webcam_client.app_controller")
 
 
-def _default_engine_factory(cam: dict, server_url: str, api_key: str):
+class _NoOpStatusHub:
+    """Stand-in used when the caller doesn't wire a real StatusHub, so worker
+    wiring (report/set_paused/clear_all) can be called unconditionally without
+    a None-check at every call site."""
+
+    def report(self, source: str, fault) -> None:
+        pass
+
+    def set_paused(self, paused: bool) -> None:
+        pass
+
+    def clear_all(self) -> None:
+        pass
+
+
+def _default_engine_factory(cam: dict, server_url: str, api_key: str,
+                            on_fault: Optional[Callable] = None):
     from .push_engine import PushEngine
-    return PushEngine(cam, server_url, api_key)
+    return PushEngine(cam, server_url, api_key, on_fault=on_fault)
 
 
 def _default_control_factory(server_url: str, api_key: str, node_ids: list,
-                             on_command: Callable):
+                             on_command: Callable, on_fault: Optional[Callable] = None):
     from .control_channel import ControlChannel
-    return ControlChannel(server_url, api_key, node_ids, on_command)
+    return ControlChannel(server_url, api_key, node_ids, on_command, on_fault=on_fault)
 
 
 class AppController:
@@ -24,10 +42,11 @@ class AppController:
     cameras or network."""
 
     def __init__(self, config: dict, *, engine_factory: Optional[Callable] = None,
-                 control_factory: Optional[Callable] = None):
+                 control_factory: Optional[Callable] = None, status_hub=None):
         self._config = dict(config)
         self._engine_factory = engine_factory or _default_engine_factory
         self._control_factory = control_factory or _default_control_factory
+        self._hub = status_hub if status_hub is not None else _NoOpStatusHub()
         self._engines: List = []
         self._control = None
         self._paused = False
@@ -50,7 +69,10 @@ class AppController:
         for cam in self._enabled_cameras():
             cam = dict(cam)
             cam["motion_threshold"] = motion
-            engine = self._engine_factory(cam, server_url, api_key)
+            node_id = cam.get("node_id", "")
+            engine = self._engine_factory(
+                cam, server_url, api_key,
+                on_fault=lambda fault, nid=node_id: self._hub.report(nid, fault))
             engine.start()
             # Re-assert the remembered pause state on freshly built engines --
             # otherwise a settings save silently un-pauses uploads while the
@@ -63,8 +85,9 @@ class AppController:
             with self._lock:
                 self._engines.append(engine)
         node_ids = [c["node_id"] for c in self._enabled_cameras() if c.get("node_id")]
-        self._control = self._control_factory(server_url, api_key, node_ids,
-                                              self._on_command)
+        self._control = self._control_factory(
+            server_url, api_key, node_ids, self._on_command,
+            on_fault=lambda fault: self._hub.report(CONTROL_SOURCE, fault))
         self._control.start()
 
     def stop_engines(self) -> None:
@@ -100,6 +123,9 @@ class AppController:
         finally:
             with self._lock:
                 self._engines = []
+            # Engines are gone -> every reported fault is stale. Without this a
+            # settings edit or a quit can leave a red light no live worker owns.
+            self._hub.clear_all()
 
     def apply(self, new_config: dict) -> None:
         self.stop_engines()
@@ -108,6 +134,7 @@ class AppController:
 
     def pause_all(self) -> None:
         self._paused = True
+        self._hub.set_paused(True)
         with self._lock:
             engines = list(self._engines)
         for e in engines:
@@ -115,6 +142,7 @@ class AppController:
 
     def resume_all(self) -> None:
         self._paused = False
+        self._hub.set_paused(False)
         with self._lock:
             engines = list(self._engines)
         for e in engines:

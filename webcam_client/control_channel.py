@@ -6,12 +6,15 @@ from typing import Callable, Dict, Optional
 
 import httpx
 
+from .status import Fault
+
 logger = logging.getLogger("webcam_client.control")
 
 
 class ControlChannel(threading.Thread):
     def __init__(self, server_url: str, api_key: str, node_ids: list,
-                 on_command: Callable[[str, str, Optional[dict]], None]):
+                 on_command: Callable[[str, str, Optional[dict]], None],
+                 on_fault: Optional[Callable] = None):
         super().__init__(daemon=True)
         self._server_url = server_url.rstrip("/")
         self._api_key = api_key
@@ -20,6 +23,18 @@ class ControlChannel(threading.Thread):
         self._stop_event = threading.Event()
         self._client: Optional[httpx.Client] = None
         self._backoff = 1.0
+
+        # Dedup locally: a failing poll runs continuously, and calling the hub
+        # every cycle would swamp it. Report only on change.
+        self._on_fault = on_fault
+        self._last_fault = None
+
+    def _report(self, fault) -> None:
+        if fault is self._last_fault:
+            return
+        self._last_fault = fault
+        if self._on_fault is not None:
+            self._on_fault(fault)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -36,6 +51,7 @@ class ControlChannel(threading.Thread):
                         break
                     self._poll_node(node_id)
             except httpx.ConnectError:
+                self._report(Fault.NO_SERVER)
                 logger.warning(f"Control channel connection failed, retry in {self._backoff}s")
                 self._stop_event.wait(self._backoff)
                 self._backoff = min(self._backoff * 2, 30.0)
@@ -58,15 +74,29 @@ class ControlChannel(threading.Thread):
                 self._on_command(node_id, cmd, params)
             # A clean poll resets the backoff; the small per-cycle floor keeps a
             # 200 + null (empty long-poll) response from tight-looping the uplink.
+            self._report(Fault.NONE)
             self._backoff = 1.0
             self._stop_event.wait(0.1)
         elif resp.status_code == 401:
+            self._report(Fault.BAD_KEY)
             logger.error("API key rejected — stopping control channel")
             self._stop_event.set()
+        elif resp.status_code == 403:
+            # Unlike 401, the key itself may be valid -- it just doesn't own
+            # this camera. A settings change can fix that without a restart,
+            # so back off and keep polling rather than stopping the channel.
+            self._report(Fault.BAD_KEY)
+            logger.warning(
+                f"Control channel forbidden (403) for {node_id}, "
+                f"retry in {self._backoff}s"
+            )
+            self._stop_event.wait(self._backoff)
+            self._backoff = min(self._backoff * 2, 30.0)
         else:
             # httpx does NOT raise on 5xx; without this arm a persistent non-200/
             # non-401 status re-polls with no delay (Task 9 [Important] busy-loop).
             # Apply the SAME exponential backoff the ConnectError arm uses.
+            self._report(Fault.NO_SERVER)
             logger.warning(
                 f"Control channel unexpected status {resp.status_code} for {node_id}, "
                 f"retry in {self._backoff}s"
