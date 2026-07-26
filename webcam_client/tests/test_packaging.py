@@ -74,3 +74,34 @@ def test_build_spec_stays_onefile():
     # Single-file drop is a hard product requirement: no onedir COLLECT.
     spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
     assert "COLLECT(" not in spec, "must remain a one-file build (no onedir COLLECT)"
+
+
+def test_build_spec_excludes_opencv_videoio_ffmpeg():
+    """28.6MB of OpenCV's own ffmpeg backend, for video FILE i/o. This client
+    only does VideoCapture(index, CAP_DSHOW) + resize/imencode/cvtColor/
+    GaussianBlur/absdiff -- it never opens a video file."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "opencv_videoio_ffmpeg" in spec
+
+
+def test_build_spec_excludes_pil_avif():
+    """PIL is used for a 64x64 tray circle and one thumbnail. The AVIF codec is
+    7.8MB extracted on every launch for nothing."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "_avif" in spec
+
+
+def test_build_spec_filters_the_binaries_list():
+    """The excludes must actually be applied to a.binaries -- naming them in a
+    constant while never filtering would silently ship them anyway."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "a.binaries = [" in spec
+
+
+def test_build_spec_warns_on_oversized_ffmpeg():
+    """The 2026-07-25 round assumed ffmpeg was ~80MB and shipped a 227MB full
+    build without noticing. Turn that silent size regression into a build-time
+    warning."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "_FFMPEG_MAX_MB" in spec
+    assert "SDPRS_FFMPEG" in spec, "build must allow an explicit ffmpeg override"
