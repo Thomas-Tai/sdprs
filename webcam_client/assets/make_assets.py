@@ -69,18 +69,43 @@ def _icon_compact(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def _icon_detailed_at(size):
+    """Master, resampled to an exact size (for 32/48/64/128)."""
+    return _icon_detailed().resize((size, size), Image.LANCZOS)
+
+
 def make_icon():
     """Write a multi-resolution .ico with DIFFERENT artwork at small sizes.
 
-    Pillow's ICO writer uses an entry from `append_images` verbatim when its size
-    matches a requested size exactly, and otherwise resamples the master -- so
-    16/24 come from _icon_compact and the rest from the 256px master.
-    (Verified against Pillow 12.1.1 IcoImagePlugin._save.)
+    Pillow's ICO writer (IcoImagePlugin._save) picks an entry from
+    `append_images` verbatim ONLY when its `.size` matches a requested size
+    exactly. For any requested size with no exact match, it falls into a
+    `for/else` branch that resamples -- but the image it resamples is NOT the
+    master: it's whatever `provided_im` was left holding when the inner
+    `for provided_im in provided_ims` loop exhausted without a `break`, which
+    in Python is the LAST item of `provided_ims`. With append_images ending in
+    _icon_compact(24), every unmatched size resampled the 24px compact icon,
+    and since `.thumbnail()` never upscales, resizing a 24px source toward a
+    LARGER target (32/48/64/128) was a no-op: those four sizes silently ended
+    up as byte-identical duplicates of the 24px entry, mislabeled with the
+    requested (wrong) dimensions in the ICONDIR -- so 32/48/64/128 were
+    effectively ABSENT from the file. (Confirmed against Pillow 12.1.1.)
+
+    Fix: never let the fallback branch execute. Supply an exact-size image for
+    EVERY requested size so each iteration takes the exact-match `break` path.
+    16/24 come from the hand-tuned _icon_compact; 32/48/64/128 come from the
+    master resampled per-size via _icon_detailed_at; 256 matches the master
+    (`im`) itself. Do not go back to a 2-entry append_images list -- that is
+    exactly the regression this fixes.
     """
     master = _icon_detailed()
-    sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (24, 24), (16, 16)]
-    master.save(HERE / "sdprs.ico", sizes=sizes,
-                append_images=[_icon_compact(16), _icon_compact(24)])
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    extras = [
+        _icon_compact(16), _icon_compact(24),
+        _icon_detailed_at(32), _icon_detailed_at(48),
+        _icon_detailed_at(64), _icon_detailed_at(128),
+    ]
+    master.save(HERE / "sdprs.ico", sizes=sizes, append_images=extras)
     print("wrote sdprs.ico")
 
 

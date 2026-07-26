@@ -191,6 +191,51 @@ def test_icon_16px_is_handtuned_not_a_downsample():
         "16px frame is just a downsample -- hand-tuned artwork did not make it in"
 
 
+def test_icon_has_all_seven_distinct_sizes():
+    """Regression test for a real bug found in review: Pillow's ICO writer's
+    for/else fallback branch (taken for any requested size with no EXACT
+    append_images match) resamples the LAST item of `append_images` -- not the
+    master -- because the inner `for provided_im in provided_ims` loop
+    variable leaks past the loop. Combined with `.thumbnail()` never
+    upscaling, a 2-entry append_images list (just the 16/24 compact icons)
+    silently collapsed 32/48/64/128 into byte-identical duplicates of the 24px
+    entry, mislabeled with the requested (wrong) size in the ICONDIR -- so
+    those four sizes were effectively ABSENT from the file even though
+    `master.save(..., sizes=[...])` listed them. Confirmed against the
+    regressed file: 7 ICONDIR entries, but only 3 distinct (w, h) pairs, and
+    `Image.open(ico); im.size = (48, 48)` raised
+    ``ValueError: This is not one of the allowed sizes of this image``.
+
+    Assert both that every expected size is genuinely selectable via PIL AND
+    that the raw ICONDIR entries are pairwise distinct -- so this fails loudly
+    if the fallback branch is ever exercised again (e.g. if append_images goes
+    back to a 2-entry list)."""
+    from PIL import Image
+
+    ico = WEBCAM_DIR / "assets" / "sdprs.ico"
+    expected = {(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)}
+
+    with Image.open(ico) as im:
+        actual_sizes = set(im.info["sizes"])
+    assert actual_sizes == expected, \
+        f"icon sizes mismatch -- missing: {expected - actual_sizes}, extra: {actual_sizes - expected}"
+
+    # Raw ICONDIR: 6-byte header (reserved:H, type:H, count:H), then `count`
+    # 16-byte ICONDIRENTRY records. bWidth/bHeight are single bytes at offsets
+    # 0/1 within each entry, where 0 means 256 (byte can't hold 256).
+    raw = ico.read_bytes()
+    count = int.from_bytes(raw[4:6], "little")
+    dims = []
+    for i in range(count):
+        entry = raw[6 + i * 16: 6 + i * 16 + 16]
+        w = entry[0] or 256
+        h = entry[1] or 256
+        dims.append((w, h))
+    assert len(dims) == len(expected), f"expected {len(expected)} ICONDIR entries, found {len(dims)}"
+    assert len(set(dims)) == len(dims), \
+        f"ICONDIR has duplicate (width, height) entries -- sizes silently collapsed: {dims}"
+
+
 def test_build_spec_declares_a_splash():
     """S4: console=False + ~20s onefile extraction = a completely blank screen.
     The bootloader paints the splash before Python starts."""
