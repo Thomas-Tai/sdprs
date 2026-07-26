@@ -238,7 +238,10 @@ splash 則讓那段時間不再像當機。
 
 **Fix round 1 補測（同一份 `dist/SDPRS_Webcam.exe`，未重新 build）：** 改用
 `Get-Process`／`Get-CimInstance` 每 100ms 對**每一個** `SDPRS_Webcam.exe` 行程
-同時記錄 PID、`ParentProcessId`、`MainWindowHandle`、視窗標題與行程啟動時間，
+同時記錄 PID、`ParentProcessId`、`MainWindowHandle`、視窗標題，並以單調時脈
+（`Stopwatch`）記錄**自啟動起算的經過時間**——絕對行程啟動時間戳記
+（`$p.StartTime`）僅在量測初次嘗試（已判定有 edge-detection 瑕疵、不採信為
+證據的那一輪）中記錄過，本節採信的兩次乾淨重跑並未記錄此欄位。
 連續兩次乾淨量測，結果完全一致且無歧義：
 
 - 兩次量測中，擁有可見視窗（標題 `'tk'`，PyInstaller splash 樣板從不呼叫
@@ -259,7 +262,7 @@ splash 則讓那段時間不再像當機。
 | 量測輪次 | Splash 出現時間 | Splash 消失時間 | 方法 |
 |---|---|---|---|
 | 第一輪（本文件首次記錄） | 約 0.86–0.95 s | 約 16.1–16.2 s | 逐一輪詢，未記錄 PPID |
-| Fix round 1，run B | 0.451 s | 介於 15.634–15.772 s 之間 | 每 100ms 全量快照，含 PID/PPID/title/啟動時間 |
+| Fix round 1，run B | 0.451 s | 介於 15.634–15.772 s 之間 | 每 100ms 全量快照，含 PID/PPID/title/經過時間（非行程絕對啟動時間戳記） |
 | Fix round 1，run C | 0.493 s | 介於 15.645–15.785 s 之間 | 同上 |
 
 無論採用哪一輪的數字，皆遠低於 3 秒門檻，**達標**的結論不變；消失時間兩輪
