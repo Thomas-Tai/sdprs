@@ -208,7 +208,7 @@ def test_main_proceeds_when_setup_logging_raises(monkeypatch):
         def start(self):
             order.append("tray")
 
-        def set_status(self, ok):
+        def set_health(self, state):
             pass
 
     monkeypatch.setattr(m, "setup_logging", raising_setup_logging)
@@ -278,7 +278,7 @@ def test_tray_starts_before_engines(monkeypatch):
         def start(self):
             order.append("tray")
 
-        def set_status(self, ok):
+        def set_health(self, state):
             pass
 
     monkeypatch.setattr(m, "AppController", FakeCtrl)

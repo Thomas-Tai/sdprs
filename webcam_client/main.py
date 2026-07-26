@@ -9,6 +9,7 @@ from .gui.setup_wizard import run_setup_wizard
 from .gui.tray_app import TrayApp
 from .logging_setup import setup_logging, add_secret
 from .single_instance import SingleInstance
+from .status import Health
 
 logger = logging.getLogger("webcam_client.main")
 
@@ -152,7 +153,10 @@ def main():
     # camera (0.5-2s apiece). Show the icon first, then do the slow work.
     # AppController.__init__ touches no hardware, so building it above is free.
     tray.start()
-    tray.set_status(True)
+    # Task 6 wires real StatusHub health into the tray; nothing has reported
+    # yet at this point in startup, so STARTING (grey) is the honest state --
+    # NOT the old hardcoded "connected=True" (always green) lie.
+    tray.set_health(Health.STARTING)
     _close_splash()
 
     controller.start_engines()
