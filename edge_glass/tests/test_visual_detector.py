@@ -233,3 +233,35 @@ class TestVisualDetectorAnomalyRecovery:
 
         assert non_none_count > 0, "復原後白幀已成為新的正常基準，不應持續返回 None"
         assert detector.blinded is False
+
+
+# ============================================================
+# 效率／熱管理最佳化（2026-07-26，scope B）
+# ============================================================
+
+
+class _CountingORB:
+    """Wraps a real cv2.ORB, counting detectAndCompute calls, delegating the rest."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = 0
+
+    def detectAndCompute(self, *args, **kwargs):
+        self.calls += 1
+        return self._real.detectAndCompute(*args, **kwargs)
+
+
+def test_orb_features_computed_once_per_frame():
+    """Stabilization must reuse the previous frame's cached descriptors, so ORB
+    detectAndCompute runs exactly once per analyze() (was twice: prev + current)."""
+    detector = VisualDetector(VISUAL_CONFIG, fps=15)
+    spy = _CountingORB(detector._orb)
+    detector._orb = spy
+
+    frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    for _ in range(5):
+        detector.analyze(frame)
+
+    # 5 analyze() calls -> exactly 5 detectAndCompute calls (one per frame).
+    assert spy.calls == 5

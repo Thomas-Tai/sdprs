@@ -69,9 +69,13 @@ class VisualDetector:
         self._canny_threshold2 = config.get("canny_threshold2", 150)
 
         # [2] 防震對齊
-        self._prev_gray: Optional[np.ndarray] = None
         self._orb = cv2.ORB_create(nfeatures=500)
         self._bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # 前一幀的 ORB 特徵快取：每幀只算一次特徵，重用上一幀已算好的描述子（原本
+        # 每幀對 prev 與 current 各算一次，等於重算了上一幀）。以 _prev_des 是否為
+        # None 作為「是否有前一幀」的哨兵，取代原本的 _prev_gray。
+        self._prev_kp = None
+        self._prev_des: Optional[np.ndarray] = None
 
         # [3] 異常幀排除
         self._baseline_brightness: Optional[float] = None
@@ -148,7 +152,8 @@ class VisualDetector:
         """
         步驟 [2]：防震對齊。
 
-        使用 ORB 特徵點匹配進行影像對齊。
+        只對「當前幀」計算一次 ORB 特徵，與上一幀「已快取」的特徵配對；對齊基準是
+        上一幀的原始灰度（raw），非上一幀對齊後的輸出（這才使快取成立）。
 
         Args:
             gray: 當前灰度影像
@@ -156,22 +161,26 @@ class VisualDetector:
         Returns:
             對齊後的灰度影像
         """
-        if self._prev_gray is None:
-            return gray
-
         try:
-            # 偵測特徵點
-            kp1, des1 = self._orb.detectAndCompute(self._prev_gray, None)
+            # 只算一次：當前幀特徵
             kp2, des2 = self._orb.detectAndCompute(gray, None)
+            prev_kp, prev_des = self._prev_kp, self._prev_des
+            # 先讀舊值、後存新值：快取當前幀特徵供下一幀使用。
+            self._prev_kp, self._prev_des = kp2, des2
 
-            if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
+            if (
+                prev_des is None
+                or des2 is None
+                or len(prev_des) < 10
+                or len(des2) < 10
+            ):
                 self._stabilize_warn_count += 1
                 if self._stabilize_warn_count == 1 or self._stabilize_warn_count % self._stabilize_warn_interval == 0:
                     logger.info("Stabilization skipped: not enough feature points (count=%d)", self._stabilize_warn_count)
                 return gray
 
-            # 匹配特徵點
-            matches = self._bf_matcher.match(des1, des2)
+            # 匹配特徵點（上一幀快取 vs 當前幀）
+            matches = self._bf_matcher.match(prev_des, des2)
 
             if len(matches) < 10:
                 self._stabilize_warn_count += 1
@@ -180,7 +189,7 @@ class VisualDetector:
                 return gray
 
             # 取得匹配點座標
-            src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(
+            src_pts = np.float32([prev_kp[m.queryIdx].pt for m in matches]).reshape(
                 -1, 1, 2
             )
             dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(
@@ -437,7 +446,6 @@ class VisualDetector:
         diff = self._compute_diff(aligned)
         if diff is None:
             # 基線尚未建立
-            self._prev_gray = aligned
             return VisualResult(triggered=False)
 
         # [6] 套用 ROI
@@ -450,9 +458,6 @@ class VisualDetector:
         # [9] 輪廓分析
         # [10] 置信度判定
         triggered, confidence = self._analyze_contours(closed)
-
-        # 更新前一幀
-        self._prev_gray = aligned
 
         return VisualResult(triggered=triggered, confidence=confidence)
 
