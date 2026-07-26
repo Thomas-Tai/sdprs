@@ -326,3 +326,18 @@ def test_detect_scale_triggers_on_crack():
             triggered = True
             break
     assert triggered, "half-res detector should still trigger on a bold crack"
+
+
+def test_stabilize_flag_false_skips_orb_entirely():
+    cfg = {**VISUAL_CONFIG, "stabilize": False}
+    detector = VisualDetector(cfg, fps=15)
+    spy = _CountingORB(detector._orb)
+    detector._orb = spy
+    frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    result = None
+    for _ in range(5):
+        result = detector.analyze(frame)
+    assert spy.calls == 0
+    # Detection still runs; a flat frame simply does not trigger.
+    if result:
+        assert result.triggered is False

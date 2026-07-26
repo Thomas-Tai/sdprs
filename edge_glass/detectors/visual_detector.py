@@ -83,6 +83,9 @@ class VisualDetector:
         # None 作為「是否有前一幀」的哨兵，取代原本的 _prev_gray。
         self._prev_kp = None
         self._prev_des: Optional[np.ndarray] = None
+        # 防震對齊開關（visual.stabilize）：預設開啟（維持現行行為）。剛性固定的攝像頭
+        # 可關閉，省下整段 ORB＋配對＋warpAffine（管線最貴的部分）。
+        self._stabilize_enabled = bool(config.get("stabilize", True))
 
         # [3] 異常幀排除
         self._baseline_brightness: Optional[float] = None
@@ -460,8 +463,8 @@ class VisualDetector:
         if not self._check_anomaly(gray):
             return None
 
-        # [2] 防震對齊
-        aligned = self._stabilize(gray)
+        # [2] 防震對齊（可由 visual.stabilize 關閉）
+        aligned = self._stabilize(gray) if self._stabilize_enabled else gray
 
         # [4] 更新基線
         self._update_baseline(aligned)
