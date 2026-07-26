@@ -8,6 +8,14 @@ Logs land in %APPDATA%\\SDPRSWebcam\\logs\\webcam.log.
 SECURITY: the API key must never reach this file. _RedactFilter is installed on
 the HANDLER so it scrubs records from every module, and it consumes record.args
 so lazy %-formatting cannot smuggle a secret past it.
+
+_RedactFilter alone is NOT sufficient: it only inspects record.msg/record.args.
+record.exc_info is rendered into traceback text by Formatter.format(), which
+runs AFTER filters -- so a secret embedded in an exception's own message (str(exc))
+would sail straight past the filter through any logger.exception() call. The
+_RedactingFormatter below re-scrubs the fully rendered line -- message and
+traceback both -- as an independent second layer, so there is no format-time
+seam left for a secret to escape through.
 """
 import logging
 import logging.handlers
@@ -42,19 +50,48 @@ class _RedactFilter(logging.Filter):
         if secret and secret not in self._secrets:
             self._secrets.append(secret)
 
+    def redact(self, text: str) -> str:
+        """Scrub any registered secret out of an arbitrary string.
+
+        Shared by filter() (scrubs record.msg/args pre-formatting) and
+        _RedactingFormatter (scrubs the fully rendered line, including any
+        exception traceback, post-formatting) -- one secrets list, two
+        independent scrub points, so neither a message-only nor a
+        traceback-only leak has a way through.
+        """
+        for s in self._secrets:
+            if s in text:
+                text = text.replace(s, REDACTED)
+        return text
+
     def filter(self, record):
         if not self._secrets:
             return True
         msg = record.getMessage()          # applies args NOW
-        hit = False
-        for s in self._secrets:
-            if s in msg:
-                msg = msg.replace(s, REDACTED)
-                hit = True
-        if hit:
-            record.msg = msg
+        redacted = self.redact(msg)
+        if redacted != msg:
+            record.msg = redacted
             record.args = ()               # already applied above
         return True
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Second, independent redaction layer over the fully rendered line.
+
+    _RedactFilter runs before formatting and only ever sees record.msg /
+    record.args. record.exc_info is turned into traceback text inside
+    Formatter.format() (via formatException), which happens AFTER the filter
+    chain -- so a secret that only appears in an exception's own str() (e.g.
+    a logger.exception() call) would bypass the filter entirely. Re-scrubbing
+    the final string here closes that seam without weakening the filter.
+    """
+
+    def __init__(self, fmt, redactor):
+        super().__init__(fmt)
+        self._redactor = redactor
+
+    def format(self, record):
+        return self._redactor.redact(super().format(record))
 
 
 def setup_logging(level=logging.INFO):
@@ -68,8 +105,8 @@ def setup_logging(level=logging.INFO):
     handler = logging.handlers.RotatingFileHandler(
         log_dir / LOG_FILENAME, maxBytes=MAX_BYTES,
         backupCount=BACKUP_COUNT, encoding="utf-8")
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+    handler.setFormatter(_RedactingFormatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s", _redactor))
     handler.addFilter(_redactor)
     root = logging.getLogger()
     root.setLevel(level)
