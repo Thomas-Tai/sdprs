@@ -50,9 +50,14 @@ class ControlChannel(threading.Thread):
                     if self._stop_event.is_set():
                         break
                     self._poll_node(node_id)
-            except httpx.ConnectError:
+            except httpx.TransportError:
+                # httpx.TransportError is the shared base of ConnectError,
+                # ConnectTimeout, ReadTimeout, ReadError, etc. -- catching only
+                # ConnectError left the client's own connect=3.0 timeout
+                # (below) falling into the bare `except Exception` arm, which
+                # never reports to the hub (Task 3 review finding 1).
                 self._report(Fault.NO_SERVER)
-                logger.warning(f"Control channel connection failed, retry in {self._backoff}s")
+                logger.warning(f"Control channel transport failure, retry in {self._backoff}s")
                 self._stop_event.wait(self._backoff)
                 self._backoff = min(self._backoff * 2, 30.0)
             except Exception as e:
@@ -95,7 +100,7 @@ class ControlChannel(threading.Thread):
         else:
             # httpx does NOT raise on 5xx; without this arm a persistent non-200/
             # non-401 status re-polls with no delay (Task 9 [Important] busy-loop).
-            # Apply the SAME exponential backoff the ConnectError arm uses.
+            # Apply the SAME exponential backoff the transport-error arm uses.
             self._report(Fault.NO_SERVER)
             logger.warning(
                 f"Control channel unexpected status {resp.status_code} for {node_id}, "

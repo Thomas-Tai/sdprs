@@ -42,7 +42,7 @@ def test_poll_node_5xx_triggers_backoff():
     assert ch._backoff > 1.0               # backoff grew for the next cycle
 
 
-def test_control_channel_reports_bad_key_on_401(monkeypatch):
+def test_control_channel_reports_bad_key_on_401():
     from webcam_client.control_channel import ControlChannel
     from webcam_client.status import Fault
 
@@ -58,7 +58,7 @@ def test_control_channel_reports_bad_key_on_401(monkeypatch):
     assert seen == [Fault.BAD_KEY]
 
 
-def test_control_channel_reports_bad_key_on_403(monkeypatch):
+def test_control_channel_reports_bad_key_on_403():
     from webcam_client.control_channel import ControlChannel
     from webcam_client.status import Fault
 
@@ -91,6 +91,33 @@ def test_control_channel_reports_none_on_clean_poll():
     ch._client = type("C", (), {"get": lambda self, *a, **k: Resp()})()
     ch._poll_node("n1")
     assert seen == [Fault.NONE]
+
+
+def test_control_channel_reports_no_server_on_connect_timeout():
+    """Review finding 1: ConnectTimeout is NOT a subclass of ConnectError
+    (verified against the installed httpx 0.28.1 -- ConnectTimeout's MRO is
+    TimeoutException -> TransportError -> RequestError -> HTTPError, with no
+    ConnectError in it). It IS the client's own configured connect=3.0 timeout
+    (control_channel.py run()), a real and likely failure mode. Before the fix
+    it fell into the bare `except Exception` arm, which only logs -- the
+    operator's status went silently stale. It must reach the hub as NO_SERVER,
+    same as ConnectError."""
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+    import httpx
+
+    seen = []
+    ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
+                        on_fault=seen.append)
+
+    def fake_poll_node(node_id):
+        ch._stop_event.set()  # let run()'s while-loop exit after this cycle
+        raise httpx.ConnectTimeout("timed out")
+
+    ch._poll_node = fake_poll_node
+    with patch.object(ch._stop_event, "wait"):
+        ch.run()
+    assert seen == [Fault.NO_SERVER]
 
 
 def test_control_channel_dedups_repeated_faults():

@@ -203,6 +203,69 @@ def test_streaming_still_pushes_snapshot():
     assert mock_encoder.write_frame.called, "encoder must still be fed while streaming"
 
 
+def test_push_engine_reports_camera_down_when_camera_wont_open():
+    """Review finding 2: nothing constructed a PushEngine and verified on_fault
+    fires for CAMERA_DOWN. Mirrors the ControlChannel on_fault tests -- the
+    classification table's first row (`cap is None` -> CAMERA_DOWN)."""
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+
+    with patch("webcam_client.push_engine.open_camera", return_value=None):
+        engine.run()
+
+    assert seen == [Fault.CAMERA_DOWN]
+
+
+def test_push_engine_reports_none_on_successful_snapshot():
+    """Mirrors test_control_channel_reports_none_on_clean_poll: a clean push
+    must report Fault.NONE (line 191) so a prior fault clears."""
+    import numpy as np
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+    mock_resp = MagicMock()
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+    engine._client = mock_client
+
+    engine._push_snapshot(np.zeros((480, 640, 3), dtype=np.uint8))
+
+    assert seen == [Fault.NONE]
+
+
+def test_push_engine_dedups_repeated_snapshot_faults():
+    """Mirrors test_control_channel_dedups_repeated_faults: a failing uplink
+    runs at ~1Hz; repeated identical faults must report to the hub once, not
+    every cycle."""
+    import numpy as np
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+
+    request = httpx.Request("POST", "https://example.com/api/webcam/webcam_01/snapshot")
+    response = httpx.Response(500, request=request)
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "server error", request=request, response=response
+    )
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+    engine._client = mock_client
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    for _ in range(5):
+        engine._push_snapshot(frame)
+
+    assert seen == [Fault.NO_SERVER], "repeat identical faults must report once"
+
+
 def test_classify_maps_401_and_403_to_bad_key():
     """These are the two the guard can act on: 'call the administrator'."""
     from webcam_client.push_engine import _classify
