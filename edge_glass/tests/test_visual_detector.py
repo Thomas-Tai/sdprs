@@ -265,3 +265,20 @@ def test_orb_features_computed_once_per_frame():
 
     # 5 analyze() calls -> exactly 5 detectAndCompute calls (one per frame).
     assert spy.calls == 5
+
+
+def test_orb_skipped_on_anomaly_frames():
+    """The cheap brightness/anomaly gate runs before stabilization, so an anomaly
+    frame returns None without paying the ORB cost."""
+    detector = VisualDetector(VISUAL_CONFIG, fps=15)
+    normal = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    for _ in range(10):
+        detector.analyze(normal)  # establish the brightness baseline
+
+    spy = _CountingORB(detector._orb)
+    detector._orb = spy
+    white = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    result = detector.analyze(white)
+
+    assert result is None
+    assert spy.calls == 0  # anomaly frame skipped stabilization entirely

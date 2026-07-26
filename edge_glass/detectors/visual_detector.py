@@ -432,12 +432,13 @@ class VisualDetector:
         # [1] 灰度轉換
         gray = self._to_gray(frame)
 
+        # [3] 異常幀排除（廉價閘門先跑）：異常幀（夜間/閃電/切燈）直接返回，不用付出
+        #     ORB 成本。平均亮度對仿射對齊近似不變，故在對齊前檢查與原行為等價。
+        if not self._check_anomaly(gray):
+            return None
+
         # [2] 防震對齊
         aligned = self._stabilize(gray)
-
-        # [3] 異常幀排除
-        if not self._check_anomaly(aligned):
-            return None
 
         # [4] 更新基線
         self._update_baseline(aligned)
