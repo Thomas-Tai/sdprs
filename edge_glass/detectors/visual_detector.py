@@ -68,6 +68,13 @@ class VisualDetector:
         self._canny_threshold1 = config.get("canny_threshold1", 50)
         self._canny_threshold2 = config.get("canny_threshold2", 150)
 
+        # 偵測降採樣比例（visual.detect_scale）：偵測管線在原尺寸的 detect_scale 倍
+        # 工作影像上執行，畫素量約 detect_scale² 倍。錄影緩衝／快照仍用原尺寸幀，
+        # 證據與儀表板畫面不受影響。夾在 (0, 1]。
+        self._detect_scale = min(1.0, max(0.01, float(config.get("detect_scale", 1.0))))
+        # 固定物理長度在低解析度下佔用較少畫素，故有效輪廓門檻按 detect_scale 縮放。
+        self._min_contour_length_effective = self._min_contour_length_px * self._detect_scale
+
         # [2] 防震對齊
         self._orb = cv2.ORB_create(nfeatures=500)
         self._bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
@@ -94,11 +101,20 @@ class VisualDetector:
         self._frame_count = 0
 
         # [6] ROI 遮罩（預生成）
+        # 偵測基準畫布固定為 1280x720（既有假設）。降採樣時，遮罩與工作影像一律縮到
+        # 此畫布的 detect_scale 倍，兩者尺寸永遠一致；ROI 多邊形亦以 detect_scale 縮放。
         roi_polygon = config.get(
             "roi_polygon",
             [[100, 50], [1180, 50], [1180, 670], [100, 670]],
         )
-        self._roi_mask = self._create_roi_mask(roi_polygon, 1280, 720)
+        _BASE_W, _BASE_H = 1280, 720
+        self._work_w = max(1, int(round(_BASE_W * self._detect_scale)))
+        self._work_h = max(1, int(round(_BASE_H * self._detect_scale)))
+        scaled_polygon = [
+            [int(round(x * self._detect_scale)), int(round(y * self._detect_scale))]
+            for x, y in roi_polygon
+        ]
+        self._roi_mask = self._create_roi_mask(scaled_polygon, self._work_w, self._work_h)
         self._roi_pixel_count = np.count_nonzero(self._roi_mask)
 
         # [8] 形態學 kernel（預生成）
@@ -380,7 +396,7 @@ class VisualDetector:
         significant_contours = []
         for contour in contours:
             length = cv2.arcLength(contour, closed=False)
-            if length > self._min_contour_length_px:
+            if length > self._min_contour_length_effective:
                 significant_contours.append(contour)
 
         # [10] 置信度計算
@@ -429,6 +445,13 @@ class VisualDetector:
         Returns:
             VisualResult 或 None（異常幀）
         """
+        # 偵測降採樣：只縮偵測用的工作副本（重新綁定區域變數 frame）；呼叫端傳入的
+        # 原始 frame（供緩衝／快照）不受影響。縮到工作畫布尺寸，與 ROI 遮罩一致。
+        if self._detect_scale != 1.0:
+            frame = cv2.resize(
+                frame, (self._work_w, self._work_h), interpolation=cv2.INTER_AREA
+            )
+
         # [1] 灰度轉換
         gray = self._to_gray(frame)
 

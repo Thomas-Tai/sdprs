@@ -282,3 +282,47 @@ def test_orb_skipped_on_anomaly_frames():
 
     assert result is None
     assert spy.calls == 0  # anomaly frame skipped stabilization entirely
+
+
+def test_detect_scale_builds_scaled_roi_mask():
+    cfg = {**VISUAL_CONFIG, "detect_scale": 0.5}
+    detector = VisualDetector(cfg, fps=15)
+    # Half-res working canvas: 1280x720 -> 640x360. numpy shape is (h, w).
+    assert detector._roi_mask.shape == (360, 640)
+    assert detector._roi_pixel_count > 0
+    # A fixed physical length spans half the pixels at half resolution.
+    assert detector._min_contour_length_effective == VISUAL_CONFIG["min_contour_length_px"] * 0.5
+
+
+def test_detect_scale_rejects_normal_and_flags_anomaly():
+    cfg = {**VISUAL_CONFIG, "detect_scale": 0.5}
+    detector = VisualDetector(cfg, fps=15)
+    normal = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    result = None
+    for _ in range(30):
+        result = detector.analyze(normal)
+    if result:
+        assert result.triggered is False
+    white = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    assert detector.analyze(white) is None
+
+
+def test_detect_scale_triggers_on_crack():
+    cfg = {**VISUAL_CONFIG, "detect_scale": 0.5}
+    detector = VisualDetector(cfg, fps=15)
+    normal = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    for _ in range(30):
+        detector.analyze(normal)
+    crack = np.full((720, 1280, 3), 128, dtype=np.uint8)
+    # Bolder strokes than the full-res crack test: at half resolution thin lines
+    # blur below the Canny/contour floor.
+    cv2.line(crack, (200, 200), (1000, 600), (255, 255, 255), 6)
+    cv2.line(crack, (300, 100), (900, 500), (255, 255, 255), 5)
+    cv2.line(crack, (400, 300), (800, 650), (255, 255, 255), 6)
+    triggered = False
+    for _ in range(10):
+        r = detector.analyze(crack)
+        if r and r.triggered:
+            triggered = True
+            break
+    assert triggered, "half-res detector should still trigger on a bold crack"
