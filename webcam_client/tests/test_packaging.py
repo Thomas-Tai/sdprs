@@ -19,6 +19,8 @@ WEBCAM_DIR = Path(__file__).resolve().parent.parent          # .../webcam_client
 REPO_ROOT = WEBCAM_DIR.parent                                # .../sdprs
 sys.path.insert(0, str(REPO_ROOT))
 
+from webcam_client import buildconfig  # noqa: E402  (needs the sys.path insert above)
+
 
 def test_package_module_as_loose_script_reproduces_the_bug(tmp_path):
     """Running main.py as a loose script (PyInstaller's __main__ model) still
@@ -76,32 +78,89 @@ def test_build_spec_stays_onefile():
     assert "COLLECT(" not in spec, "must remain a one-file build (no onedir COLLECT)"
 
 
-def test_build_spec_excludes_opencv_videoio_ffmpeg():
-    """28.6MB of OpenCV's own ffmpeg backend, for video FILE i/o. This client
-    only does VideoCapture(index, CAP_DSHOW) + resize/imencode/cvtColor/
-    GaussianBlur/absdiff -- it never opens a video file."""
+def test_build_spec_imports_buildconfig_for_packaging_decisions():
+    """build.spec itself can't be imported by pytest (needs PyInstaller's
+    injected SPECPATH/Analysis/EXE globals), so it must delegate the actual
+    ffmpeg-resolution / oversize / binary-filter decisions to the plain,
+    importable buildconfig module rather than re-inlining brittle logic that
+    only string-matching tests could ever see."""
     spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
-    assert "opencv_videoio_ffmpeg" in spec
+    assert "import buildconfig" in spec
+    assert "buildconfig.resolve_ffmpeg(" in spec
+    assert "buildconfig.ffmpeg_is_oversized(" in spec
+    assert "buildconfig.filter_binaries(" in spec
 
 
-def test_build_spec_excludes_pil_avif():
-    """PIL is used for a 64x64 tray circle and one thumbnail. The AVIF codec is
-    7.8MB extracted on every launch for nothing."""
-    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
-    assert "_avif" in spec
+# -- buildconfig: behavioral coverage of the actual packaging decisions -------
+#
+# The four tests these replace only checked that certain substrings appeared
+# somewhere in build.spec's text -- which cannot distinguish "the exclusion
+# constant is wired into the filter" from "the same substring merely appears
+# in a nearby comment", and cannot detect an inverted predicate that would
+# drop every binary or ship every excluded one. These call the real
+# buildconfig functions instead.
+
+def test_filter_binaries_drops_excluded_and_keeps_survivors():
+    """28.6MB opencv_videoio_ffmpeg* (OpenCV's video-FILE i/o backend -- this
+    client only ever does VideoCapture(index, CAP_DSHOW) live capture, never
+    opens a video file) and 7.8MB PIL _avif (PIL only draws a 64x64 tray
+    circle and one Tk thumbnail) must be dropped, in ANY case combination,
+    while everything else in a realistic binaries list survives untouched."""
+    fixture = [
+        ("cv2\\cv2.pyd", "C:\\build\\cv2\\cv2.pyd", "EXTENSION"),
+        ("python314.dll", "C:\\build\\python314.dll", "BINARY"),
+        ("libcrypto-3.dll", "C:\\build\\libcrypto-3.dll", "BINARY"),
+        ("PIL\\_imaging.cp314-win_amd64.pyd", "C:\\build\\PIL\\_imaging.cp314-win_amd64.pyd", "EXTENSION"),
+        ("opencv_videoio_ffmpeg4130_64.dll", "C:\\build\\opencv_videoio_ffmpeg4130_64.dll", "BINARY"),
+        ("OPENCV_VIDEOIO_FFMPEG4130_64.DLL", "C:\\build\\OPENCV_VIDEOIO_FFMPEG4130_64.DLL", "BINARY"),
+        ("PIL\\_avif.cp314-win_amd64.pyd", "C:\\build\\PIL\\_avif.cp314-win_amd64.pyd", "EXTENSION"),
+        ("PIL\\_AVIF.cp314-win_amd64.pyd", "C:\\build\\PIL\\_AVIF.cp314-win_amd64.pyd", "EXTENSION"),
+    ]
+    result = buildconfig.filter_binaries(fixture)
+    names = {b[0] for b in result}
+
+    survivors = {
+        "cv2\\cv2.pyd",
+        "python314.dll",
+        "libcrypto-3.dll",
+        "PIL\\_imaging.cp314-win_amd64.pyd",
+    }
+    assert survivors <= names, f"survivors wrongly dropped: {survivors - names}"
+
+    excluded = {
+        "opencv_videoio_ffmpeg4130_64.dll",
+        "OPENCV_VIDEOIO_FFMPEG4130_64.DLL",
+        "PIL\\_avif.cp314-win_amd64.pyd",
+        "PIL\\_AVIF.cp314-win_amd64.pyd",
+    }
+    assert not (excluded & names), f"excluded binaries wrongly kept: {excluded & names}"
+    assert len(result) == len(survivors)
 
 
-def test_build_spec_filters_the_binaries_list():
-    """The excludes must actually be applied to a.binaries -- naming them in a
-    constant while never filtering would silently ship them anyway."""
-    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
-    assert "a.binaries = [" in spec
+def test_resolve_ffmpeg_precedence_env_then_vendor_then_which():
+    """Documented precedence: explicit SDPRS_FFMPEG > vendored ffmpeg.exe >
+    shutil.which('ffmpeg') on the build machine's PATH. A falsy/missing env
+    value must fall through to the next candidate, not be returned as-is."""
+    env, vendor, which = "C:\\env\\ffmpeg.exe", "C:\\vendor\\ffmpeg.exe", "C:\\which\\ffmpeg.exe"
+
+    # env wins over both vendor and which.
+    assert buildconfig.resolve_ffmpeg(env, vendor, which) == env
+
+    # vendor wins over which once env is falsy (unset or not a real file).
+    assert buildconfig.resolve_ffmpeg(None, vendor, which) == vendor
+    assert buildconfig.resolve_ffmpeg("", vendor, which) == vendor
+
+    # falls through all the way to which when env and vendor are both falsy.
+    assert buildconfig.resolve_ffmpeg(None, None, which) == which
+
+    # nothing resolves -> None (build.spec's "ffmpeg not found" branch).
+    assert buildconfig.resolve_ffmpeg(None, None, None) is None
 
 
-def test_build_spec_warns_on_oversized_ffmpeg():
-    """The 2026-07-25 round assumed ffmpeg was ~80MB and shipped a 227MB full
-    build without noticing. Turn that silent size regression into a build-time
-    warning."""
-    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
-    assert "_FFMPEG_MAX_MB" in spec
-    assert "SDPRS_FFMPEG" in spec, "build must allow an explicit ffmpeg override"
+def test_ffmpeg_is_oversized_uses_the_two_real_measured_builds():
+    """The build machine has both ffmpeg builds installed side by side:
+    Gyan.FFmpeg.Essentials at 101,457,920 bytes (~101.5MB, must NOT warn) and
+    the full Gyan.FFmpeg build at 227,398,656 bytes (~227.4MB, matches the
+    brief's measured basis exactly, MUST warn)."""
+    assert buildconfig.ffmpeg_is_oversized(101_457_920) is False
+    assert buildconfig.ffmpeg_is_oversized(227_398_656) is True

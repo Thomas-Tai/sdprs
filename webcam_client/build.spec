@@ -15,28 +15,32 @@ block_cipher = None
 #     winget install Gyan.FFmpeg.Essentials
 # Resolution order makes the choice explicit instead of "whatever is first on
 # PATH", and an oversized binary now warns at build time.
-_FFMPEG_MAX_MB = 120
+#
+# build.spec cannot be imported by pytest (it needs PyInstaller-injected
+# globals like SPECPATH/Analysis/EXE), so the actual decisions -- ffmpeg
+# precedence, oversize threshold, which binaries get dropped and WHY -- live
+# in the plain, unit-testable webcam_client/buildconfig.py. This file only
+# does the side-effecting reads (env, disk, PATH) and calls into it.
+sys.path.insert(0, str(Path(SPECPATH).parent))
+from webcam_client import buildconfig
 
+_env_ffmpeg = os.environ.get('SDPRS_FFMPEG')
+if _env_ffmpeg and not Path(_env_ffmpeg).is_file():
+    _env_ffmpeg = None
+_vendor_ffmpeg = Path(SPECPATH) / 'vendor' / 'ffmpeg.exe'
+_vendor_ffmpeg = str(_vendor_ffmpeg) if _vendor_ffmpeg.is_file() else None
+_which_ffmpeg = shutil.which('ffmpeg')
 
-def _resolve_ffmpeg():
-    explicit = os.environ.get('SDPRS_FFMPEG')
-    if explicit and Path(explicit).is_file():
-        return explicit
-    vendored = Path(SPECPATH) / 'vendor' / 'ffmpeg.exe'
-    if vendored.is_file():
-        return str(vendored)
-    return shutil.which('ffmpeg')
-
-
-_ffmpeg = _resolve_ffmpeg()
+_ffmpeg = buildconfig.resolve_ffmpeg(_env_ffmpeg, _vendor_ffmpeg, _which_ffmpeg)
 _binaries = []
 if _ffmpeg:
     _binaries = [(_ffmpeg, '.')]
-    _mb = Path(_ffmpeg).stat().st_size / 1e6
-    if _mb > _FFMPEG_MAX_MB:
+    _size = Path(_ffmpeg).stat().st_size
+    _mb = _size / 1e6
+    if buildconfig.ffmpeg_is_oversized(_size):
         print('=' * 78)
         print(f'[build.spec] WARNING: ffmpeg is {_mb:.0f} MB -- that is a FULL build.')
-        print(f'[build.spec] It is re-extracted on EVERY launch. Expected <= {_FFMPEG_MAX_MB} MB.')
+        print(f'[build.spec] It is re-extracted on EVERY launch. Expected <= {buildconfig.FFMPEG_MAX_MB} MB.')
         print('[build.spec]   winget install Gyan.FFmpeg.Essentials')
         print('[build.spec]   set SDPRS_FFMPEG=<path to the essentials ffmpeg.exe>')
         print('=' * 78)
@@ -46,15 +50,10 @@ else:
     print('[build.spec] WARNING: ffmpeg not found on PATH; exe will require '
           'ffmpeg on the target PC PATH for live view (snapshots still work)')
 
-# Binaries this client provably never calls. Each one is decompressed and written
-# to %TEMP% on every single launch.
-#   opencv_videoio_ffmpeg*  28.6MB  OpenCV's video-FILE i/o backend. We only use
-#                                   VideoCapture(index, CAP_DSHOW) for live
-#                                   capture plus resize/imencode/cvtColor/
-#                                   GaussianBlur/absdiff. No file i/o anywhere.
-#   _avif                    7.8MB  PIL AVIF codec. PIL draws a 64x64 tray circle
-#                                   and one Tk thumbnail.
-_EXCLUDED_BINARIES = ('opencv_videoio_ffmpeg', '_avif')
+# Binaries this client provably never calls (opencv_videoio_ffmpeg*, PIL's
+# _avif codec). Each one is decompressed and written to %TEMP% on every
+# single launch -- see buildconfig.EXCLUDED_BINARIES for the measured sizes
+# and the why-we-never-call-this reasoning behind each one.
 
 # Build the launcher (app.py), NOT the package module main.py. PyInstaller runs
 # the entry as __main__, which has no parent package -- main.py's relative
@@ -79,11 +78,12 @@ a = Analysis(
 )
 
 # `excludes` only reaches modules the analyser resolved as imports; these ship as
-# plain DLL/pyd payload, so filter the binaries list directly. PyInstaller 6.x
-# treats a.binaries as a plain list of (name, path, typecode) tuples.
+# plain DLL/pyd payload, so filter the binaries list directly via
+# buildconfig.filter_binaries (unit-tested against a realistic fixture list).
+# PyInstaller 6.x treats a.binaries as a plain list of (name, path, typecode)
+# tuples.
 _before = len(a.binaries)
-a.binaries = [b for b in a.binaries
-              if not any(p in b[0].lower() for p in _EXCLUDED_BINARIES)]
+a.binaries = buildconfig.filter_binaries(a.binaries)
 print(f'[build.spec] dropped {_before - len(a.binaries)} excluded binaries')
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
