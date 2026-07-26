@@ -192,27 +192,31 @@ mutex 取得（失敗 → 顯示「SDPRS 監控已在執行中」並喚起既有
 
 ### 5.3 驗收標準（可證偽）
 
-| 指標 | 現況 | 目標 | 量測方式 | 實測（2026-07-26，essentials ffmpeg 101 MB，`4fb2e27` 重 build） |
+| 指標 | 現況 | 目標 | 量測方式 | 實測（2026-07-26，essentials ffmpeg 101.5 MB／101,457,920 bytes，`4fb2e27` 重 build） |
 |---|---|---|---|---|
 | Payload 解壓大小 | 409.4 MB | **≤ 250 MB**（修訂，見下） | 重跑 TOC 統計腳本 | **247.5 MB — 達標**，但僅剩約 2.5 MB（約 1%）安全邊界，幾乎貼著上限 |
 | `--check` 暖啟動 | 39.4 s | **≤ 25 s**（修訂，見下） | 同一支 3 次量測 harness | 50.12 / 18.17 / **18.22 s — 達標**（第 3 次對比 25 s 目標與 39.42 s 基準線） |
-| Splash 出現 | 不存在 | **≤ 3 s** | 碼錶／螢幕錄影 | **約 0.86–0.95 s（兩次獨立量測）— 達標**，遠低於 3 s 門檻 |
+| Splash 出現 | 不存在 | **≤ 3 s** | 程式化輪詢：PowerShell `Get-Process`／`Get-CimInstance` 每 100ms 檢查一次 `SDPRS_Webcam.exe` 各行程的 `MainWindowHandle`，非碼錶或螢幕錄影 | **約 0.45–0.49 s（2026-07-26 fix round 1 重新量測，兩次獨立乾淨量測，含 PID/PPID 逐筆記錄）— 達標**，遠低於 3 s 門檻；詳見下方「splash 行程歸屬」說明 |
 | — | — | — | — | — |
 
 **目標修訂（2026-07-26，安裝 essentials build 後實測）**
 
 本文件初稿假設 ffmpeg essentials 約 85 MB，據此把 payload 目標訂為 ≤200 MB。
-實際安裝 `Gyan.FFmpeg.Essentials` 後量得 **97 MB**，且初稿的減法本身也算錯了
+實際安裝 `Gyan.FFmpeg.Essentials` 後量得 **101.5 MB（101,457,920 bytes，十進位 MB，
+與 `payload_audit.py` 的 `/1e6` 換算一致；換算成 MiB 約 96.8）**，且初稿的減法本身也算錯了
 （即使按 85 MB，正確結果也是約 211 MB，不是文中寫的 190 MB）。以實測值重算：
 
 | 項目 | 大小 |
 |---|---:|
 | 基準 payload | 409.4 MB |
-| ffmpeg 227.4 → 97.0 | −130.4 |
+| ffmpeg 227.4 → 101.5 | −125.9 |
 | `opencv_videoio_ffmpeg*.dll` | −28.6 |
 | `PIL\_avif.pyd` | −7.8 |
-| **預估結果** | **242.6 MB** |
-| 再加 OpenBLAS（有風險，§3.1） | 222.2 MB |
+| **預估結果** | **247.1 MB** |
+| 再加 OpenBLAS（有風險，§3.1） | 226.7 MB |
+
+（此欄位下方 §5.3 已記錄的實測值 **247.5 MB** 與此處 247.1 MB 的預估非常接近，
+差異在誤差範圍內，可視為互相印證。）
 
 因此目標修訂為 **payload ≤250 MB、暖啟動 ≤25 s**。
 連帶影響：**§5.1.3 的 OpenBLAS 排除從「選配」升為「預期要做」**——它是唯一還能
@@ -220,22 +224,60 @@ mutex 取得（失敗 → 顯示「SDPRS 監控已在執行中」並喚起既有
 20 MB 不值得賭掉 client 能否啟動。
 
 **誠實結論：** 在 onefile 前提下，剩餘 payload 的最大宗是 `cv2.pyd`（74.5 MB，
-單體模組無法拆）與 ffmpeg（97 MB，除非自行編譯只含 h264+hls 的最小版本）。
+單體模組無法拆）與 ffmpeg（約 101.5 MB，除非自行編譯只含 h264+hls 的最小版本）。
 啟動時間要再往下壓，就只剩 onedir 一途。**真正解決「使用者盯著空白畫面」的是
 splash，不是這 40% 的體積縮減**——體積縮減把痛苦從 39 秒降到 20 幾秒，
 splash 則讓那段時間不再像當機。
 
-**實測驗證此假設成立：** splash 於啟動後 **0.86–0.95 秒**即出現（遠低於 3 秒門檻），
-且持續顯示直到約 **16.1–16.2 秒**（onefile 解壓＋Python 匯入完成、系統匣圖示建立、
-呼叫 `pyi_splash.close()` 為止）才消失。也就是說使用者從雙擊到看見畫面回饋不到 1 秒，
-且整段等待期間（涵蓋 payload 解壓與模組匯入的主要耗時）畫面上**持續**有東西可看，
-不是「等一下才閃一下」。**Phase 2/3 設計可以放心地假設 S4（啟動期間畫面空白）已由
-Phase 1 的 splash 解決**，不需要額外的小型前置 launcher 退路方案。
+**實測驗證此假設成立，且 2026-07-26 fix round 1 以更嚴謹的方法重新量測並鎖定歸屬。**
+
+第一輪量測（見上方 §5.3 表格首次填入時）僅記錄「偵測到可見視窗」的時間點
+（0.86–0.95 秒），但未區分該視窗屬於 onefile 的哪一個行程——bootloader
+**parent**（負責解壓＋繪製 splash）或其啟動的真正應用程式 **child**。這個區分
+本身就是 §3.1 風險評估的核心，用推論帶過並不足夠。
+
+**Fix round 1 補測（同一份 `dist/SDPRS_Webcam.exe`，未重新 build）：** 改用
+`Get-Process`／`Get-CimInstance` 每 100ms 對**每一個** `SDPRS_Webcam.exe` 行程
+同時記錄 PID、`ParentProcessId`、`MainWindowHandle`、視窗標題與行程啟動時間，
+連續兩次乾淨量測，結果完全一致且無歧義：
+
+- 兩次量測中，擁有可見視窗（標題 `'tk'`，PyInstaller splash 樣板從不呼叫
+  `wm title` 設定自訂標題，故顯示為 Tk 預設值）的行程，其 `ParentProcessId`
+  **不是**另一個 `SDPRS_Webcam.exe` PID，而是啟動它的外部 shell——即該行程本身
+  就是 onefile **bootloader parent**。
+- 對應的 **child** 行程（`ParentProcessId` 指向上述 parent PID）在 parent 啟動約
+  12.5 秒後才**出現在行程清單中**（代表 child 直到此時才被 parent 建立），且
+  從出現到量測結束，`MainWindowHandle` 全程為 0——child **從未擁有任何視窗**，
+  與其為純系統匣（tray-only）app、無主視窗的設計相符。
+- **結論：splash 視窗由 bootloader parent 持有，不是 child。** 這與
+  `main.py` 內 `_close_splash()` 呼叫 `pyi_splash.close()`（在 child 行程中執行，
+  透過 IPC 通知 parent 關閉其自行持有的 splash 視窗）的架構完全吻合。
+
+**新量測數字（0.45–0.49 秒出現，兩次乾淨重跑一致）比第一輪的 0.86–0.95 秒更快，
+兩者不予調和——如實記錄新數字，不回頭修改或平均：**
+
+| 量測輪次 | Splash 出現時間 | Splash 消失時間 | 方法 |
+|---|---|---|---|
+| 第一輪（本文件首次記錄） | 約 0.86–0.95 s | 約 16.1–16.2 s | 逐一輪詢，未記錄 PPID |
+| Fix round 1，run B | 0.451 s | 介於 15.634–15.772 s 之間 | 每 100ms 全量快照，含 PID/PPID/title/啟動時間 |
+| Fix round 1，run C | 0.493 s | 介於 15.645–15.785 s 之間 | 同上 |
+
+無論採用哪一輪的數字，皆遠低於 3 秒門檻，**達標**的結論不變；消失時間兩輪
+落在同一量級（15.6–16.2 秒），出現時間的落差（0.45–0.49 s vs. 0.86–0.95 s）
+較可能來自量測迴圈本身的啟動開銷差異（第一輪迴圈在偵測前先做較重的
+一次性 `Get-CimInstance` 快取查詢；fix round 1 已將該查詢移出熱路徑並個別
+快取），而非 splash 真的隨機變慢——但兩者皆未達到可以完全排除系統負載變異
+的程度，故此處誠實地並列兩輪數字，不宣稱哪一個「更正確」。
+
+**Phase 2/3 設計可以放心地假設 S4（啟動期間畫面空白）已由 Phase 1 的 splash
+解決**（不需要額外的小型前置 launcher 退路方案），因為無論用哪一輪數字，
+「使用者雙擊後多久看到畫面回饋」都遠低於 3 秒，且已確認該回饋（splash）
+在整個 onefile 解壓＋Python 匯入期間（parent 行程的生命週期內）持續可見。
 
 | 指標 | 現況 | 目標 | 量測方式 | 實測（2026-07-26） |
 |---|---|---|---|---|
-| 重複啟動 | 兩個行程搶攝影機 | 第二次顯示提示後結束 | 手動 | **達標** — 第二次啟動彈出「SDPRS 監控已在執行中。」訊息框（以 `WM_CLOSE` 程式化關閉以完成量測），關閉後 exit code=0；關閉前後皆確認只有原本一組 parent+child（onefile 兩個 PID）留存，無重複 instance |
-| Log 檔 | 不存在 | `%APPDATA%\SDPRSWebcam\logs\webcam.log` 有內容且**不含 API key** | 單元測試 + 手動 | **達標** — log 檔存在，43,658 bytes 有內容；已設定 API key，逐字串搜尋未出現於 log 內容中，VERDICT: clean |
+| 重複啟動 | 兩個行程搶攝影機 | 第二次顯示提示後結束 | 指令碼化：`Start-Process` 觸發第二次啟動，以 `user32.dll EnumWindows` 確認訊息框視窗存在後，用 `PostMessage(WM_CLOSE)` 程式化關閉以完成量測（非人工雙擊） | **達標** — 第二次啟動彈出「SDPRS 監控已在執行中。」訊息框，關閉後 exit code=0；關閉前後皆確認只有原本一組 parent+child（onefile 兩個 PID）留存，無重複 instance |
+| Log 檔 | 不存在 | `%APPDATA%\SDPRSWebcam\logs\webcam.log` 有內容且**不含 API key** | 單元測試 + 指令碼檢查（讀檔＋逐字串比對，非人工翻閱） | **達標** — log 檔存在，43,658 bytes 有內容；已設定 API key，逐字串搜尋未出現於 log 內容中，VERDICT: clean |
 
 ---
 
