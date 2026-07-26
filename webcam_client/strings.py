@@ -57,7 +57,14 @@ _TEXT = {
     ),
 }
 
-_DEFAULTS = {"camera_count": 0, "camera_names": "攝影機"}
+_DEFAULTS = {"camera_count": None, "camera_names": "攝影機"}
+
+# Used only when RUNNING is rendered with no camera_count in context (e.g. an
+# error path with no data to hand). "0 支攝影機運作正常" would tell the guard
+# zero cameras are working while claiming everything is fine -- a
+# self-contradiction. This text stays true (monitoring is active) without
+# inventing a count we don't have.
+_RUNNING_DETAIL_UNKNOWN_COUNT = "攝影機運作正常。"
 
 
 def describe(state, **ctx):
@@ -71,8 +78,11 @@ def describe(state, **ctx):
     title, detail_tpl, action = _TEXT[key]
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in ctx.items() if v is not None})
-    try:
-        detail = detail_tpl.format(**merged)
-    except (KeyError, IndexError):
-        detail = detail_tpl
+    if key == "running" and merged.get("camera_count") is None:
+        detail = _RUNNING_DETAIL_UNKNOWN_COUNT
+    else:
+        try:
+            detail = detail_tpl.format(**merged)
+        except (KeyError, IndexError):
+            detail = detail_tpl
     return title, detail, action
