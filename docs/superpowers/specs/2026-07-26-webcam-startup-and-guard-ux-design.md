@@ -323,9 +323,12 @@ StartingUp / Running / Paused / NoServer / BadKey / CameraDown
 驗證尚未執行**——見 §6.4 的人工驗證清單。在該清單被實際勾選完成之前，本節不可視為
 「已驗證上線」，只能記為「已實作、審查乾淨、人工驗證待進行」。
 
-**Commit range：** `c8b501a..7ea3f8d`（`feat/webcam-truthful-status` 分支，10 個 commit，
+**Commit range：** `c8b501a..aaf76d0`（`feat/webcam-truthful-status` 分支，12 個 commit，
 皆為 2026-07-26；由 `docs(webcam): Phase 2 truthful-status implementation plan` 起，至
-`fix(webcam): a failed rebuild must never leave the light on 啟動中` 止）。
+`fix(webcam): the toast must carry the state that matured, not the state at drain` 止）。
+最後兩個 commit（`fe49e5f`、`aaf76d0`）是全分支審查後的修正回合，處理 5 個 Important
+發現；其中 3 個是「UI 說謊」的殘留，由審查者以可執行的 probe 重現，不是靠推論。
+測試 176 → 211。
 
 **與原設計的刻意偏離**（已決定，不需再討論）：
 
@@ -339,6 +342,17 @@ StartingUp / Running / Paused / NoServer / BadKey / CameraDown
 3. **狀態視窗開啟期間會阻塞 dispatch loop**（與既有設定精靈一致的行為）。若去抖動
    計時器在視窗開著的期間到期，會在視窗關閉後的下一個 idle tick 觸發 toast——也就是
    toast 會被延後，但不會遺失。
+   **更正紀錄（2026-07-26，全分支審查）：** 這段「不會遺失」在最初寫下時**是錯的**，
+   而且是被 probe 實際重現的錯——NOTIFY 佇列 token 不帶狀態，`tick()` 在**觸發時**
+   鎖定的是成熟的那個狀態，`_handle_notify` 卻在**取出時**重讀 `hub.state`。結果：
+   伺服器斷線 30 秒以上、卻在 dispatch loop 取出前恢復時，保全會看到兩次「監控中」，
+   完全不會知道曾經斷過；而另一個新故障會在 0 秒被 toast 出來，直接繞過去抖動。
+   已於 `aaf76d0` 修正：狀態改為隨 token 一起傳遞，`_handle_notify` 只 toast 它被交付
+   的那個狀態。修正後這句「延後但不遺失」才成立。`_handle_health` 維持重讀 `hub.state`
+   ——把重繪合併到最新狀態是刻意且正確的。
+4. **狀態視窗的內容是開啟當下的快照。** 視窗只在開啟時算一次文字，而 dispatch loop
+   在視窗關閉前是被擋住的，所以視窗開著時發生的健康狀態變化不會反映在已開啟的視窗上。
+   對一個看完就關的暫時性視窗而言可接受，但要知道它不是即時面板。
 
 **去抖動門檻與警告：** `NOTIFY_DEBOUNCE_SECONDS = 30.0`。**若任何一次 toast 是針對持續
 時間短於 30 秒的瞬斷觸發，代表去抖動機制本身壞了，必須如實回報，絕不可以調高門檻把
@@ -359,11 +373,20 @@ StartingUp / Running / Paused / NoServer / BadKey / CameraDown
 - [ ] 從系統匣 →「設定」，把連線密碼改成伺服器會拒絕的值 → 圖示轉紅，toast 顯示
       「連線密碼已失效」。**log 檔必須留有 401／403 紀錄；toast 內容中絕對不可出現
       任何狀態碼。**
-- [ ] 拔掉一支攝影機的 USB 線 → toast 顯示「攝影機沒有畫面」，且訊息中指名的是操作員
-      在設定裡自己命名的攝影機名稱，不是 node_id 或其他內部識別碼。
+- [ ] **啟動時**就把一支攝影機的 USB 線拔掉再開 app → toast 顯示「攝影機沒有畫面」，
+      且訊息中指名的是操作員在設定裡自己命名的攝影機名稱，不是 node_id 或其他內部識別碼。
+- [ ] **執行中**拔掉一支攝影機的 USB 線 → 約 3 秒（`BAD_READ_LIMIT × BAD_READ_SLEEP`）
+      後判定為 CAMERA_DOWN，再經 30 秒去抖動才跳 toast，因此**從拔線到看到通知約 33 秒**，
+      這是預期行為不是延遲。插回後應自行恢復（此路徑的 engine thread 不會結束）。
+      （2026-07-26 修正前，執行中拔線是**完全偵測不到**的——`cap.read()` 永遠回傳 False，
+      engine 不再回報任何東西，系統匣一直是綠的。修正 commit `fe49e5f`。）
 - [ ] 從系統匣按「暫停推送」→ 圖示轉為琥珀色（amber）；暫停期間即使背後其實有故障，
       也不應該跳出任何故障 toast。按「恢復推送」後，圖示應恢復成當下實際狀態該顯示
       的顏色。
+- [ ] **在故障進行中**按「暫停推送」→ **不應該**跳出任何 toast。（暫停是保全自己按的，
+      他知道；而且在故障還在時跳一則通知，讀起來像「問題解決了」。`STARTING` 早就基於
+      同樣理由被排除在恢復通知外，`PAUSED` 於 `aaf76d0` 一併排除。）恢復推送後，若故障
+      仍在，不應重複 toast；若故障已在暫停期間排除，才應跳恢復通知。
 - [ ] 雙擊系統匣圖示 → 開啟「監控狀態」視窗；視窗內「開啟記錄」按鈕會開啟 log
       資料夾；「重新連線」按鈕能在不重啟整個 app 的情況下重建所有 engine。
 - [ ] **去抖動邊界檢查：** 刻意製造一次明顯短於 30 秒的瞬斷（例如快速拔插網路線後立刻
