@@ -88,9 +88,28 @@ print(f'[build.spec] dropped {_before - len(a.binaries)} excluded binaries')
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# S4: console=False and a onefile payload that takes ~20s to extract means the
+# operator sees NOTHING after double-clicking -- so they double-click again. The
+# bootloader paints this before Python starts. text_pos lets the bootloader write
+# progress over the image; keep it inside the 420x240 canvas.
+splash = Splash(
+    # SPECPATH-relative, NOT 'assets/splash.png': a bare relative path resolves
+    # against the CWD pyinstaller was invoked from, so building from anywhere
+    # other than webcam_client/ would fail to find it.
+    str(Path(SPECPATH) / 'assets' / 'splash.png'),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(20, 215),
+    text_size=10,
+    text_color='white',
+    always_on_top=False,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries,
     a.zipfiles,
     a.datas,
@@ -108,5 +127,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=str(Path(SPECPATH) / 'assets' / 'sdprs.ico'),
 )

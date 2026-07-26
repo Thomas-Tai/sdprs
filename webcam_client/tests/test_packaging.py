@@ -164,3 +164,42 @@ def test_ffmpeg_is_oversized_uses_the_two_real_measured_builds():
     brief's measured basis exactly, MUST warn)."""
     assert buildconfig.ffmpeg_is_oversized(101_457_920) is False
     assert buildconfig.ffmpeg_is_oversized(227_398_656) is True
+
+
+def test_assets_exist():
+    assert (WEBCAM_DIR / "assets" / "sdprs.ico").is_file()
+    assert (WEBCAM_DIR / "assets" / "splash.png").is_file()
+
+
+def test_icon_16px_is_handtuned_not_a_downsample():
+    """Naive downsampling of the 256px master closes the aperture into an
+    unreadable dot and reduces the mount nub to a stray pixel -- at 16px, the
+    size Windows uses in the taskbar. Pin that the .ico carries DISTINCT small
+    artwork rather than a resample."""
+    from PIL import Image
+
+    ico = WEBCAM_DIR / "assets" / "sdprs.ico"
+    with Image.open(ico) as im:
+        im.size = (256, 256)          # ICO frame selection
+        im.load()
+        naive = im.convert("RGBA").resize((16, 16), Image.LANCZOS)
+    with Image.open(ico) as im:
+        im.size = (16, 16)
+        im.load()
+        actual = im.convert("RGBA")
+    assert list(actual.getdata()) != list(naive.getdata()), \
+        "16px frame is just a downsample -- hand-tuned artwork did not make it in"
+
+
+def test_build_spec_declares_a_splash():
+    """S4: console=False + ~20s onefile extraction = a completely blank screen.
+    The bootloader paints the splash before Python starts."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "Splash(" in spec
+    assert "splash.binaries" in spec, "onefile EXE must receive splash.binaries"
+
+
+def test_build_spec_sets_an_icon():
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "icon=None" not in spec
+    assert "sdprs.ico" in spec
