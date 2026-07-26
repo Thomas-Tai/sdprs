@@ -1,0 +1,1199 @@
+# Webcam Client Phase 1 — Startup Acceleration Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Cut `SDPRS_Webcam.exe` warm start from 39.4 s to ≤20 s, and replace ~40 s of blank screen with a splash inside 3 s — without changing any existing UI layout.
+
+**Architecture:** Two independent tracks. (1) *Packaging* — the onefile payload is 409 MB and is re-extracted to `%TEMP%` on every launch, so payload size **is** startup time; we cut it to ≤200 MB by swapping ffmpeg full→essentials and dropping binaries this client provably never calls, then add a PyInstaller `Splash` so the bootloader paints something during extraction. (2) *Runtime* — a named-mutex single-instance guard, rotating file logging with API-key redaction, and reordering `main()` so the tray icon appears before cameras are opened.
+
+**Tech Stack:** Python 3.14, PyInstaller 6.21, ctypes/kernel32, `logging.handlers.RotatingFileHandler`, Pillow (asset generation only), pytest.
+
+## Global Constraints
+
+- **Packaging stays onefile.** No `COLLECT(...)`. Standing user requirement from [[2026-07-25-webcam-settings-ux-design]]; `test_build_spec_stays_onefile` already pins it.
+- **`upx=False` stays.** Pinned by `test_build_spec_disables_upx_for_faster_launch`.
+- **Python invocation is `/c/Python314/python`** — there is no `python3` alias.
+- **pytest must be run per-file from `webcam_client/`, with `-p no:cacheprovider`.** A bare `pytest` from the repo root fails with *"path cannot contain [] parametrization"* because `[Cloud]` in the absolute path is parsed as a test id. Correct form:
+  `cd webcam_client && /c/Python314/python -m pytest tests/test_x.py -q -p no:cacheprovider`
+- **Git root is `sdprs/`**, not the parent directory. Run every git command from `sdprs/`.
+- **Branch: `feat/webcam-startup-and-guard-ux`** (already created, spec committed at `432f09f`).
+- **Write/Edit tools must use absolute Windows paths** beginning `C:\D\WorkSpace\[Cloud]_Company_Sync\...`.
+- **The API key must never appear in the log file.** New risk introduced by this phase; Task 2 tests it.
+- **Never hardcode credentials.** `Msc@2333` and `MSC-Person` must not appear anywhere; `broker.emqx.io` must not appear on a production path.
+- **Do not add any downlink command interface to edge devices** beyond the existing `stream_start` / `stream_stop`. This phase is client-side only and touches none of it.
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `webcam_client/single_instance.py` | *new* — named-mutex guard, fail-open |
+| `webcam_client/logging_setup.py` | *new* — rotating file handler + secret redaction |
+| `webcam_client/assets/make_assets.py` | *new* — regenerates icon/splash from code |
+| `webcam_client/assets/sdprs.ico`, `splash.png` | *new* — generated, committed |
+| `webcam_client/tools/payload_audit.py` | *new* — per-component payload sizing (makes the ≤200 MB criterion re-runnable) |
+| `webcam_client/main.py` | *modify* — startup order, splash close |
+| `webcam_client/build.spec` | *modify* — ffmpeg resolution + size guard, binary excludes, Splash, icon |
+| `webcam_client/tests/test_single_instance.py` | *new* |
+| `webcam_client/tests/test_logging_setup.py` | *new* |
+| `webcam_client/tests/test_packaging.py` | *modify* — pin the new spec guarantees |
+
+---
+
+### Task 1: Single-instance guard
+
+**Files:**
+- Create: `webcam_client/single_instance.py`
+- Test: `webcam_client/tests/test_single_instance.py`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `SingleInstance(name: str = DEFAULT_MUTEX_NAME)` with `.acquire() -> bool` and `.release() -> None`; module constant `DEFAULT_MUTEX_NAME: str`
+
+**Why fail-open:** a bug in the guard must never stop the monitoring client from running. If `CreateMutexW` itself fails, we allow the launch.
+
+**Why `Local\` not `Global\`:** the `Global\` namespace needs `SeCreateGlobalPrivilege`, which a standard (non-admin) guard account does not have. `Local\` is per-login-session, which is the semantics we actually want.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `webcam_client/tests/test_single_instance.py`:
+
+```python
+# webcam_client/tests/test_single_instance.py
+"""A second copy of the client fights the first for the same DSHOW camera
+handles. Since the exe gives no feedback during onefile extraction, an operator
+double-clicking while they wait is NORMAL behaviour -- so this guard is load
+bearing, not a nicety."""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from webcam_client.single_instance import SingleInstance, DEFAULT_MUTEX_NAME
+
+
+def _unique(tag):
+    # Unique per test AND per run, so a crashed prior run cannot leak a held
+    # mutex into this one and make the suite flaky.
+    return f"Local\\SDPRSTest_{tag}_{os.getpid()}"
+
+
+def test_first_acquire_succeeds():
+    si = SingleInstance(_unique("first"))
+    try:
+        assert si.acquire() is True
+    finally:
+        si.release()
+
+
+def test_second_acquire_fails_while_first_holds():
+    name = _unique("second")
+    a, b = SingleInstance(name), SingleInstance(name)
+    try:
+        assert a.acquire() is True
+        assert b.acquire() is False, "second instance must be refused"
+    finally:
+        a.release()
+        b.release()
+
+
+def test_slot_is_reusable_after_release():
+    name = _unique("reuse")
+    a = SingleInstance(name)
+    assert a.acquire() is True
+    a.release()
+    b = SingleInstance(name)
+    try:
+        assert b.acquire() is True, "releasing must free the slot"
+    finally:
+        b.release()
+
+
+def test_release_without_acquire_is_safe():
+    SingleInstance(_unique("norelease")).release()  # must not raise
+
+
+def test_default_name_is_session_local_not_global():
+    # Global\ requires SeCreateGlobalPrivilege, which a standard guard account
+    # does not have -- it would fail on exactly the machines this ships to.
+    assert DEFAULT_MUTEX_NAME.startswith("Local\\")
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_single_instance.py -q -p no:cacheprovider`
+Expected: FAIL — `ModuleNotFoundError: No module named 'webcam_client.single_instance'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `webcam_client/single_instance.py`:
+
+```python
+# sdprs/webcam_client/single_instance.py
+"""Windows named-mutex single-instance guard.
+
+Two copies of this client fight over the same DSHOW camera handles. Because the
+onefile exe shows nothing for ~20s while it extracts, an operator double-clicking
+during the wait is the NORMAL case -- so refusing the second launch matters.
+
+ONEFILE TWO-PID TRAP: a onefile exe runs a small bootloader PARENT that extracts
+the payload, then a large CHILD that is the real app. This module is imported by
+the package, so it runs in the CHILD -- one mutex per real instance, which is
+correct. Do NOT "fix" this by hoisting acquisition into app.py.
+"""
+import ctypes
+import logging
+from ctypes import wintypes
+
+logger = logging.getLogger("webcam_client.single_instance")
+
+_ERROR_ALREADY_EXISTS = 183
+
+# Local\ = per-login-session. Global\ would need SeCreateGlobalPrivilege, which a
+# standard (non-admin) operator account does not hold.
+DEFAULT_MUTEX_NAME = "Local\\SDPRSWebcamClient"
+
+# use_last_error=True routes the Win32 error into ctypes.get_last_error(), which
+# a later ctypes call cannot clobber -- calling kernel32.GetLastError() directly
+# is a classic source of flaky results here.
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+# HANDLE is pointer-sized; leaving the default c_int restype TRUNCATES it on
+# 64-bit and then CloseHandle fails on the truncated value.
+_kernel32.CreateMutexW.restype = wintypes.HANDLE
+_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+_kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+class SingleInstance:
+    def __init__(self, name: str = DEFAULT_MUTEX_NAME):
+        self._name = name
+        self._handle = None
+
+    def acquire(self) -> bool:
+        """True if this process now owns the single-instance slot.
+
+        Fails OPEN: if the mutex machinery itself errors, allow the launch. A
+        guard bug must never keep the monitoring client off the air.
+        """
+        ctypes.set_last_error(0)
+        handle = _kernel32.CreateMutexW(None, False, self._name)
+        err = ctypes.get_last_error()
+        if not handle:
+            logger.warning("CreateMutexW failed (err=%s); allowing launch", err)
+            return True
+        if err == _ERROR_ALREADY_EXISTS:
+            _kernel32.CloseHandle(handle)
+            return False
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        if self._handle:
+            _kernel32.CloseHandle(self._handle)
+            self._handle = None
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_single_instance.py -q -p no:cacheprovider`
+Expected: PASS — 5 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd sdprs
+git add webcam_client/single_instance.py webcam_client/tests/test_single_instance.py
+git commit -m "feat(webcam): single-instance mutex guard (fail-open, session-local)"
+```
+
+---
+
+### Task 2: Rotating file logging with API-key redaction
+
+**Files:**
+- Create: `webcam_client/logging_setup.py`
+- Test: `webcam_client/tests/test_logging_setup.py`
+
+**Interfaces:**
+- Consumes: `webcam_client.config.get_config_dir() -> Path`
+- Produces: `setup_logging(level=logging.INFO) -> logging.Handler`, `add_secret(secret: str) -> None`, `get_log_dir() -> Path`, `LOG_FILENAME`, `REDACTED`
+
+**Ordering note:** logging is configured *before* `load_config()` runs, so the API key is not known at setup time. `add_secret()` is therefore a separate call made once the config is loaded. The filter lives on the **handler**, so it covers records from every module.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `webcam_client/tests/test_logging_setup.py`:
+
+```python
+# webcam_client/tests/test_logging_setup.py
+"""console=False means basicConfig()'s stdout handler writes into a void -- when
+an operator says "it stopped working" there is no artifact. These tests pin the
+file sink AND the security rule that the API key never reaches it."""
+import logging
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+import webcam_client.logging_setup as ls
+
+
+def _fresh(monkeypatch, tmp_path):
+    """Point the log dir at tmp_path and reset module state between tests."""
+    monkeypatch.setattr(ls, "get_config_dir", lambda: tmp_path)
+    ls.reset_for_tests()
+    return tmp_path / "logs" / ls.LOG_FILENAME
+
+
+def test_creates_log_file_and_writes_records(monkeypatch, tmp_path):
+    logfile = _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    logging.getLogger("webcam_client.test").info("hello from the client")
+    handler.flush()
+    assert logfile.exists()
+    assert "hello from the client" in logfile.read_text(encoding="utf-8")
+
+
+def test_api_key_is_redacted(monkeypatch, tmp_path):
+    logfile = _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    ls.add_secret("SUPERSECRETKEY123")
+    logging.getLogger("webcam_client.test").warning(
+        "auth failed for key SUPERSECRETKEY123")
+    handler.flush()
+    body = logfile.read_text(encoding="utf-8")
+    assert "SUPERSECRETKEY123" not in body, "API KEY LEAKED INTO THE LOG FILE"
+    assert ls.REDACTED in body
+
+
+def test_redaction_survives_lazy_percent_args(monkeypatch, tmp_path):
+    # logger.warning("key %s", secret) formats at emit time -- redacting only
+    # record.msg without consuming args would let the secret through.
+    logfile = _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    ls.add_secret("LAZYSECRET999")
+    logging.getLogger("webcam_client.test").warning("key is %s", "LAZYSECRET999")
+    handler.flush()
+    assert "LAZYSECRET999" not in logfile.read_text(encoding="utf-8")
+
+
+def test_empty_secret_is_ignored(monkeypatch, tmp_path):
+    # An unconfigured client has api_key == "". Redacting "" would replace
+    # every character boundary in every message.
+    logfile = _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    ls.add_secret("")
+    logging.getLogger("webcam_client.test").info("perfectly normal message")
+    handler.flush()
+    assert "perfectly normal message" in logfile.read_text(encoding="utf-8")
+
+
+def test_setup_is_idempotent(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    first = ls.setup_logging()
+    second = ls.setup_logging()
+    assert first is second, "repeated setup must not stack duplicate handlers"
+
+
+def test_rotation_is_configured(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    handler = ls.setup_logging()
+    assert handler.maxBytes == ls.MAX_BYTES
+    assert handler.backupCount == ls.BACKUP_COUNT
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_logging_setup.py -q -p no:cacheprovider`
+Expected: FAIL — `ModuleNotFoundError: No module named 'webcam_client.logging_setup'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `webcam_client/logging_setup.py`:
+
+```python
+# sdprs/webcam_client/logging_setup.py
+"""Rotating file logging for the frozen client.
+
+The exe is built console=False, so logging.basicConfig()'s stdout handler writes
+into a void -- there is no artifact to inspect when an operator reports a fault.
+Logs land in %APPDATA%\\SDPRSWebcam\\logs\\webcam.log.
+
+SECURITY: the API key must never reach this file. _RedactFilter is installed on
+the HANDLER so it scrubs records from every module, and it consumes record.args
+so lazy %-formatting cannot smuggle a secret past it.
+"""
+import logging
+import logging.handlers
+
+from .config import get_config_dir
+
+LOG_FILENAME = "webcam.log"
+MAX_BYTES = 1_000_000
+BACKUP_COUNT = 3
+REDACTED = "***REDACTED***"
+
+_handler = None
+_redactor = None
+
+
+def get_log_dir():
+    return get_config_dir() / "logs"
+
+
+class _RedactFilter(logging.Filter):
+    def __init__(self):
+        super().__init__()
+        self._secrets = []
+
+    def add(self, secret: str) -> None:
+        # An unconfigured client has api_key == "": redacting the empty string
+        # would match at every character boundary and destroy every message.
+        if secret and secret not in self._secrets:
+            self._secrets.append(secret)
+
+    def filter(self, record):
+        if not self._secrets:
+            return True
+        msg = record.getMessage()          # applies args NOW
+        hit = False
+        for s in self._secrets:
+            if s in msg:
+                msg = msg.replace(s, REDACTED)
+                hit = True
+        if hit:
+            record.msg = msg
+            record.args = ()               # already applied above
+        return True
+
+
+def setup_logging(level=logging.INFO):
+    """Install the rotating file handler on the root logger. Idempotent."""
+    global _handler, _redactor
+    if _handler is not None:
+        return _handler
+    log_dir = get_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _redactor = _RedactFilter()
+    handler = logging.handlers.RotatingFileHandler(
+        log_dir / LOG_FILENAME, maxBytes=MAX_BYTES,
+        backupCount=BACKUP_COUNT, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+    handler.addFilter(_redactor)
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(handler)
+    _handler = handler
+    return handler
+
+
+def add_secret(secret: str) -> None:
+    """Register a value that must never appear in the log.
+
+    Separate from setup_logging() because logging is configured BEFORE
+    load_config() runs, so the API key is not known yet at that point.
+    """
+    if _redactor is not None:
+        _redactor.add(secret)
+
+
+def reset_for_tests() -> None:
+    """Detach the handler so each test starts from a clean root logger."""
+    global _handler, _redactor
+    if _handler is not None:
+        logging.getLogger().removeHandler(_handler)
+        _handler.close()
+    _handler = None
+    _redactor = None
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_logging_setup.py -q -p no:cacheprovider`
+Expected: PASS — 6 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd sdprs
+git add webcam_client/logging_setup.py webcam_client/tests/test_logging_setup.py
+git commit -m "feat(webcam): rotating file log with API-key redaction"
+```
+
+---
+
+### Task 3: Startup ordering in `main.py`
+
+**Files:**
+- Modify: `webcam_client/main.py:11-13` (logging), `:59-89` (`main()`)
+- Test: `webcam_client/tests/test_main_dispatch.py` (extend)
+
+**Interfaces:**
+- Consumes: `SingleInstance`, `DEFAULT_MUTEX_NAME`, `setup_logging`, `add_secret`
+- Produces: `_close_splash() -> None` (idempotent, safe when not frozen)
+
+**Two behaviour changes:**
+1. Tray icon is created and started **before** `controller.start_engines()`. Opening cameras costs 0.5–2 s each and currently delays the only sign of life (S6). `AppController.__init__` does not touch hardware, so constructing it early is safe — only `start_engines()` opens cameras.
+2. `_close_splash()` is called at both points where the first real UI appears: before the first-run wizard, and after `tray.start()` on the normal path.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `webcam_client/tests/test_main_dispatch.py`:
+
+```python
+def test_close_splash_is_safe_without_pyi_splash():
+    """pyi_splash only exists inside a frozen build that declared a Splash. In
+    dev, and in any build without one, importing it raises -- _close_splash must
+    swallow that rather than killing startup."""
+    import webcam_client.main as m
+    m._close_splash()
+    m._close_splash()  # idempotent
+
+
+def test_close_splash_swallows_a_failing_close(monkeypatch):
+    """A splash that errors on close must not take the app down with it."""
+    import types
+    import webcam_client.main as m
+
+    fake = types.ModuleType("pyi_splash")
+
+    def boom():
+        raise RuntimeError("splash already gone")
+
+    fake.close = boom
+    monkeypatch.setitem(sys.modules, "pyi_splash", fake)
+    monkeypatch.setattr(m, "_splash_closed", False)
+    m._close_splash()  # must not raise
+
+
+def test_tray_starts_before_engines(monkeypatch):
+    """S6: opening cameras takes 0.5-2s each; the tray icon is the only sign of
+    life, so it must exist BEFORE engines start, not after."""
+    import webcam_client.main as m
+
+    order = []
+
+    class FakeCtrl:
+        def __init__(self, cfg):
+            self._config = cfg
+
+        @property
+        def config(self):
+            return self._config
+
+        def start_engines(self):
+            order.append("engines")
+
+        def shutdown(self):
+            pass
+
+        pause_all = resume_all = lambda self: None
+
+    class FakeTray:
+        def __init__(self, **kw):
+            pass
+
+        def start(self):
+            order.append("tray")
+
+        def set_status(self, ok):
+            pass
+
+    monkeypatch.setattr(m, "AppController", FakeCtrl)
+    monkeypatch.setattr(m, "TrayApp", FakeTray)
+    monkeypatch.setattr(m, "load_config", lambda: {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": [{"device_index": 0, "enabled": True, "node_id": "n"}]})
+    monkeypatch.setattr(m, "is_first_run", lambda: False)
+    monkeypatch.setattr(m, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(m, "add_secret", lambda s: None)
+    monkeypatch.setattr(m, "_acquire_single_instance", lambda: True)
+    monkeypatch.setattr(m, "_running", False)  # exit the dispatch loop at once
+
+    m.main()
+    assert order == ["tray", "engines"], f"got {order}"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_main_dispatch.py -q -p no:cacheprovider`
+Expected: FAIL — `AttributeError: module 'webcam_client.main' has no attribute '_close_splash'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Replace `webcam_client/main.py` lines 1–13 (imports + `basicConfig`) with:
+
+```python
+# sdprs/webcam_client/main.py
+import logging
+import queue
+import signal
+
+from .config import load_config, save_config, is_first_run
+from .app_controller import AppController
+from .gui.setup_wizard import run_setup_wizard
+from .gui.tray_app import TrayApp
+from .logging_setup import setup_logging, add_secret
+from .single_instance import SingleInstance
+
+logger = logging.getLogger("webcam_client.main")
+
+_running = True
+_splash_closed = False
+_instance = SingleInstance()
+
+
+def _close_splash() -> None:
+    """Dismiss the PyInstaller splash once real UI is up. Idempotent.
+
+    pyi_splash is injected ONLY into a frozen build that declared a Splash, so
+    the import failing is the normal dev case, not an error.
+    """
+    global _splash_closed
+    if _splash_closed:
+        return
+    _splash_closed = True
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
+def _acquire_single_instance() -> bool:
+    """False when another copy already owns the slot."""
+    return _instance.acquire()
+```
+
+Then replace the body of `main()` (currently `main.py:59-89`) down to and including the `logger.info(f"SDPRS Webcam Client running ...")` line with:
+
+```python
+def main():
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    if not _acquire_single_instance():
+        _close_splash()
+        logger.info("Another instance is already running; exiting")
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo("SDPRS 監控", "SDPRS 監控已在執行中。")
+        except Exception:
+            pass
+        return
+
+    setup_logging()
+
+    config = load_config()
+    add_secret(config.get("api_key", ""))
+    if is_first_run() or not config.get("server_url"):
+        _close_splash()                    # wizard is the first real UI
+        new_config = run_setup_wizard(config, mode="first-run")
+        if new_config is None:
+            logger.info("Setup cancelled, exiting")
+            return
+        config = new_config
+        save_config(config)
+        add_secret(config.get("api_key", ""))
+
+    enabled = [c for c in config.get("cameras", []) if c.get("enabled", True)]
+    if not enabled:
+        logger.error("No cameras configured")
+        return
+
+    controller = AppController(config)
+
+    q: "queue.Queue[str]" = queue.Queue()
+    tray = TrayApp(
+        on_open_settings=lambda: q.put("OPEN_SETTINGS"),
+        on_quit=lambda: q.put("QUIT"),
+        on_pause=controller.pause_all,
+        on_resume=controller.resume_all,
+    )
+    # S6: the tray icon is the ONLY sign of life, and start_engines() opens each
+    # camera (0.5-2s apiece). Show the icon first, then do the slow work.
+    # AppController.__init__ touches no hardware, so building it above is free.
+    tray.start()
+    tray.set_status(True)
+    _close_splash()
+
+    controller.start_engines()
+    logger.info(f"SDPRS Webcam Client running ({len(enabled)} cameras)")
+```
+
+Leave the `while running and _running:` dispatch loop and everything after it unchanged.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_main_dispatch.py -q -p no:cacheprovider`
+Expected: PASS — 9 passed
+
+Then confirm nothing else regressed:
+Run: `cd webcam_client && for f in tests/test_*.py; do /c/Python314/python -m pytest "$f" -q -p no:cacheprovider; done`
+Expected: every file passes
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd sdprs
+git add webcam_client/main.py webcam_client/tests/test_main_dispatch.py
+git commit -m "feat(webcam): tray before engines, file logging, single-instance at startup"
+```
+
+---
+
+### Task 4: Payload slimming in `build.spec`
+
+**Files:**
+- Modify: `webcam_client/build.spec:9-43`
+- Create: `webcam_client/tools/payload_audit.py`
+- Test: `webcam_client/tests/test_packaging.py` (extend)
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: build-time env var contract `SDPRS_FFMPEG`; `tools/payload_audit.py` CLI taking a `PKG-00.toc` path
+
+**Measured basis (2026-07-26):** payload 409.4 MB → `ffmpeg.EXE` 227.4 MB (55.5%), `cv2.pyd` 74.5 MB, `opencv_videoio_ffmpeg4130_64.dll` 28.6 MB, `libscipy_openblas64` 20.4 MB, `PIL\_avif.pyd` 7.8 MB.
+
+**Prerequisite — install the essentials ffmpeg build (verified available):**
+
+```bash
+winget install Gyan.FFmpeg.Essentials
+```
+
+The build machine currently has `Gyan.FFmpeg` (the **full** 227 MB build) on PATH. With both installed, `shutil.which` may return either — which is exactly why the spec now prefers an explicit `SDPRS_FFMPEG` and warns loudly on an oversized binary.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `webcam_client/tests/test_packaging.py`:
+
+```python
+def test_build_spec_excludes_opencv_videoio_ffmpeg():
+    """28.6MB of OpenCV's own ffmpeg backend, for video FILE i/o. This client
+    only does VideoCapture(index, CAP_DSHOW) + resize/imencode/cvtColor/
+    GaussianBlur/absdiff -- it never opens a video file."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "opencv_videoio_ffmpeg" in spec
+
+
+def test_build_spec_excludes_pil_avif():
+    """PIL is used for a 64x64 tray circle and one thumbnail. The AVIF codec is
+    7.8MB extracted on every launch for nothing."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "_avif" in spec
+
+
+def test_build_spec_filters_the_binaries_list():
+    """The excludes must actually be applied to a.binaries -- naming them in a
+    constant while never filtering would silently ship them anyway."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "a.binaries = [" in spec
+
+
+def test_build_spec_warns_on_oversized_ffmpeg():
+    """The 2026-07-25 round assumed ffmpeg was ~80MB and shipped a 227MB full
+    build without noticing. Turn that silent size regression into a build-time
+    warning."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "_FFMPEG_MAX_MB" in spec
+    assert "SDPRS_FFMPEG" in spec, "build must allow an explicit ffmpeg override"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_packaging.py -q -p no:cacheprovider`
+Expected: FAIL — 4 failed, 6 passed
+
+- [ ] **Step 3: Write minimal implementation**
+
+Replace `webcam_client/build.spec` lines 9–43 (from the `# Bundle ffmpeg...` comment through the closing paren of `Analysis(...)`) with:
+
+```python
+# --- ffmpeg -------------------------------------------------------------------
+# onefile re-extracts the ENTIRE payload to %TEMP% on every launch, so payload
+# size IS startup time. Measured 2026-07-26: the build machine's PATH ffmpeg was
+# the 227MB *full* build = 55.5% of a 409MB payload, and nobody noticed because
+# nothing checked. The `essentials` build (~85MB) has everything h264/HLS needs:
+#     winget install Gyan.FFmpeg.Essentials
+# Resolution order makes the choice explicit instead of "whatever is first on
+# PATH", and an oversized binary now warns at build time.
+_FFMPEG_MAX_MB = 120
+
+
+def _resolve_ffmpeg():
+    explicit = os.environ.get('SDPRS_FFMPEG')
+    if explicit and Path(explicit).is_file():
+        return explicit
+    vendored = Path(SPECPATH) / 'vendor' / 'ffmpeg.exe'
+    if vendored.is_file():
+        return str(vendored)
+    return shutil.which('ffmpeg')
+
+
+_ffmpeg = _resolve_ffmpeg()
+_binaries = []
+if _ffmpeg:
+    _binaries = [(_ffmpeg, '.')]
+    _mb = Path(_ffmpeg).stat().st_size / 1e6
+    if _mb > _FFMPEG_MAX_MB:
+        print('=' * 78)
+        print(f'[build.spec] WARNING: ffmpeg is {_mb:.0f} MB -- that is a FULL build.')
+        print(f'[build.spec] It is re-extracted on EVERY launch. Expected <= {_FFMPEG_MAX_MB} MB.')
+        print('[build.spec]   winget install Gyan.FFmpeg.Essentials')
+        print('[build.spec]   set SDPRS_FFMPEG=<path to the essentials ffmpeg.exe>')
+        print('=' * 78)
+    else:
+        print(f'[build.spec] ffmpeg {_mb:.0f} MB from {_ffmpeg}')
+else:
+    print('[build.spec] WARNING: ffmpeg not found on PATH; exe will require '
+          'ffmpeg on the target PC PATH for live view (snapshots still work)')
+
+# Binaries this client provably never calls. Each one is decompressed and written
+# to %TEMP% on every single launch.
+#   opencv_videoio_ffmpeg*  28.6MB  OpenCV's video-FILE i/o backend. We only use
+#                                   VideoCapture(index, CAP_DSHOW) for live
+#                                   capture plus resize/imencode/cvtColor/
+#                                   GaussianBlur/absdiff. No file i/o anywhere.
+#   _avif                    7.8MB  PIL AVIF codec. PIL draws a 64x64 tray circle
+#                                   and one Tk thumbnail.
+_EXCLUDED_BINARIES = ('opencv_videoio_ffmpeg', '_avif')
+
+# Build the launcher (app.py), NOT the package module main.py. PyInstaller runs
+# the entry as __main__, which has no parent package -- main.py's relative
+# imports (`from .config import ...`) would then crash the exe at startup. app.py
+# imports the package absolutely. pathex includes the package's PARENT dir so
+# `import webcam_client` resolves and the whole package is collected (keeping
+# every submodule's relative imports valid).
+a = Analysis(
+    ['app.py'],
+    pathex=[str(Path(SPECPATH).parent)],
+    binaries=_binaries,
+    datas=[],
+    hiddenimports=['webcam_client', 'cv2', 'numpy', 'httpx', 'pystray', 'PIL'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=['matplotlib', 'scipy', 'pandas', 'PIL._avif'],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+# `excludes` only reaches modules the analyser resolved as imports; these ship as
+# plain DLL/pyd payload, so filter the binaries list directly. PyInstaller 6.x
+# treats a.binaries as a plain list of (name, path, typecode) tuples.
+_before = len(a.binaries)
+a.binaries = [b for b in a.binaries
+              if not any(p in b[0].lower() for p in _EXCLUDED_BINARIES)]
+print(f'[build.spec] dropped {_before - len(a.binaries)} excluded binaries')
+```
+
+Also add `import os` to the imports at the top of `build.spec` (line 3 area), so it reads:
+
+```python
+import os
+import shutil
+import sys
+from pathlib import Path
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_packaging.py -q -p no:cacheprovider`
+Expected: PASS — 10 passed
+
+- [ ] **Step 5: Add the payload audit tool**
+
+Create `webcam_client/tools/payload_audit.py`:
+
+```python
+"""Sum the on-disk size of everything PyInstaller put in the onefile payload,
+grouped by component, so the <=200MB target stays verifiable instead of assumed.
+
+    /c/Python314/python tools/payload_audit.py build/build/PKG-00.toc
+"""
+import ast
+import collections
+import os
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    raw = ast.literal_eval(f.read())
+# A PKG TOC is an 11-tuple of build params; the (name, src, typecode) list is [2].
+entries = raw[2] if isinstance(raw, tuple) else raw
+
+groups, counts, biggest = collections.Counter(), collections.Counter(), []
+for name, src, _typecode in entries:
+    size = os.path.getsize(src) if src and os.path.isfile(src) else 0
+    n = name.replace("\\", "/")
+    if n.startswith("ffmpeg"):
+        key = "ffmpeg.exe"
+    elif n.startswith("cv2/"):
+        key = "cv2"
+    elif n.startswith("numpy"):
+        key = "numpy"
+    elif n.startswith("PIL"):
+        key = "PIL/Pillow"
+    elif n.startswith("tcl") or n.startswith("tk") or "_tkinter" in n:
+        key = "tcl/tk (tkinter)"
+    elif n.endswith(".pyz"):
+        key = "PYZ (pure python)"
+    elif n.startswith("python"):
+        key = "CPython runtime"
+    else:
+        key = "other"
+    groups[key] += size
+    counts[key] += 1
+    biggest.append((size, name))
+
+total = sum(groups.values())
+print(f"{'component':24s} {'MB':>9s} {'share':>7s} {'files':>7s}")
+print("-" * 52)
+for key, size in groups.most_common():
+    print(f"{key:24s} {size/1e6:9.1f} {100*size/total:6.1f}% {counts[key]:7d}")
+print("-" * 52)
+print(f"{'TOTAL (uncompressed)':24s} {total/1e6:9.1f}")
+print("\nTop 10 individual files:")
+for size, name in sorted(biggest, reverse=True)[:10]:
+    print(f"  {size/1e6:8.1f} MB  {name}")
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd sdprs
+git add webcam_client/build.spec webcam_client/tools/payload_audit.py webcam_client/tests/test_packaging.py
+git commit -m "perf(webcam): slim onefile payload (ffmpeg essentials, drop unused binaries)"
+```
+
+---
+
+### Task 5: Splash screen and app icon
+
+**Files:**
+- Create: `webcam_client/assets/make_assets.py`, `webcam_client/assets/sdprs.ico`, `webcam_client/assets/splash.png`
+- Modify: `webcam_client/build.spec` (add `Splash(...)`, wire into `EXE(...)`, set `icon=`)
+- Test: `webcam_client/tests/test_packaging.py` (extend)
+
+**Interfaces:**
+- Consumes: `_close_splash()` from Task 3 (already wired — no `main.py` change needed here)
+- Produces: `assets/splash.png` (420×240 PNG), `assets/sdprs.ico`
+
+**Assets are generated from code**, not hand-drawn, so they are reproducible and reviewable. If real branding arrives later it simply replaces the two output files.
+
+**CJK caveat:** PIL's default bitmap font cannot render Chinese — it draws boxes. `make_assets.py` looks for Microsoft JhengHei (`msjh.ttc`) and falls back to an ASCII-only splash if no CJK font is present, so the build never breaks on a machine without it.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `webcam_client/tests/test_packaging.py`:
+
+```python
+def test_assets_exist():
+    assert (WEBCAM_DIR / "assets" / "sdprs.ico").is_file()
+    assert (WEBCAM_DIR / "assets" / "splash.png").is_file()
+
+
+def test_build_spec_declares_a_splash():
+    """S4: console=False + ~20s onefile extraction = a completely blank screen.
+    The bootloader paints the splash before Python starts."""
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "Splash(" in spec
+    assert "splash.binaries" in spec, "onefile EXE must receive splash.binaries"
+
+
+def test_build_spec_sets_an_icon():
+    spec = (WEBCAM_DIR / "build.spec").read_text(encoding="utf-8")
+    assert "icon=None" not in spec
+    assert "sdprs.ico" in spec
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_packaging.py -q -p no:cacheprovider`
+Expected: FAIL — 3 failed, 10 passed
+
+- [ ] **Step 3: Write the asset generator and run it**
+
+Create `webcam_client/assets/make_assets.py`:
+
+```python
+"""Regenerate the app icon and splash image.
+
+    cd webcam_client && /c/Python314/python assets/make_assets.py
+
+Generated from code so they are reproducible and diffable in review. Replace the
+two output files directly if real branding becomes available.
+"""
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+HERE = Path(__file__).resolve().parent
+BG = (18, 32, 52)
+ACCENT = (63, 138, 224)
+TEXT = (238, 242, 248)
+MUTED = (150, 168, 190)
+
+# PIL's default bitmap font renders CJK as boxes, so find a real CJK face.
+# Absent one, the splash falls back to ASCII rather than shipping tofu.
+_CJK_CANDIDATES = ["C:/Windows/Fonts/msjh.ttc", "C:/Windows/Fonts/msyh.ttc"]
+
+
+def _font(size, prefer_cjk=True):
+    if prefer_cjk:
+        for path in _CJK_CANDIDATES:
+            if Path(path).is_file():
+                try:
+                    return ImageFont.truetype(path, size), True
+                except OSError:
+                    pass
+    try:
+        return ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", size), False
+    except OSError:
+        return ImageFont.load_default(), False
+
+
+def make_icon():
+    # 256px master; Pillow downsamples to the smaller sizes for the .ico.
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([8, 8, 248, 248], radius=52, fill=BG)
+    d.ellipse([76, 76, 180, 180], fill=ACCENT)          # lens
+    d.ellipse([104, 104, 152, 152], fill=BG)            # aperture
+    d.rounded_rectangle([112, 34, 144, 62], radius=8, fill=ACCENT)  # mount
+    img.save(HERE / "sdprs.ico",
+             sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+    print("wrote sdprs.ico")
+
+
+def make_splash():
+    img = Image.new("RGB", (420, 240), BG)
+    d = ImageDraw.Draw(img)
+    d.ellipse([170, 40, 250, 120], outline=ACCENT, width=7)
+    d.ellipse([196, 66, 224, 94], fill=ACCENT)
+    title, _ = _font(30, prefer_cjk=False)
+    d.text((210, 145), "SDPRS", font=title, fill=TEXT, anchor="mm")
+    sub, is_cjk = _font(15)
+    msg = "啟動中，請稍候…" if is_cjk else "Starting, please wait..."
+    d.text((210, 178), msg, font=sub, fill=MUTED, anchor="mm")
+    img.save(HERE / "splash.png")
+    print(f"wrote splash.png (cjk={is_cjk})")
+
+
+if __name__ == "__main__":
+    make_icon()
+    make_splash()
+```
+
+Run it:
+
+```bash
+cd webcam_client && /c/Python314/python assets/make_assets.py
+```
+Expected: `wrote sdprs.ico` / `wrote splash.png (cjk=True)`
+
+- [ ] **Step 4: Wire the splash into `build.spec`**
+
+Insert after the `pyz = PYZ(...)` line:
+
+```python
+# S4: console=False and a onefile payload that takes ~20s to extract means the
+# operator sees NOTHING after double-clicking -- so they double-click again. The
+# bootloader paints this before Python starts. text_pos lets the bootloader write
+# progress over the image; keep it inside the 420x240 canvas.
+splash = Splash(
+    # SPECPATH-relative, NOT 'assets/splash.png': a bare relative path resolves
+    # against the CWD pyinstaller was invoked from, so building from anywhere
+    # other than webcam_client/ would fail to find it.
+    str(Path(SPECPATH) / 'assets' / 'splash.png'),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(20, 215),
+    text_size=10,
+    text_color='white',
+    always_on_top=False,
+)
+```
+
+Then in `EXE(...)`, add `splash` and `splash.binaries` immediately after `a.scripts`, and set the icon:
+
+```python
+exe = EXE(
+    pyz,
+    a.scripts,
+    splash,
+    splash.binaries,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='SDPRS_Webcam',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,  # skip UPX: its per-launch decompression slows onefile cold start
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=str(Path(SPECPATH) / 'assets' / 'sdprs.ico'),
+)
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cd webcam_client && /c/Python314/python -m pytest tests/test_packaging.py -q -p no:cacheprovider`
+Expected: PASS — 13 passed
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd sdprs
+git add webcam_client/assets webcam_client/build.spec webcam_client/tests/test_packaging.py
+git commit -m "feat(webcam): splash screen during onefile extraction + app icon"
+```
+
+---
+
+### Task 6: Rebuild and measure against the baseline
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-07-26-webcam-startup-and-guard-ux-design.md` (record measured results in §5.3)
+
+**Interfaces:**
+- Consumes: `tools/payload_audit.py` from Task 4
+- Produces: measured before/after numbers
+
+This task is where the plan's claims get **falsified or confirmed**. Do not skip it, and do not report Phase 1 complete without these numbers.
+
+- [ ] **Step 1: Ensure the essentials ffmpeg is what the build will pick up**
+
+```bash
+winget install Gyan.FFmpeg.Essentials
+```
+
+Then find the installed binary and pin it explicitly (do not rely on PATH order — the full build is still installed):
+
+```bash
+find /c/Users/$USERNAME/AppData/Local/Microsoft/WinGet/Packages -iname "ffmpeg.exe" -path "*essentials*"
+```
+
+Export it for the build (Git Bash):
+
+```bash
+export SDPRS_FFMPEG="<path printed above>"
+```
+
+- [ ] **Step 2: Rebuild**
+
+```bash
+cd webcam_client && /c/Python314/python -m PyInstaller build.spec --noconfirm
+```
+Expected: the build log prints `[build.spec] ffmpeg 85 MB from ...` (a number ≤120) and `[build.spec] dropped N excluded binaries` with N ≥ 2. **If it prints the oversized-ffmpeg WARNING banner, stop and fix `SDPRS_FFMPEG` before continuing** — the measurement below will be meaningless otherwise.
+
+- [ ] **Step 3: Measure the payload**
+
+```bash
+cd webcam_client && /c/Python314/python tools/payload_audit.py build/build/PKG-00.toc
+```
+Expected: `TOTAL (uncompressed)` ≤ **200.0** MB (baseline was 409.4 MB).
+
+- [ ] **Step 4: Measure startup, same harness as the baseline**
+
+```powershell
+$exe = "C:\D\WorkSpace\[Cloud]_Company_Sync\1Project(Single)\TyphoneCrackDetect_waterRemove\sdprs\webcam_client\dist\SDPRS_Webcam.exe"
+foreach ($i in 1..3) {
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $p = Start-Process -FilePath $exe -ArgumentList "--check" -PassThru -Wait
+  $sw.Stop()
+  Write-Output ("run {0}: {1:N2} s  exit={2}" -f $i, $sw.Elapsed.TotalSeconds, $p.ExitCode)
+}
+```
+Expected: run 3 (warm) ≤ **20 s**. Baseline was 60.08 / 48.33 / 39.42 s.
+
+- [ ] **Step 5: Measure when the splash actually appears — the §3.1 risk**
+
+Launch `dist\SDPRS_Webcam.exe` normally (no `--check`) and time by stopwatch or screen recording how long until the splash is visible.
+Expected: ≤ **3 s**.
+
+**If it exceeds 3 s:** the splash is being painted too late to solve S4. Do not silently accept it. Record the number, and report it — the fallback (a small separate pre-launcher) is a design change that needs a decision, not an improvised fix.
+
+- [ ] **Step 6: Verify the runtime behaviours by hand**
+
+- Double-click the exe twice → the second launch shows 「SDPRS 監控已在執行中。」 and exits; only one `SDPRS_Webcam` **child** process remains. (Remember onefile shows 2 PIDs per instance — a bootloader parent plus the real child. Compare `ParentProcessId` before concluding there is a duplicate.)
+- Confirm `%APPDATA%\SDPRSWebcam\logs\webcam.log` exists and has content.
+- **Confirm the API key does NOT appear in it.** Run from `sdprs/` — this prints only a verdict, never the key itself (echoing a live credential into the terminal scrollback is exactly what we are trying to prevent):
+  ```bash
+  /c/Python314/python -c "
+  from pathlib import Path
+  from webcam_client.config import load_config, get_config_dir
+  key = load_config().get('api_key', '')
+  log = get_config_dir() / 'logs' / 'webcam.log'
+  body = log.read_text(encoding='utf-8', errors='replace')
+  print('log bytes:', len(body))
+  print('VERDICT:', 'LEAKED - FIX BEFORE SHIPPING' if key and key in body else 'clean')
+  "
+  ```
+  Expected: `VERDICT: clean`.
+- Confirm the exe shows the new icon in Explorer.
+
+- [ ] **Step 7: Record the results in the spec**
+
+Update the §5.3 table in `docs/superpowers/specs/2026-07-26-webcam-startup-and-guard-ux-design.md`, replacing the 目標 column entries with the measured values and adding a 實測 column. Note explicitly whether the splash met ≤3 s, since Phase 2/3 design depends on that answer.
+
+- [ ] **Step 8: Run the full client suite once more**
+
+```bash
+cd webcam_client && for f in tests/test_*.py; do /c/Python314/python -m pytest "$f" -q -p no:cacheprovider; done
+```
+Expected: every file passes.
+
+- [ ] **Step 9: Commit**
+
+```bash
+cd sdprs
+git add docs/superpowers/specs/2026-07-26-webcam-startup-and-guard-ux-design.md
+git commit -m "docs(webcam): record measured Phase 1 startup results"
+```
+
+---
+
+### Task 7 (OPTIONAL, may be abandoned): drop OpenBLAS
+
+**Files:**
+- Modify: `webcam_client/build.spec` (`_EXCLUDED_BINARIES`)
+
+`libscipy_openblas64_*.dll` is 20.4 MB and this client does no linear algebra. **But** numpy's `_multiarray_umath` links BLAS at load time on Windows, so removing it may break `import numpy` outright.
+
+Attempt this **only if Task 6 missed the ≤200 MB target.** If Task 6 hit the target, skip — 20 MB is not worth risking the client's ability to start.
+
+- [ ] **Step 1: Add the exclusion**
+
+Add `'libscipy_openblas'` to `_EXCLUDED_BINARIES` in `build.spec`.
+
+- [ ] **Step 2: Rebuild and probe**
+
+```bash
+cd webcam_client && /c/Python314/python -m PyInstaller build.spec --noconfirm
+./dist/SDPRS_Webcam.exe --check; echo "exit=$?"
+```
+
+- [ ] **Step 3: Decide**
+
+- `exit=0` → keep it. Re-run Task 6 Steps 3–4 and update the recorded numbers.
+- Anything else (crash, non-zero, silent failure) → **revert immediately**: remove `'libscipy_openblas'` from `_EXCLUDED_BINARIES`, rebuild, confirm `--check` returns 0 again. Record in the spec that the exclusion was attempted and rejected, so nobody retries it blind.
+
+- [ ] **Step 4: Commit (whichever way it went)**
+
+```bash
+cd sdprs
+git add webcam_client/build.spec docs/superpowers/specs/2026-07-26-webcam-startup-and-guard-ux-design.md
+git commit -m "perf(webcam): drop OpenBLAS from payload"   # or: "docs(webcam): record OpenBLAS exclusion as rejected"
+```
