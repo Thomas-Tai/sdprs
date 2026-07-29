@@ -118,6 +118,15 @@ class PushEngine(threading.Thread):
         if cap is None:
             logger.error(f"Cannot open camera {self._cam_config.get('device_index')}")
             self._report(Fault.CAMERA_DOWN)
+            # Close the client on the way out. This early return sits BETWEEN
+            # the client's creation and the try/finally below, so it used to
+            # leak the connection pool every time. Dormant until this phase --
+            # then 重新連線 made it guard-repeatable, and the text at
+            # strings.py's camera_down invites exactly that: a guard whose
+            # camera will not open is TOLD to re-seat the cable and press it,
+            # twice per press (start_engines retries), for as long as it takes.
+            self._client.close()
+            self._client = None
             return
 
         prev_frame = None
