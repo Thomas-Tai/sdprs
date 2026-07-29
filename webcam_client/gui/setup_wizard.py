@@ -7,6 +7,7 @@ from typing import Optional
 
 import httpx
 
+from .. import strings
 from ..camera_manager import scan_cameras
 from .preview import make_thumbnail, grab_preview_frame
 
@@ -52,15 +53,24 @@ def register_cameras(server_url: str, api_key: str, selected: list):
             timeout=10.0,
         )
     except httpx.HTTPError as e:
-        return None, f"無法連線到伺服器：{e}"
+        # The exception goes to the LOG, never to the guard: its text is English
+        # ("All connection attempts failed", "[Errno 11001] getaddrinfo failed")
+        # and it blames the server for what is most often a mistyped address.
+        logger.warning("camera registration transport failure: %s", e, exc_info=True)
+        return None, strings.WIZ_CANNOT_REACH_SERVER
     if resp.status_code == 401:
-        return None, "連線密碼不正確"
+        logger.warning("camera registration rejected the key (401)")
+        return None, strings.WIZ_KEY_REJECTED
     if resp.status_code != 201:
-        return None, f"伺服器回應：{resp.status_code}"
+        # Same rule as everywhere else: the technician gets the code, the guard
+        # gets the action. This line used to hand the guard "伺服器回應：500".
+        logger.warning("camera registration unexpected status %s", resp.status_code)
+        return None, strings.WIZ_SERVER_REFUSED
     try:
         registered = resp.json()
-    except Exception:
-        return None, "伺服器回應格式錯誤（非 JSON）"
+    except Exception as e:
+        logger.warning("camera registration body was not JSON: %s", e, exc_info=True)
+        return None, strings.WIZ_BAD_RESPONSE
     reg = iter(registered)
     result = []
     for c in selected:
@@ -152,12 +162,10 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
     result = {"config": None}
     root = tk.Tk()
     # 監控, not "Webcam": this title bar is the FIRST thing the guard ever reads
-    # from this app, and every other operator-facing surface already says 監控
-    # (strings.WINDOW_TITLE, strings.TRAY_TOOLTIP_PREFIX). Two names for one
-    # program reads as two programs. Lives here rather than in strings.py only
-    # because that module is settled copy; see the tray-label drift note in
-    # gui/tray_app.py -- both belong there eventually.
-    title = "SDPRS 監控設定" if mode == "first-run" else "SDPRS 監控設定（編輯）"
+    # from this app, and every other operator-facing surface already says 監控.
+    # Two names for one program reads as two programs. Now in strings.py with
+    # the rest of this window's copy, as the note that used to sit here asked.
+    title = strings.WIZ_TITLE if mode == "first-run" else strings.WIZ_TITLE_EDIT
     root.title(title)
     root.geometry("500x480")
     root.resizable(False, False)
@@ -167,10 +175,10 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
     # --- Frame: Server connection ---
     frame_conn = ttk.LabelFrame(root, text="伺服器連線", padding=10)
     frame_conn.pack(fill="x", padx=10, pady=5)
-    ttk.Label(frame_conn, text="連線位址：").grid(row=0, column=0, sticky="w")
+    ttk.Label(frame_conn, text=f"{strings.LBL_SERVER_URL}：").grid(row=0, column=0, sticky="w")
     url_var = tk.StringVar(value=config.get("server_url", ""))
     ttk.Entry(frame_conn, textvariable=url_var, width=40).grid(row=0, column=1, padx=5)
-    ttk.Label(frame_conn, text="連線密碼：").grid(row=1, column=0, sticky="w", pady=5)
+    ttk.Label(frame_conn, text=f"{strings.LBL_API_KEY}：").grid(row=1, column=0, sticky="w", pady=5)
     key_var = tk.StringVar(value=config.get("api_key", ""))
     ttk.Entry(frame_conn, textvariable=key_var, width=40, show="*").grid(
         row=1, column=1, padx=5, pady=5)
@@ -206,7 +214,7 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         row = ttk.Frame(cam_frame_inner)
         row.pack(fill="x", anchor="w", pady=2)
         ttk.Checkbutton(row, text=subtitle, variable=var).pack(side="left")
-        ttk.Label(row, text="名稱:").pack(side="left", padx=(8, 2))
+        ttk.Label(row, text="名稱：").pack(side="left", padx=(8, 2))
         ttk.Entry(row, textvariable=name_var, width=16).pack(side="left")
         # Render the row NOW; grab_preview_frame opens the camera and can
         # take 0.5-2s per device, so the thumbnail loads on a worker thread
@@ -235,7 +243,13 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
             w.destroy()
         cam_vars.clear()
         if not rows:
-            ttk.Label(cam_frame_inner, text="未偵測到攝影機").pack()
+            # An unplugged camera is the single most likely state of a FIRST
+            # run, so this is not an edge case -- it is the common path. It used
+            # to say 未偵測到攝影機 and stop, three characters of diagnosis and
+            # no action, while the button that resolves it sat unnamed in the
+            # corner. wraplength so the action does not run off the frame.
+            ttk.Label(cam_frame_inner, text=strings.WIZ_NO_CAMERA_FOUND,
+                      wraplength=440, justify="left").pack(anchor="w")
         for r in rows:
             di = r["device_index"]
             subtitle = f"攝影機 {di}"
@@ -255,7 +269,8 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         status_var.set("掃描中...")
         _scan_cameras_async(_on_scan_done)
 
-    ttk.Button(frame_cam, text="重新掃描", command=do_scan).pack(anchor="e", pady=5)
+    ttk.Button(frame_cam, text=strings.BTN_WIZARD_RESCAN,
+               command=do_scan).pack(anchor="e", pady=5)
 
     # --- Buttons ---
     frame_btn = ttk.Frame(root, padding=10)
@@ -265,7 +280,7 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         server_url = normalize_server_url(url_var.get())
         api_key = key_var.get().strip()
         if not server_url or not api_key:
-            messagebox.showerror("錯誤", "請填入連線位址和連線密碼")
+            messagebox.showerror(title, strings.WIZ_NEED_URL_AND_KEY)
             return
         # Re-home cameras when the client identity changed: reusing node_ids
         # owned by the OLD client makes the new key 403 "Camera not owned".
@@ -278,14 +293,14 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         ]
         selected = _build_cameras_for_registration(selected_rows, identity_changed)
         if not selected:
-            messagebox.showerror("錯誤", "請至少選擇一支攝影機")
+            messagebox.showerror(title, strings.WIZ_NEED_A_CAMERA)
             return
         status_var.set("連線中...")
         root.update()
         cams, err = register_cameras(server_url, api_key, selected)
         status_var.set("")
         if err:
-            messagebox.showerror("錯誤", err)
+            messagebox.showerror(title, err)
             return
         result["config"] = {
             "server_url": server_url, "api_key": api_key, "cameras": cams,
@@ -294,8 +309,15 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         }
         root.destroy()
 
-    ttk.Button(frame_btn, text="開始", command=on_start).pack(side="right")
-    ttk.Button(frame_btn, text="取消", command=root.destroy).pack(side="right", padx=5)
+    # 儲存 in edit mode: bad_key's action line sends the guard here to save a key
+    # the administrator just issued, and 「開始」 reads like "start something new"
+    # at precisely that moment -- a guard told to save who sees only 開始 and 取消
+    # presses 取消 and loses the key they just typed. strings.py names this label
+    # rather than retyping it, so the two cannot drift again.
+    confirm = strings.BTN_WIZARD_SAVE if mode == "edit" else strings.BTN_WIZARD_START
+    ttk.Button(frame_btn, text=confirm, command=on_start).pack(side="right")
+    ttk.Button(frame_btn, text=strings.BTN_WIZARD_CANCEL,
+               command=root.destroy).pack(side="right", padx=5)
 
     if mode == "edit":
         _render(_camera_rows_from_config(config))  # show saved cameras, no rescan

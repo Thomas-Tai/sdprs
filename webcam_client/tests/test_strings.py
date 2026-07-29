@@ -78,12 +78,24 @@ def test_standalone_operator_constants_avoid_status_codes_and_developer_text():
     directly (window title, tray tooltip, a dialog, menu/button labels), and
     were never checked. Discover them dynamically via vars(strings) rather
     than hardcoding the name list -- a hardcoded list is exactly how this gap
-    happened, since it silently stops covering constants added later."""
+    happened, since it silently stops covering constants added later.
+
+    The `_`-prefixed constants are included ON PURPOSE. Excluding them was the
+    same failure mode this docstring warns about, wearing a different hat:
+    _RUNNING_DETAIL_UNKNOWN_COUNT is not an internal detail, it is the text of
+    EVERY recovery toast and every RUNNING tooltip -- notifier.py and
+    tray_app.py both call describe(state) with no context, so camera_count is
+    None and that branch always fires. Meanwhile the two content tests above
+    pass camera_count=2, which takes the template branch and never renders it.
+    A banned word planted there failed nothing at all.
+    """
     constants = {
         name: value
         for name, value in vars(strings).items()
-        if name.isupper() and not name.startswith("_") and isinstance(value, str)
+        if name.isupper() and isinstance(value, str)
     }
+    assert "_RUNNING_DETAIL_UNKNOWN_COUNT" in constants, \
+        "the guard-visible _-prefixed constants must stay inside this scan"
     assert constants, "no standalone string constants discovered -- test would vacuously pass"
     for name, value in constants.items():
         assert not re.search(_STATUS_CODE_RE, value), \
@@ -180,3 +192,56 @@ def test_describe_tolerates_missing_context():
     for state in ALL_STATES:
         title, detail, action = strings.describe(state)
         assert title and detail
+
+
+def test_bad_key_names_the_button_that_actually_saves_the_new_key():
+    """The action told the guard to 填入並儲存 while the setup window's only
+    buttons were 開始 and 取消 -- there was no 儲存 anywhere in the app. A guard
+    who has just been handed a new key by the administrator, and who is told to
+    save it, does not press a button labelled 開始; the cautious ones press 取消
+    and lose the key they just typed.
+
+    Asserted against the constants, not literals, because the sibling drift
+    tests for BTN_RECONNECT and MENU_STATUS are exactly why those two never
+    drifted while this one did."""
+    _, _, action = strings.describe(Health.BAD_KEY)
+    assert strings.BTN_WIZARD_SAVE in action, \
+        f"bad_key must name the button that saves the key: {action!r}"
+    assert strings.LBL_API_KEY in action, \
+        f"bad_key must name the field the key goes into: {action!r}"
+    assert strings.BTN_SETTINGS in action, \
+        f"bad_key must name the button that opens that window: {action!r}"
+
+
+def test_the_setup_window_speaks_the_same_language_as_everything_else():
+    """The setup window is the FIRST screen a guard ever meets and it used to
+    sit outside this module entirely, so its error paths still shipped a raw
+    status code, an English exception repr and the word JSON long after every
+    other surface was clean. Now that its copy lives here the scan above covers
+    it automatically -- this pins the other half: each of these fires at a
+    moment the guard is stuck, so each must name something to DO."""
+    stuck = (strings.WIZ_NO_CAMERA_FOUND, strings.WIZ_CANNOT_REACH_SERVER,
+             strings.WIZ_KEY_REJECTED, strings.WIZ_SERVER_REFUSED,
+             strings.WIZ_BAD_RESPONSE, strings.WIZ_NEED_A_CAMERA,
+             strings.WIZ_NEED_URL_AND_KEY)
+    for msg in stuck:
+        assert msg.strip(), "an empty message is no message"
+        assert "請" in msg, f"a stuck guard needs an instruction, not a diagnosis: {msg!r}"
+    # The two that a guard genuinely cannot resolve alone must route onward;
+    # the ones they CAN fix must not escalate on the first try.
+    for msg in (strings.WIZ_SERVER_REFUSED, strings.WIZ_BAD_RESPONSE):
+        assert "管理員" in msg, f"an unfixable setup failure must escalate: {msg!r}"
+    assert "管理員" not in strings.WIZ_NEED_URL_AND_KEY, \
+        "a blank field is the guard's to fix; do not send them to the administrator"
+
+
+def test_the_destination_has_exactly_one_name():
+    """paused said 監控中心 while every other surface said 伺服器. A guard who
+    reads 'not reaching the 監控中心' when paused and '無法連線到伺服器' when it
+    breaks has no way to know those are the same machine, and reports two
+    systems to a technician who has one."""
+    for state in ALL_STATES:
+        joined = " ".join(strings.describe(state, camera_count=2,
+                                           camera_names="前門攝影機"))
+        assert "監控中心" not in joined, \
+            f"{state} gives the destination a second name: {joined!r}"

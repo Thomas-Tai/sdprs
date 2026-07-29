@@ -51,9 +51,28 @@ def _health_color(state) -> str:
     return _HEALTH_COLORS.get(state, "grey")
 
 
+# pystray's Win32 backend declares szTip as WCHAR * 128, and ctypes RAISES on
+# overflow rather than truncating -- an over-long tooltip would kill the tray
+# icon outright, not merely look wrong. Clamp with room for the terminator.
+_TOOLTIP_MAX = 127
+
+
 def _tooltip(state) -> str:
-    title, detail, _ = describe(state)
-    return f"{TRAY_TOOLTIP_PREFIX}\n{title}\n{detail}"
+    """The tooltip is the only fault surface that is ALWAYS present.
+
+    The toast is transient and Focus Assist can suppress it outright; the status
+    window has to be opened. This threw the action away, so a guard who hovered
+    a red icon read 攝影機沒有畫面 then 攝影機目前沒有畫面 -- the same sentence
+    twice -- and never the cable-and-重新連線 fix sitting one field away.
+    """
+    title, detail, action = describe(state)
+    lines = [TRAY_TOOLTIP_PREFIX, title, detail]
+    if action:
+        lines.append(action)
+    text = "\n".join(lines)
+    if len(text) > _TOOLTIP_MAX:
+        text = text[:_TOOLTIP_MAX - 1] + "…"
+    return text
 
 
 class TrayApp:

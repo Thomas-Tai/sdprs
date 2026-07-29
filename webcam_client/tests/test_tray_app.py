@@ -101,3 +101,34 @@ def test_tooltip_names_the_state_in_plain_language():
     text = _tooltip(Health.BAD_KEY)
     assert "連線密碼" in text
     assert "401" not in text and "403" not in text
+
+
+def test_the_tooltip_carries_the_fix_not_just_the_diagnosis():
+    """The tooltip is the only fault surface that is ALWAYS present -- the toast
+    is transient and Focus Assist can suppress it outright, and the status
+    window has to be opened. It discarded describe()'s action, so a guard who
+    hovered a red icon read 攝影機沒有畫面 then 攝影機目前沒有畫面: the same
+    sentence twice, and never the cable-and-重新連線 fix one field away."""
+    from webcam_client.gui.tray_app import _tooltip, _TOOLTIP_MAX
+    from webcam_client.status import Health
+    from webcam_client import strings
+
+    for state in (Health.NO_SERVER, Health.BAD_KEY, Health.CAMERA_DOWN):
+        _, _, action = strings.describe(state)
+        text = _tooltip(state)
+        assert action and action in text, \
+            f"{state} tooltip drops the only actionable line: {text!r}"
+        # szTip is WCHAR * 128 and ctypes RAISES on overflow rather than
+        # truncating, so an over-long tooltip would kill the tray icon outright.
+        assert len(text) <= _TOOLTIP_MAX, \
+            f"{state} tooltip is {len(text)} chars, over the Win32 szTip limit"
+
+
+def test_a_healthy_tooltip_has_no_dangling_action_line():
+    """Healthy states carry an empty action, so the join must not leave a bare
+    trailing newline the way the toast's separator logic once did."""
+    from webcam_client.gui.tray_app import _tooltip
+    from webcam_client.status import Health
+    text = _tooltip(Health.RUNNING)
+    assert text == text.strip()
+    assert not text.endswith("\n")

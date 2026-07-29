@@ -22,6 +22,49 @@ BTN_OPEN_LOGS = "開啟記錄檔"
 BTN_RECONNECT = "重新連線"
 BTN_SETTINGS = "設定"
 
+# --- The setup window ------------------------------------------------------
+# This window used to hold its own strings. That put the FIRST screen a guard
+# ever meets outside the guarantee this module's docstring claims for the whole
+# app, and it showed: its error paths still shipped a raw status code, an
+# English exception repr, and the word JSON long after every other surface had
+# been cleaned up. They live here now so the same tests cover them.
+#
+# The confirm button is labelled by MODE. bad_key sends the guard here to SAVE
+# a key an administrator just issued, and 「開始」 -- right for a first run --
+# reads like "start something new" at exactly that moment, so edit mode says
+# 儲存 instead. Both labels are named by the fault text below rather than
+# retyped there, so the instruction and the control cannot drift apart. They
+# already had: the text said 儲存 while the only buttons were 開始 and 取消.
+WIZ_TITLE = "SDPRS 監控設定"
+WIZ_TITLE_EDIT = "SDPRS 監控設定（編輯）"
+BTN_WIZARD_START = "開始"
+BTN_WIZARD_SAVE = "儲存"
+BTN_WIZARD_CANCEL = "取消"
+BTN_WIZARD_RESCAN = "重新掃描"
+LBL_SERVER_URL = "連線位址"
+LBL_API_KEY = "連線密碼"
+
+# These fire on the day the guard is standing at an unfamiliar PC trying to get
+# the app working -- the day they can least afford a status code. The code and
+# the exception are NOT discarded: setup_wizard.py logs both for the technician
+# before showing any of these. None names the confirm button, because the guard
+# just pressed it and it is still in front of them; 再試一次 stays true whether
+# that button says 開始 or 儲存.
+WIZ_NEED_URL_AND_KEY = f"請填入「{LBL_SERVER_URL}」和「{LBL_API_KEY}」，兩項都不能空白。"
+WIZ_NEED_A_CAMERA = (f"請至少勾選一支攝影機。若清單是空的，"
+                     f"請確認攝影機的 USB 線已插好，再按「{BTN_WIZARD_RESCAN}」。")
+WIZ_NO_CAMERA_FOUND = (f"找不到攝影機。請確認攝影機的 USB 線已插好，"
+                       f"再按「{BTN_WIZARD_RESCAN}」；仍找不到請通知管理員。")
+WIZ_CANNOT_REACH_SERVER = (f"連不到伺服器。請檢查電腦後方的網路線是否鬆脫，"
+                           f"並確認「{LBL_SERVER_URL}」與管理員給的完全相同，"
+                           f"然後再試一次；仍然連不到請通知管理員。")
+WIZ_KEY_REJECTED = (f"連線密碼不正確。請向管理員索取正確的連線密碼，"
+                    f"重新填入「{LBL_API_KEY}」後再試一次。")
+WIZ_SERVER_REFUSED = (f"伺服器拒絕了這次設定。請確認「{LBL_SERVER_URL}」"
+                      f"與管理員給的完全相同後再試一次；"
+                      f"仍然失敗請通知管理員「攝影機登記不成功」。")
+WIZ_BAD_RESPONSE = "伺服器的回覆無法辨識，設定沒有完成。請通知管理員「攝影機登記回應異常」。"
+
 # Shown when 開啟記錄檔 cannot hand the folder to the shell. The guard pressing
 # this button is almost always already on the phone with a technician who asked
 # for it, so a button that silently does nothing leaves them with nothing to
@@ -44,7 +87,11 @@ _TEXT = {
     ),
     "paused": (
         "已暫停上傳",
-        "上傳已被手動暫停，畫面不會傳到監控中心。",
+        # 伺服器, not 監控中心: this was the ONE place in the app that gave the
+        # destination a second name. A guard who reads 「不會傳到監控中心」 here
+        # and 「無法連線到伺服器」 when it breaks has no way to know those are
+        # the same machine, and reports two systems to a technician who has one.
+        "上傳已被手動暫停，畫面不會傳到伺服器。",
         "要繼續上傳，請在螢幕右下角的圖示上按滑鼠右鍵，選「恢復上傳」。",
     ),
     "no_server": (
@@ -80,14 +127,15 @@ _TEXT = {
     "bad_key": (
         "連線密碼已失效",
         "伺服器不接受這台電腦目前的連線密碼。",
-        "請通知管理員重設連線密碼。拿到新密碼後，在「監控狀態」視窗按「設定」"
-        "填入並儲存；若管理員說不用換密碼，改按「重新連線」。",
+        f"請通知管理員重設連線密碼。在「{MENU_STATUS}」視窗按「{BTN_SETTINGS}」，"
+        f"把新密碼填進「{LBL_API_KEY}」再按「{BTN_WIZARD_SAVE}」；"
+        f"若管理員說不用換密碼，改按「{BTN_RECONNECT}」。",
     ),
     "camera_down": (
         "攝影機沒有畫面",
         "{camera_names}目前沒有畫面。",
-        "請檢查攝影機的 USB 線是否鬆脫；重新插好後，"
-        "請按「監控狀態」視窗下方的「重新連線」；仍沒有畫面請通知管理員。",
+        f"請檢查攝影機的 USB 線是否鬆脫；重新插好後，"
+        f"請按「{MENU_STATUS}」視窗下方的「{BTN_RECONNECT}」；仍沒有畫面請通知管理員。",
     ),
 }
 

@@ -17,6 +17,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from webcam_client import strings
 from webcam_client.gui.setup_wizard import normalize_server_url, register_cameras
 
 
@@ -94,7 +95,13 @@ def test_register_cameras_returns_message_not_raises_on_schemeless_or_transport_
         with patch("webcam_client.gui.setup_wizard.httpx.post", side_effect=exc):
             cams, err = register_cameras("http://x", "k", [{"device_index": 0}])
         assert cams is None
-        assert err and "無法連線" in err, (exc, err)
+        # Asserted against the constant, not a phrase: the message itself is
+        # operator copy and may be rewritten, but it must always be THE
+        # connection-failure message and must never carry the exception repr,
+        # whose text is English ("All connection attempts failed") and blames
+        # the server for what is usually a mistyped address.
+        assert err == strings.WIZ_CANNOT_REACH_SERVER, (exc, err)
+        assert str(exc) not in err, "the exception repr must go to the log, not the guard"
 
 
 def test_register_cameras_maps_401_and_other_status():
@@ -106,7 +113,14 @@ def test_register_cameras_maps_401_and_other_status():
     with patch("webcam_client.gui.setup_wizard.httpx.post",
                return_value=MagicMock(status_code=500)):
         cams, err = register_cameras("http://x", "k", [{"device_index": 0}])
-    assert cams is None and "500" in err
+    # Inverted deliberately. This asserted `"500" in err`, which did not merely
+    # miss the leak -- it REQUIRED it, so anyone cleaning up the copy got a red
+    # test telling them the guard needs the status code. That is why this line
+    # survived the operator copy pass that rewrote the statement above it.
+    # The code is not lost: register_cameras logs it for the technician.
+    assert cams is None
+    assert "500" not in err, f"the guard must never be shown a status code: {err!r}"
+    assert err == strings.WIZ_SERVER_REFUSED
 
 
 def test_register_cameras_success_attaches_node_ids():
