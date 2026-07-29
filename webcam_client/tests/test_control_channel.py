@@ -14,6 +14,12 @@ class _FakeResp:
         self._payload = {"command": None} if payload is None else payload
 
     def json(self):
+        # A payload that IS an exception stands for a malformed body: httpx
+        # raises out of .json() rather than handing back a dict. That is the
+        # non-handler application error run()'s bare `except Exception` arm
+        # exists for, and there is no other way to provoke it from a fake.
+        if isinstance(self._payload, Exception):
+            raise self._payload
         return self._payload
 
 
@@ -293,6 +299,56 @@ def test_a_backed_off_node_never_delays_a_healthy_one():
         f"got n1={len(n1_polls)} n2={client.calls.count('n2')}")
 
 
+def test_a_broken_command_handler_does_not_latch_a_stale_fault():
+    """The server's 200 is the poll's verdict; a crashing handler cannot veto it.
+
+    _on_command is dispatched inside the 200 arm, BEFORE _poll_node returns. A
+    handler that raised used to escape into run()'s bare `except Exception`,
+    which aborts the cycle before this node's verdict is recorded -- so
+    _node_faults kept the node's PREVIOUS fault, and the all-nodes fold added
+    since D-1 re-reported that stale value every cycle thereafter.
+
+    Concretely: a 403 the administrator has already fixed would show the guard
+    連線密碼已失效 forever, while the server sat there answering 200. The
+    handler bug is real and belongs in the log; it is not evidence about the
+    key, and it must not be shown to the guard as if it were.
+    """
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    clock = _FakeClock()
+    handler_calls = []
+
+    def boom(node_id, cmd, params):
+        handler_calls.append(cmd)
+        raise RuntimeError("a bug in the command handler")
+
+    ch = ControlChannel("http://x", "k", ["n1"], boom,
+                        on_fault=seen.append, clock=clock)
+
+    def on_get(node, nth):
+        if nth == 2:
+            client._codes["n1"] = 200      # administrator fixed the permission
+        if nth >= 6:
+            ch._stop_event.set()
+
+    client = _FakeClient({"n1": 403},
+                         payloads={"n1": {"command": "stream_start"}},
+                         on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait", _advancing_wait(clock, ch)):
+        ch.run()
+
+    assert handler_calls, "precondition: the broken handler must have been reached"
+    assert ch._node_faults["n1"] is Fault.NONE, (
+        f"a 200 means the key is accepted; the node's verdict must reflect the "
+        f"SERVER's answer, not the handler crash -- got {ch._node_faults['n1']}")
+    assert seen == [Fault.BAD_KEY, Fault.NONE], (
+        f"the guard must be told the key problem cleared once the server "
+        f"started answering 200; got {seen}")
+
+
 def test_control_channel_cycle_reports_the_worse_of_divergent_faults():
     """Precedence within one cycle: BAD_KEY beats NO_SERVER because it is the
     more actionable instruction to the guard (status._PRECEDENCE)."""
@@ -460,25 +516,32 @@ def test_control_channel_never_reports_camera_down():
 
 def test_control_channel_logs_application_errors_at_warning(caplog):
     """I-4: the bare `except Exception` arm deliberately reports NOTHING to the
-    hub -- a broken _on_command callback or a malformed body must not tell the
-    guard to check a network cable that is fine. The accepted trade was that
-    those land in the log. They did not: the record was logger.debug and the
-    root logger sits at INFO (logging_setup.py), so it was dropped before the
-    file handler. The channel then backed off to 30s and failed silently for
-    the life of the process, with no log line for the technician.
+    hub -- a malformed body is our own bug and must not tell the guard to check
+    a network cable that is fine. The accepted trade was that those land in the
+    log. They did not: the record was logger.debug and the root logger sits at
+    INFO (logging_setup.py), so it was dropped before the file handler. The
+    channel then backed off to 30s and failed silently for the life of the
+    process, with no log line for the technician.
+
+    A crashing _on_command no longer reaches this arm -- the 200 arm catches it
+    so a handler bug cannot veto the server's verdict. Its own log guarantee is
+    pinned by test_a_broken_command_handler_leaves_the_technician_a_traceback.
     """
     import logging
     from webcam_client.control_channel import ControlChannel
 
     seen = []
-    ch = ControlChannel("http://x", "k", ["n1"], None, on_fault=seen.append)
+    ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
+                        on_fault=seen.append)
 
-    def bad_handler(node_id, cmd, params):
-        ch._stop_event.set()
-        raise ValueError("broken command handler")
+    def on_get(node, nth):
+        ch._stop_event.set()               # one cycle is all this needs
 
-    ch._on_command = bad_handler
-    client = _FakeClient({"n1": 200}, payloads={"n1": {"command": "start_stream"}})
+    # A 200 the client cannot parse: .json() raises inside _poll_node, so the
+    # node's verdict is never recorded and the exception reaches run().
+    client = _FakeClient({"n1": 200},
+                         payloads={"n1": ValueError("malformed response body")},
+                         on_get=on_get)
 
     with caplog.at_level(logging.WARNING, logger="webcam_client.control"), \
          patch("webcam_client.control_channel.httpx.Client", return_value=client), \
@@ -490,6 +553,41 @@ def test_control_channel_logs_application_errors_at_warning(caplog):
     assert any(r.levelno >= logging.WARNING and r.exc_info for r in records), \
         "the technician needs the traceback, not just a one-line message"
     assert seen == [], "this arm must not report to the hub (I-4)"
+
+
+def test_a_broken_command_handler_leaves_the_technician_a_traceback(caplog):
+    """The 200 arm swallows a crashing _on_command -- but not into silence.
+
+    It is caught there so the handler bug cannot veto the server's verdict (the
+    hub side of that is
+    test_a_broken_command_handler_does_not_latch_a_stale_fault). Correctly
+    saying nothing to the guard means the log is now the ONLY place the bug can
+    surface, and a logger.debug would not even get there: the root logger sits
+    at INFO (logging_setup.py), so the record is dropped before the file
+    handler. The handler would then fail on every command for the life of the
+    process -- live view dead, nothing written down anywhere.
+    """
+    import logging
+    from webcam_client.control_channel import ControlChannel
+
+    handler_calls = []
+
+    def boom(node_id, cmd, params):
+        handler_calls.append(cmd)
+        raise RuntimeError("a bug in the command handler")
+
+    ch = ControlChannel("http://x", "k", ["n1"], boom)
+    ch._client = _FakeClient({"n1": 200},
+                             payloads={"n1": {"command": "stream_start"}})
+
+    with caplog.at_level(logging.WARNING, logger="webcam_client.control"):
+        ch._poll_node("n1")
+
+    assert handler_calls, "precondition: the broken handler must have been reached"
+    records = [r for r in caplog.records if r.name == "webcam_client.control"]
+    assert records, "a crashing handler must survive the root logger's INFO level"
+    assert any(r.levelno >= logging.WARNING and r.exc_info for r in records), \
+        "the technician needs the traceback, not just a one-line message"
 
 
 def test_control_channel_with_no_nodes_does_not_busy_loop():

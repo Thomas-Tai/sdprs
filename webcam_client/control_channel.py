@@ -53,9 +53,11 @@ class ControlChannel(threading.Thread):
     def _defer(self, node_id: str, seconds: float) -> None:
         """Push ONE node's next poll out by `seconds`, without sleeping.
 
-        Every arm of _poll_node must call this (directly or via _back_off):
-        run() derives its own sleep from these deadlines, so a node that
-        returns without setting one is polled again immediately.
+        Every arm of _poll_node that RETURNS must call this (directly or via
+        _back_off): run() derives its own sleep from these deadlines, so a node
+        that returns without setting one is polled again immediately. The 401
+        arm is the sole exception and says why at its own site -- it stops the
+        channel, so there is no next poll to schedule.
         """
         self._next_poll_at[node_id] = self._clock() + seconds
 
@@ -73,9 +75,17 @@ class ControlChannel(threading.Thread):
 
         With no cameras configured there are no deadlines at all: return the
         plain 1s anti-spin floor, because an empty camera list still starts a
-        channel and must not spin a core on the guard's PC. The 0.05 floor is
-        insurance against a future _poll_node arm forgetting to defer; it is
-        far below the 0.1s healthy cadence, so it never shapes real timing.
+        channel and must not spin a core on the guard's PC.
+
+        The 0.05 floor is NOT a rare safety net -- it is the ROUTINE result
+        whenever a node is already overdue, which happens as soon as polling
+        outlasts its own deadline. The long-poll runs up to 5s, so with two or
+        more cameras the earliest deadline is usually already in the past by
+        the time we get here. All the floor does is bound how fast the cycle
+        may spin. Do not mistake it for insurance against an arm that forgets
+        to defer: it would turn a loud 100%-CPU spin into a quiet
+        20-requests-per-second flood of the uplink, which is harder to notice,
+        not safer.
         """
         now = self._clock()
         due_in = [self._next_poll_at.get(n, now) - now for n in self._node_ids]
@@ -171,11 +181,18 @@ class ControlChannel(threading.Thread):
                     worst = _worse(worst, self._node_faults.get(node_id, Fault.NONE))
                 self._report(worst)
                 if clean_cycle and worst is Fault.NONE:
-                    # Only a cycle in which every node -- polled or skipped --
-                    # is known good earns the reset. Resetting on one healthy
-                    # node let it hold the backoff at 1.0 while another failed
-                    # every cycle, so a permanently broken node re-hammered the
-                    # server ~1x/sec and the cadence never slowed down.
+                    # Only a cycle in which every node's LATEST VERDICT is good
+                    # -- polled just now, or skipped while already healthy --
+                    # earns the reset. Resetting on one healthy node let it hold
+                    # the backoff at 1.0 while another failed every cycle, so a
+                    # permanently broken node re-hammered the server ~1x/sec and
+                    # the cadence never slowed down.
+                    #
+                    # A node with NO verdict yet folds as NONE, which would be
+                    # scored as healthy. That is unreachable today -- a missing
+                    # deadline defaults to 0.0, so every node is due and polled
+                    # on cycle 1 -- but it is why this says "latest verdict"
+                    # rather than "known good".
                     self._backoff = 1.0
             if not self._stop_event.is_set():
                 # The ONLY sleep in the loop. Nothing due yet (every node is
@@ -202,7 +219,20 @@ class ControlChannel(threading.Thread):
             if cmd:
                 params = data.get("params")
                 logger.info(f"Received command: {cmd} for {node_id}")
-                self._on_command(node_id, cmd, params)
+                try:
+                    self._on_command(node_id, cmd, params)
+                except Exception:
+                    # A broken handler is an APP BUG, not the server's verdict.
+                    # The 200 above already told us what this poll needed to
+                    # know: the key is accepted and the uplink works.
+                    #
+                    # Letting it escape aborted the cycle before this node's
+                    # verdict was recorded, so _node_faults kept whatever fault
+                    # it last held -- and run()'s all-nodes fold re-reports that
+                    # stale value every cycle. A 403 the administrator had
+                    # already fixed would show 連線密碼已失效 forever while the
+                    # server sat there answering 200.
+                    logger.exception("Command handler failed for %s", node_id)
             # The small per-node floor keeps a 200 + null (empty long-poll)
             # response from tight-looping the uplink. The backoff RESET lives in
             # run(), where the whole cycle's outcome is known.
