@@ -529,6 +529,7 @@ def test_control_channel_logs_application_errors_at_warning(caplog):
     """
     import logging
     from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
 
     seen = []
     ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
@@ -552,7 +553,17 @@ def test_control_channel_logs_application_errors_at_warning(caplog):
     assert records, "an application error must survive the root logger's INFO level"
     assert any(r.levelno >= logging.WARNING and r.exc_info for r in records), \
         "the technician needs the traceback, not just a one-line message"
-    assert seen == [], "this arm must not report to the hub (I-4)"
+    # I-4 REVISED, deliberately. The rule was "this arm reports NOTHING to the
+    # hub", and its reason still stands: a malformed body is our bug, and
+    # reporting NO_SERVER would send the guard to check a cable that is fine.
+    # But "report no FAULT" and "report nothing at all" are not the same thing,
+    # and the second one silently latched: a node that came through here kept
+    # whatever fault it last held and the fold re-asserted it every cycle,
+    # while a single-node install was never reported on at all and sat on
+    # 啟動中 forever. The arm now records Fault.NONE -- no fault asserted, no
+    # verdict withheld. See the two regression tests at the end of this file.
+    assert seen == [Fault.NONE], \
+        f"this arm must assert no FAULT, but it must not stay silent: {seen}"
 
 
 def test_a_broken_command_handler_leaves_the_technician_a_traceback(caplog):
@@ -624,3 +635,112 @@ def test_control_channel_with_no_nodes_does_not_busy_loop():
     assert finished, "run() with no nodes spun without ever sleeping"
     assert waits and waits[0] and waits[0] > 0, "an empty cycle must still sleep"
     assert seen == [], "nothing was polled -- report nothing"
+
+
+def test_precedence_holds_regardless_of_node_order():
+    """The divergent-faults test above puts the BAD_KEY node LAST, so an
+    implementation that ignored _PRECEDENCE entirely and just took the last
+    node's fault gave the same answer and the test still passed. Replacing
+    _worse with `lambda a, b: b` survived the whole suite.
+
+    This is the same cycle with the operands swapped: the BAD_KEY node is now
+    FIRST and must still win. Together the two pin the ordering relation, not
+    merely the fold's direction -- which is the entire reason control_channel
+    imports the hub's _PRECEDENCE instead of keeping a copy."""
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
+                        on_fault=seen.append)
+
+    def on_get(node, nth):
+        if node == "n2":
+            ch._stop_event.set()
+
+    client = _FakeClient({"n1": 403, "n2": 500}, on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait"):
+        ch.run()
+
+    assert seen == [Fault.BAD_KEY], (
+        f"BAD_KEY must outrank NO_SERVER from either position in the list; "
+        f"got {seen}")
+
+
+def test_a_malformed_body_does_not_latch_the_fault_the_node_last_held():
+    """run()'s bare `except Exception` arm recorded no verdict at all -- the
+    same stale-latch bug the _on_command guard fixes, entered by the other
+    door. A node that hit this arm kept whatever fault it last held, and the
+    all-nodes fold re-reported that value every cycle.
+
+    Shape: n2 is refused with 403 (the guard is correctly told the key was
+    rejected), the administrator fixes the permission, and the server now
+    answers 200 -- but through a proxy that mangles the body, so resp.json()
+    raises. The guard must be told the key problem cleared. Before the fix
+    they were shown 連線密碼已失效 forever while the server sat there
+    answering 200, and the log said something else entirely."""
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    clock = _FakeClock()
+    codes = {"n1": 200, "n2": 403}
+    ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
+                        on_fault=seen.append, clock=clock)
+
+    def on_get(node, nth):
+        if node == "n2":
+            if nth == 1:
+                codes["n2"] = 200          # administrator fixed the permission
+            elif nth >= 3:
+                ch._stop_event.set()
+
+    client = _FakeClient(codes, payloads={"n2": ValueError("mangled body")},
+                         on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait", _advancing_wait(clock, ch)):
+        ch.run()
+
+    assert ch._node_faults["n2"] is Fault.NONE, (
+        f"an app-level decoding failure is not the server's verdict; the node "
+        f"must not keep asserting a fault the server stopped returning -- got "
+        f"{ch._node_faults['n2']}")
+    assert seen[-1] is Fault.NONE, (
+        f"the guard must be told 連線密碼已失效 cleared; got {seen}")
+
+
+def test_an_always_malformed_body_still_tells_the_hub_something():
+    """The single-camera shape of the same bug, and the worse one.
+
+    A captive portal answers EVERY url with 200 + an HTML login page, so
+    resp.json() raises on the first poll and every poll after it. polled_any is
+    assigned AFTER _poll_node returns, so it was never set, the whole
+    `if polled_any:` block was skipped, and the hub was never told anything at
+    all: the tray sat on 啟動中 for the life of the process and no toast ever
+    fired. Silence is not a truthful status."""
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    clock = _FakeClock()
+    ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
+                        on_fault=seen.append, clock=clock)
+
+    def on_get(node, nth):
+        if nth >= 3:
+            ch._stop_event.set()
+
+    client = _FakeClient({"n1": 200},
+                         payloads={"n1": ValueError("<html>login</html>")},
+                         on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait", _advancing_wait(clock, ch)):
+        ch.run()
+
+    assert seen, "the hub was never told anything -- the tray stays on 啟動中 forever"
+    assert seen == [Fault.NONE], (
+        f"this arm must not invent a network fault the guard would go check a "
+        f"cable for; it must simply stop withholding a verdict -- got {seen}")
+    assert ch._backoff > 1.0, \
+        "an application error must still decay the poll cadence, not run full speed"

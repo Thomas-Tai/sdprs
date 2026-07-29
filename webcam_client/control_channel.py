@@ -165,15 +165,36 @@ class ControlChannel(threading.Thread):
                     self._node_faults[current] = Fault.NO_SERVER
                     self._back_off(current)
             except Exception as e:
-                # An application bug (a broken _on_command, a malformed body) --
-                # NOT a network fault. Reporting it would tell the guard to go
-                # check a cable that is fine, so this arm stays silent to the
-                # hub. But the code still owes the technician a log line: this
-                # was logger.debug and the root logger sits at INFO, so it went
-                # nowhere at all while the channel backed off to 30s and failed
-                # silently for the life of the process.
-                logger.warning("Control channel error: %s", e, exc_info=True)
+                # An application bug (a malformed body, a decoding error) -- NOT
+                # a network fault. Reporting NO_SERVER would tell the guard to
+                # go check a cable that is fine, so this arm asserts no fault of
+                # its own. But it MUST still record a verdict.
+                #
+                # It used to record nothing, and that was the same stale-latch
+                # bug the _on_command guard below fixes for its own path -- this
+                # arm is simply the other door into it. Two shapes, both real on
+                # a guard's site network:
+                #   - Single camera behind a captive portal: every URL answers
+                #     200 with an HTML login page, resp.json() raises here, and
+                #     polled_any is never set (it is assigned AFTER _poll_node
+                #     returns). The whole `if polled_any:` block is skipped, so
+                #     the hub is never told anything and the tray sits on 啟動中
+                #     for the life of the process. No toast, ever.
+                #   - Two cameras, one healthy: the healthy one sets polled_any,
+                #     so the all-nodes fold runs and re-reports THIS node's last
+                #     verdict every cycle. A 403 the administrator already fixed
+                #     shows 連線密碼已失效 forever while the server answers 200.
+                #
+                # NONE is the honest value: this node produced no operator-
+                # actionable verdict, and a fault the guard cannot act on must
+                # not outrank one they can. clean_cycle stays False, so the
+                # backoff still decays -- an app bug must not be rewarded with
+                # a full-speed poll.
+                logger.warning("Control channel error on %s: %s", current, e,
+                               exc_info=True)
                 if current is not None:
+                    self._node_faults[current] = Fault.NONE
+                    polled_any = True
                     self._back_off(current)
 
             if polled_any:
