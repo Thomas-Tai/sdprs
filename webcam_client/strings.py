@@ -54,11 +54,13 @@ _TEXT = {
     ),
     # Both of the actions below NAME the 重新連線 button on purpose.
     #
-    # A worker that hits either of these faults STOPS: open_camera() returning
-    # None ends the push engine's thread, and a rejected key stops the control
-    # channel. So the physical fix -- re-seating the USB cable, or the
-    # administrator resetting the key -- recovers nothing on its own, because
-    # no worker is left alive to reopen the device or retry the connection.
+    # Neither fault is guaranteed to self-heal. open_camera() returning None
+    # ends the push engine's thread outright, and a 401 stops the control
+    # channel; a mid-run unplug or a 403 leaves the worker alive but retrying
+    # something that cannot work until a human changes the physical world. So
+    # the physical fix -- re-seating the USB cable, or the administrator
+    # resetting the key -- may recover nothing on its own, because in the
+    # stopping cases no worker is left alive to reopen the device or retry.
     # 重新連線 is the one action that does, and it sits three centimetres below
     # this text in the status window. Text that describes the physical fix and
     # then sends the guard straight to "通知管理員" turns every re-seated cable

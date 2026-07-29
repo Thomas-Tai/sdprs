@@ -81,6 +81,12 @@ def _handle_notify(icon, state) -> None:
     Coalescing is right for the tray light (one repaint, newest state) and wrong
     for notifications (each one is a distinct event the guard must see once).
     """
+    if state is None:
+        # A bare "NOTIFY" string reaches _split_token's default payload of
+        # None. Nothing enqueues that today, but the alternative to this guard
+        # is notify_state() rendering a toast for a state that does not exist.
+        logger.warning("NOTIFY token carried no state; dropping it")
+        return
     notify_state(icon, state)
 
 

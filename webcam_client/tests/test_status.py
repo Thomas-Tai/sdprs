@@ -286,9 +286,34 @@ def test_final_notification_matches_final_state_under_concurrent_reports():
     Deterministic by construction, not by timing: every state change appends to
     `seen` while the lock is held, so seen[-1] is ALWAYS the current state --
     reports that change nothing append nothing and leave the invariant intact.
-    A barrier (not a sleep) is what creates the contention."""
+    A barrier (not a sleep) is what creates the contention.
+
+    D-2: the seen[-1] check alone did NOT catch its own named regression. A
+    probe that moved the notify outside the lock reordered 63 notifications
+    mid-run and this test still passed 30/30, because seen[-1] inspects only
+    the FINAL notification -- taken after every worker has finished and there
+    is no contention left to get wrong. The structural check in `watcher` is
+    what actually holds the line: it asserts the lock is held at the moment
+    on_change runs, which is the property the ordering guarantee rests on.
+    """
     seen = []
-    hub = StatusHub(on_change=seen.append)
+    checked = []
+
+    def watcher(state):
+        # threading.Lock is NOT reentrant, so a successful acquire from inside
+        # on_change proves the hub was NOT holding it -- i.e. the notification
+        # and the mutation that caused it are no longer atomic.
+        if hub._lock.acquire(blocking=False):
+            hub._lock.release()      # never leave it held: that deadlocks the run
+            raise AssertionError(
+                "on_change fired OUTSIDE the hub lock -- two crossing "
+                "transitions can now be delivered in the opposite order to the "
+                "real state sequence, latching the tray to a state that has "
+                "already passed")
+        checked.append(state)
+        seen.append(state)
+
+    hub = StatusHub(on_change=watcher)
 
     faults = (Fault.NONE, Fault.NO_SERVER, Fault.BAD_KEY, Fault.CAMERA_DOWN)
     n_threads, n_iterations = 8, 300
@@ -313,6 +338,9 @@ def test_final_notification_matches_final_state_under_concurrent_reports():
     assert not any(t.is_alive() for t in threads), "a worker deadlocked in report()"
     assert not errors, f"a worker raised: {errors!r}"
     assert seen, "no state change was ever notified"
+    assert len(checked) > 100, (
+        f"the lock-held check only ran {len(checked)} times -- too few "
+        f"transitions to have exercised the contention this test exists for")
     assert seen[-1] is hub.state, (
         f"the last notification said {seen[-1]} but the hub settled on "
         f"{hub.state} -- the tray would be latched to a state that has passed")
