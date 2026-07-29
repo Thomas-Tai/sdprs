@@ -101,7 +101,7 @@ def test_register_cameras_maps_401_and_other_status():
     with patch("webcam_client.gui.setup_wizard.httpx.post",
                return_value=MagicMock(status_code=401)):
         cams, err = register_cameras("http://x", "k", [{"device_index": 0}])
-    assert cams is None and "API Key" in err
+    assert cams is None and "連線密碼" in err
 
     with patch("webcam_client.gui.setup_wizard.httpx.post",
                return_value=MagicMock(status_code=500)):

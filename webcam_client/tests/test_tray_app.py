@@ -35,8 +35,8 @@ def test_create_icon_colors_track_status():
 
 def test_pause_label_reflects_state():
     from webcam_client.gui.tray_app import _pause_label
-    assert _pause_label(False) == "暫停推送"
-    assert _pause_label(True) == "恢復推送"
+    assert _pause_label(False) == "暫停上傳"
+    assert _pause_label(True) == "恢復上傳"
 
 
 @pytest.mark.skipif(not TRAY_AVAILABLE, reason="PIL/pystray not installed")

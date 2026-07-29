@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from webcam_client.gui.notifier import notify_state
+from webcam_client.gui.tray_app import _pause_label
 from webcam_client.status import Health
 
 
@@ -65,11 +66,15 @@ def test_a_healthy_state_toasts_without_an_action_line():
 
 def test_paused_toasts_its_action():
     """PAUSED is healthy but DOES carry an action (how to resume), so the
-    separator logic must still join the two halves for it."""
+    separator logic must still join the two halves for it. That action also
+    names a tray menu item verbatim, so a rename on either side without the
+    other sends the guard hunting for a menu entry that does not exist."""
     icon = FakeIcon()
     assert notify_state(icon, Health.PAUSED) is True
     _, message = icon.calls[0]
-    assert "恢復推送" in message
+    resume_label = _pause_label(True)
+    assert resume_label in message, \
+        f"the PAUSED toast must name the tray menu item {resume_label!r}: {message!r}"
 
 
 def test_an_object_without_notify_is_not_a_toast_channel():

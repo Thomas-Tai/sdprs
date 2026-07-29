@@ -29,7 +29,7 @@ def _create_icon(color: str = "green") -> "Image.Image":
 
 
 def _pause_label(paused: bool) -> str:
-    return "恢復推送" if paused else "暫停推送"
+    return "恢復上傳" if paused else "暫停上傳"
 
 
 # Worst-first colour, matching the meaning the guard needs, not the raw enum
@@ -99,6 +99,11 @@ class TrayApp:
         menu = pystray.Menu(
             # default=True makes this the double-click action (pystray 0.19.5).
             pystray.MenuItem(MENU_STATUS, lambda: self._on_open_status(), default=True),
+            # TODO: drift -- status_window's equivalent button is strings.BTN_SETTINGS
+            # ("設定"), not "開啟設定". Both labels belong in strings.py (its docstring
+            # claims to hold "every operator-facing string, in one place"), but this
+            # file hardcodes its own; left as-is to avoid colliding with the in-flight
+            # strings.py edit -- ledger separately.
             pystray.MenuItem("開啟設定", lambda: self._on_open_settings()),
             pystray.MenuItem(lambda item: _pause_label(self._paused),
                              lambda: self._toggle_pause()),

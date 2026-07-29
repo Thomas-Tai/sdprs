@@ -54,7 +54,7 @@ def register_cameras(server_url: str, api_key: str, selected: list):
     except httpx.HTTPError as e:
         return None, f"無法連線到伺服器：{e}"
     if resp.status_code == 401:
-        return None, "API Key 無效"
+        return None, "連線密碼不正確"
     if resp.status_code != 201:
         return None, f"伺服器回應：{resp.status_code}"
     try:
@@ -108,7 +108,7 @@ def _camera_rows_from_config(config: dict) -> list:
     for c in config.get("cameras", []):
         rows.append({
             "device_index": c.get("device_index"),
-            "name": c.get("name", f"Webcam {c.get('device_index')}"),
+            "name": c.get("name", f"攝影機 {c.get('device_index')}"),
             "node_id": c.get("node_id"),
             "enabled": c.get("enabled", True),
         })
@@ -151,7 +151,13 @@ def _build_cameras_for_registration(selected_rows: list, identity_changed: bool)
 def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-run") -> Optional[dict]:
     result = {"config": None}
     root = tk.Tk()
-    title = "SDPRS Webcam 設定" if mode == "first-run" else "SDPRS Webcam 設定（編輯）"
+    # 監控, not "Webcam": this title bar is the FIRST thing the guard ever reads
+    # from this app, and every other operator-facing surface already says 監控
+    # (strings.WINDOW_TITLE, strings.TRAY_TOOLTIP_PREFIX). Two names for one
+    # program reads as two programs. Lives here rather than in strings.py only
+    # because that module is settled copy; see the tray-label drift note in
+    # gui/tray_app.py -- both belong there eventually.
+    title = "SDPRS 監控設定" if mode == "first-run" else "SDPRS 監控設定（編輯）"
     root.title(title)
     root.geometry("500x480")
     root.resizable(False, False)
@@ -161,10 +167,10 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
     # --- Frame: Server connection ---
     frame_conn = ttk.LabelFrame(root, text="伺服器連線", padding=10)
     frame_conn.pack(fill="x", padx=10, pady=5)
-    ttk.Label(frame_conn, text="Server URL:").grid(row=0, column=0, sticky="w")
+    ttk.Label(frame_conn, text="連線位址：").grid(row=0, column=0, sticky="w")
     url_var = tk.StringVar(value=config.get("server_url", ""))
     ttk.Entry(frame_conn, textvariable=url_var, width=40).grid(row=0, column=1, padx=5)
-    ttk.Label(frame_conn, text="API Key:").grid(row=1, column=0, sticky="w", pady=5)
+    ttk.Label(frame_conn, text="連線密碼：").grid(row=1, column=0, sticky="w", pady=5)
     key_var = tk.StringVar(value=config.get("api_key", ""))
     ttk.Entry(frame_conn, textvariable=key_var, width=40, show="*").grid(
         row=1, column=1, padx=5, pady=5)
@@ -232,10 +238,10 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
             ttk.Label(cam_frame_inner, text="未偵測到攝影機").pack()
         for r in rows:
             di = r["device_index"]
-            subtitle = f"Camera {di}"
+            subtitle = f"攝影機 {di}"
             if r.get("width") and r.get("height"):
-                subtitle = f"Camera {di} ({r['width']}x{r['height']})"
-            _add_row(di, r.get("name", f"Webcam {di}"),
+                subtitle = f"攝影機 {di} ({r['width']}x{r['height']})"
+            _add_row(di, r.get("name", f"攝影機 {di}"),
                      r.get("node_id"), r.get("enabled", True), subtitle)
 
     def _on_scan_done(cams):
@@ -259,14 +265,14 @@ def run_setup_wizard(existing_config: Optional[dict] = None, mode: str = "first-
         server_url = normalize_server_url(url_var.get())
         api_key = key_var.get().strip()
         if not server_url or not api_key:
-            messagebox.showerror("錯誤", "請填入 Server URL 和 API Key")
+            messagebox.showerror("錯誤", "請填入連線位址和連線密碼")
             return
         # Re-home cameras when the client identity changed: reusing node_ids
         # owned by the OLD client makes the new key 403 "Camera not owned".
         identity_changed = _client_identity_changed(config, server_url, api_key)
         selected_rows = [
             {"device_index": row["device_index"],
-             "name": nv.get().strip() or f"Webcam {row['device_index']}",
+             "name": nv.get().strip() or f"攝影機 {row['device_index']}",
              "node_id": row.get("node_id")}
             for row, v, nv in cam_vars if v.get()
         ]
