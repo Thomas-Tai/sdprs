@@ -17,6 +17,11 @@ from .strings import ALREADY_RUNNING, TRAY_TOOLTIP_PREFIX
 logger = logging.getLogger("webcam_client.main")
 
 _running = True
+
+# How many queue tokens one status-window pump may service before yielding back
+# to Tk. Bounded so a fast-flapping fault cannot hold the Tk thread and freeze
+# the window that this pump exists to keep live; the rest waits 250ms.
+_PUMP_DRAIN_LIMIT = 32
 _splash_closed = False
 _instance = SingleInstance()
 
@@ -190,7 +195,53 @@ def _rebuild_engines(controller, hub=None) -> bool:
     return False
 
 
-def _handle_open_status(hub, controller, q) -> None:
+def _status_pump(hub, tray, controller, q) -> dict:
+    """Service the dispatch queue while the status window owns the loop.
+
+    The status window used to block this loop outright and render a snapshot
+    taken at open time, which made the screen built to tell the guard the truth
+    the one screen that could not. This is called from the window's Tk timer --
+    on THIS thread -- and does the loop's job for it: drain the queue, repaint
+    the tray, fire matured toasts, tick the hub, and hand back the current state
+    for the window to re-render.
+
+    Two tokens are not serviced here. QUIT and OPEN_SETTINGS both need the
+    window gone first, and each already has exactly one implementation in
+    _handle_request; duplicating either here is how the two copies drift. They
+    go BACK on the queue and this returns close=True, so the window closes and
+    the main loop -- resumed and none the wiser -- runs the real handler.
+
+    Draining is bounded. A camera flapping fast enough to enqueue faster than
+    this drains would otherwise hold the Tk thread here indefinitely and freeze
+    the very window this exists to keep live; the remainder is simply serviced
+    on the next tick, 250ms later.
+    """
+    for _ in range(_PUMP_DRAIN_LIMIT):
+        try:
+            req = q.get_nowait()
+        except queue.Empty:
+            break
+        name, payload = _split_token(req)
+        if name == "HEALTH":
+            _handle_health(hub, tray)
+        elif name == "NOTIFY":
+            _handle_notify(tray.icon, payload)
+        elif name == "OPEN_STATUS":
+            continue                       # already open; nothing to do
+        else:
+            q.put(req)
+            return {"close": True}
+    hub.tick()
+    cameras = enabled_cameras(controller.config)
+    return {
+        "close": False,
+        "state": hub.state,
+        "camera_count": len(cameras),
+        "faulty_names": _camera_display_names(hub.faulty_sources(), cameras),
+    }
+
+
+def _handle_open_status(hub, controller, q, tray=None) -> None:
     """Open the guard-facing status window on the MAIN thread.
 
     Guarded like OPEN_SETTINGS: a Tk failure here must cost the guard a window,
@@ -205,6 +256,11 @@ def _handle_open_status(hub, controller, q) -> None:
             on_open_logs=open_log_folder,
             on_reconnect=lambda: _rebuild_engines(controller, hub),
             on_settings=lambda: q.put("OPEN_SETTINGS"),
+            # No tray means no queue to service and nothing to repaint, so the
+            # window falls back to the one-shot snapshot rather than pumping
+            # against half a system.
+            pump=(None if tray is None
+                  else lambda: _status_pump(hub, tray, controller, q)),
         )
     except Exception:
         logger.exception("Unexpected error opening the status window")
@@ -369,7 +425,7 @@ def main():
             _handle_notify(tray.icon, payload)
             continue
         if name == "OPEN_STATUS":
-            _handle_open_status(hub, controller, q)
+            _handle_open_status(hub, controller, q, tray)
             continue
         running = _handle_request(
             name, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"), hub)

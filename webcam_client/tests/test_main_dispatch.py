@@ -1025,3 +1025,189 @@ def test_hub_callbacks_only_enqueue(monkeypatch):
     captured["on_notify"](Health.BAD_KEY)
     assert puts[-1] == ("NOTIFY", Health.BAD_KEY), \
         "on_notify must ONLY enqueue, and must carry the state that matured"
+
+
+# --------------------------------------------------------------------------
+# The status window no longer freezes the dispatch loop.
+#
+# It used to call root.mainloop() and render hub.state BY VALUE, so the one
+# screen built to tell the guard the truth was the only screen structurally
+# guaranteed to lie: open it at 09:00, the switch dies at 09:01, and at 09:35
+# it still reads 監控中 with the tray light still green and no toast fired,
+# because tick() could not run either. _status_pump is the loop's work, done
+# from the window's own Tk timer on the same thread.
+# --------------------------------------------------------------------------
+
+from webcam_client.status import Health          # module level: _pump_ctx defaults to it
+
+
+class _PumpHub:
+    """Minimal hub for the pump: records ticks, lets a test set the state."""
+
+    def __init__(self, state=None):
+        self.state = state if state is not None else Health.STARTING
+        self.ticks = 0
+
+    def faulty_sources(self):
+        return []
+
+    def tick(self):
+        self.ticks += 1
+
+
+class _PumpTray:
+    def __init__(self):
+        self.icon = object()
+        self.painted = []
+
+    def set_health(self, state):
+        self.painted.append(state)
+
+
+def _pump_ctx(state=Health.STARTING):
+    import queue as _q
+    hub = _PumpHub(state)
+    tray = _PumpTray()
+    controller = FakeController({"cameras": [
+        {"device_index": 0, "name": "前門", "enabled": True, "node_id": "n1"}]})
+    return hub, tray, controller, _q.Queue()
+
+
+def test_the_status_window_repaints_the_tray_while_it_is_open(monkeypatch):
+    """A HEALTH token that arrived while the window was open used to sit in the
+    queue until the guard closed it -- so the tray light stayed green for as
+    long as they kept the window up looking at why it was green."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    hub.state = Health.NO_SERVER
+    q.put("HEALTH")
+    result = m._status_pump(hub, tray, controller, q)
+
+    assert tray.painted == [Health.NO_SERVER], \
+        f"the tray must repaint from the hub while the window is open: {tray.painted}"
+    assert result["close"] is False
+
+
+def test_the_status_window_lets_a_matured_toast_fire(monkeypatch):
+    """hub.tick() is what promotes a sustained fault into a toast, and it only
+    ran in the loop's queue.Empty branch -- which the window's mainloop made
+    unreachable. Half an hour of outage produced no notification at all."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    m._status_pump(hub, tray, controller, q)
+    m._status_pump(hub, tray, controller, q)
+
+    assert hub.ticks == 2, \
+        f"the hub must keep maturing notifications while the window is open: {hub.ticks}"
+
+
+def test_the_status_window_toasts_the_state_that_matured(monkeypatch):
+    """NOTIFY carries its state for the reason _handle_notify documents, and
+    the pump must honour that rather than re-reading hub.state."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+    toasted = []
+    monkeypatch.setattr(m, "notify_state", lambda icon, state: toasted.append(state))
+
+    hub.state = Health.RUNNING                  # recovery already happened
+    q.put(("NOTIFY", Health.NO_SERVER))         # the outage matured earlier
+    m._status_pump(hub, tray, controller, q)
+
+    assert toasted == [Health.NO_SERVER], \
+        f"the toast must announce what matured, not what is true now: {toasted}"
+
+
+def test_quitting_from_the_tray_closes_the_window_and_still_quits():
+    """THE unquittable-app bug. TrayApp._quit() stops the pystray icon and then
+    enqueues QUIT -- but the queue could not be drained behind the window's
+    mainloop. The icon vanished, the process kept uploading, ALREADY_RUNNING
+    pointed the guard at an icon that no longer existed, and only Task Manager
+    could end it.
+
+    The pump must NOT shut down itself: there is one implementation of QUIT,
+    in _handle_request. It closes the window and puts the token back."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    q.put("QUIT")
+    result = m._status_pump(hub, tray, controller, q)
+
+    assert result["close"] is True, "QUIT must close the status window"
+    assert q.get_nowait() == "QUIT", \
+        "the token must go back on the queue so the main loop performs the shutdown"
+
+
+def test_opening_settings_from_the_tray_closes_the_status_window():
+    """Same contract as QUIT: the wizard needs this window gone (it re-opens
+    the cameras), and _handle_request already owns that sequence."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    q.put("OPEN_SETTINGS")
+    result = m._status_pump(hub, tray, controller, q)
+
+    assert result["close"] is True
+    assert q.get_nowait() == "OPEN_SETTINGS"
+
+
+def test_the_pump_hands_back_the_current_state_not_the_open_time_snapshot():
+    """The window renders from this, so it is the half of the fix that stops
+    the text going stale."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx(Health.RUNNING)
+
+    hub.state = Health.CAMERA_DOWN
+    result = m._status_pump(hub, tray, controller, q)
+
+    assert result["state"] is Health.CAMERA_DOWN
+    assert result["camera_count"] == 1
+
+
+def test_a_redundant_open_status_does_not_reopen_the_window():
+    """The window is already open; double-clicking the tray again must be a
+    no-op, not a second Tk root on top of the first."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    q.put("OPEN_STATUS")
+    result = m._status_pump(hub, tray, controller, q)
+
+    assert result["close"] is False
+    assert q.empty()
+
+
+def test_the_pump_yields_instead_of_starving_the_window():
+    """A fault flapping faster than one pump can drain would otherwise hold the
+    Tk thread indefinitely and freeze the very window this keeps live. The
+    remainder waits 250ms; it is not dropped."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+
+    for _ in range(m._PUMP_DRAIN_LIMIT + 10):
+        q.put("HEALTH")
+    m._status_pump(hub, tray, controller, q)
+
+    assert q.qsize() == 10, \
+        f"the pump must bound its drain and leave the rest queued: {q.qsize()}"
+
+
+def test_the_status_window_gets_a_pump_when_there_is_a_tray(monkeypatch):
+    """Wiring check: the guarantees above are worth nothing if the window is
+    still opened without a pump."""
+    import webcam_client.main as m
+    hub, tray, controller, q = _pump_ctx()
+    seen = {}
+
+    def fake_open(state, **kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(m, "open_status_window", fake_open)
+    m._handle_open_status(hub, controller, q, tray)
+    assert callable(seen.get("pump")), "the window must be handed a live pump"
+
+    seen.clear()
+    m._handle_open_status(hub, controller, q, None)
+    assert seen.get("pump") is None, \
+        "with no tray there is nothing to repaint; fall back to the snapshot"
