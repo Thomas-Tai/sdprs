@@ -21,7 +21,7 @@
 - **No worker thread may touch Tk or pystray.** Workers enqueue; the main loop acts. This is the existing, proven pattern — violating it is the bug class Phase 1's predecessor spent a session fixing.
 - **The API key must never appear in the log file.** Phase 1 added a redacting filter + formatter; do not add a second logging handler anywhere.
 - **No status code, exception repr, or English error text may reach operator-facing UI.** Codes still go to the log for the technician.
-- **Never hardcode credentials.** `Msc@2333` and `MSC-Person` must not appear anywhere; `broker.emqx.io` must not appear on a production path.
+- **Never hardcode credentials.** The banned literals (redacted here as `Msc@***` / `MSC-***`, per the convention recorded in `PROGRESS.md`) must not appear anywhere; `broker.emqx.io` must not appear on a production path. Restating a banned credential verbatim in constraint boilerplate is itself a violation — that is how this file introduced a fresh occurrence of both.
 - **Do not add any downlink command interface to edge devices** beyond the existing `stream_start` / `stream_stop`.
 - Packaging stays onefile; `upx=False` stays. Phase 2 touches no packaging.
 
