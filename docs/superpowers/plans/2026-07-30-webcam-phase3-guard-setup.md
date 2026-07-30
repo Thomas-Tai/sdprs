@@ -333,5 +333,6 @@ Only after Tasks 3–5 have their own passing tests. This reaches the end state 
 - [ ] 顯示 reveals the password, default masked (U12).
 - [ ] Edit mode: confirm button reads 儲存, not 開始. Editing the password re-locks section 2.
 - [ ] Autostart ticked → reboot → client starts. Untick → reboot → it does not. Then disable via Task Manager and confirm the checkbox does not lie.
+- [ ] **The one thing `test_autostart.py` cannot prove: that deleting the `StartupApproved` value actually re-enables the entry at the next boot.** The blob semantics were confirmed by reading the live registry (first byte `0x02` enabled / `0x03` disabled), but the *write-side* effect is inferred from "absent = enabled", which is Windows' documented default, not something observed. Sequence to run: tick autostart → disable via Task Manager → re-tick in the wizard → **reboot** → confirm the client actually starts.
 - [ ] **Accepted cost to confirm, not discover:** autostart means the ~17 s onefile extraction and its splash happen at **every logon**. The splash is painted by the bootloader before Python starts, so no CLI flag can suppress it. Confirm this is acceptable to the user.
 - [ ] Guard the broken-config path: `main.py:454` pops a modal wizard at every logon if `server_url` is empty, and `main.py:464-468` exits **silently with no UI** when no cameras are enabled.
