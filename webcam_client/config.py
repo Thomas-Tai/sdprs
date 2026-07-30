@@ -19,6 +19,9 @@ DEFAULT_CONFIG = {
     "cameras": [],
     "motion_threshold": 25,
     "heartbeat_interval": 30,
+    # 開機時自動啟動. load_config merges the file over these defaults, so an
+    # existing config predating the key round-trips with no migration step.
+    "autostart": False,
 }
 
 
@@ -101,15 +104,34 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
+    # Serialise BEFORE touching the file. `open(path, "w")` truncates, so the
+    # old `json.dump(to_write, f)` emptied the config and only THEN discovered a
+    # value it could not encode -- a numpy frame or a PhotoImage riding along on
+    # a camera dict. The guard's server address, connection password and camera
+    # selection were gone, load_config fell back to DEFAULT_CONFIG, and the next
+    # launch dropped them into the first-run wizard. scan_cameras now attaches a
+    # frame to every camera dict, so that is a live path, not a hypothetical.
+    #
+    # A payload that cannot be encoded raises here, with the file untouched --
+    # loudly, so the caller learns, and without destroying anything.
     path = get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     to_write = dict(config)
     api_key = to_write.pop("api_key", "")
     to_write.pop("api_key_encrypted", None)
     if api_key:
         to_write["api_key_encrypted"] = _dpapi_protect(api_key)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(to_write, f, ensure_ascii=False, indent=2)
+    payload = json.dumps(to_write, ensure_ascii=False, indent=2)
+    # Write-temp-then-replace: os.replace is atomic on Windows, so a power cut
+    # mid-write leaves the previous config intact rather than a half file.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     logger.info(f"Config saved to {path}")
 
 
