@@ -178,22 +178,63 @@ class StatusHub:
             self._recompute_locked()
 
     def tick(self) -> None:
-        """Called from the main dispatch loop. Announces a degraded state once
-        the fault behind it has been PRESENT for the debounce window.
+        """Called from the main dispatch loop. Owns BOTH announcements.
 
-        "Present for" is cumulative, not consecutive: a fault that comes and
-        goes faster than the window used to reset the clock on every transition
-        and was therefore never announced at all (finding #7). The sum can only
-        reach the window after the fault has genuinely been there that long, so
-        a blip still cannot toast. See _track_dwell_locked.
+        A fault is announced once it has been PRESENT for the debounce window;
+        a recovery once the app has been HEALTHY for that same window. "Present
+        for" is cumulative, not consecutive: a fault that came and went faster
+        than the window used to reset the clock on every transition and was
+        therefore never announced at all (finding #7). See _track_dwell_locked.
+
+        Recovery lives HERE rather than firing from _recompute_locked on the
+        transition, and that is the whole of human decision 5 (2026-07-30).
+        Recovery used to be deliberately un-debounced -- "the guard should learn
+        at once that the problem cleared" -- which was right for an outage that
+        ends and wrong for one that flaps. Once a fault had banked its 30
+        seconds, every subsequent up-swing toasted 監控中 and every down-swing
+        re-toasted the fault: measured at 8 toasts across 4 five-second flaps,
+        alternating, which is precisely the notification fatigue
+        NOTIFY_DEBOUNCE_SECONDS exists to prevent. A five-second recovery in the
+        middle of a flap is not a recovery, so treating it as one was itself a
+        small untruth.
+
+        Only a POLLED method can measure "has been fine for 30 seconds" -- a
+        transition only knows the instant it happened -- which is why this moved
+        rather than being patched in place.
+
+        The guard now hears, per episode: the fault once, and 監控中 once the
+        uploads have actually held for the window. Nothing else.
         """
         with self._lock:
-            if self._state in _HEALTHY or self._state is self._notified:
+            state = self._state
+            if state is self._notified:
                 return
-            dwell = self._degraded_dwell + (self._clock() - self._state_since)
+            now = self._clock()
+            if state in _HEALTHY:
+                # PAUSED and STARTING are excluded, each for its own reason, and
+                # each was a separate bug once. PAUSED is the guard's OWN click:
+                # toasting 已暫停上傳 back at them is unsolicited, and while a
+                # fault is still live it reads as "problem solved" when nothing
+                # was solved. STARTING is where clear_all() lands on every
+                # settings edit, so announcing it would toast 啟動中 each time
+                # the guard opens the settings window.
+                if state is not Health.RUNNING:
+                    return
+                # Nothing to recover FROM unless the last thing the guard was
+                # actually told was a fault. Without this, the ordinary
+                # STARTING -> RUNNING at boot would announce a "recovery" from a
+                # problem that never happened.
+                if self._notified in _HEALTHY:
+                    return
+                if (self._healthy_since is not None
+                        and now - self._healthy_since >= NOTIFY_DEBOUNCE_SECONDS):
+                    self._notified = state
+                    self._on_notify(state)
+                return
+            dwell = self._degraded_dwell + (now - self._state_since)
             if dwell >= NOTIFY_DEBOUNCE_SECONDS:
-                self._notified = self._state
-                self._on_notify(self._state)
+                self._notified = state
+                self._on_notify(state)
 
     # --- internals (call with the lock held) ------------------------------
 
@@ -258,29 +299,18 @@ class StatusHub:
         self._state = new
         self._state_since = now
         self._on_change(new)
-        # PAUSED is in _HEALTHY (uploads are intentionally stopped, so no fault
-        # can be "occurring"), but it is NOT a recovery: it is the guard's own
-        # click. Toasting 已暫停上傳 back at them is unsolicited, and when a
-        # fault was live at the moment they paused it reads as "problem solved"
-        # while the problem is still there.
+        # NO ANNOUNCEMENT HERE, in either direction. This method only knows the
+        # INSTANT a state changed, and both announcements are now questions about
+        # DURATION -- has the fault been present for the window, has the app been
+        # healthy for it -- which only the polled tick() can answer. See tick()
+        # for human decision 5 and why recovery moved out of here.
         #
-        # Returning here rather than merely suppressing the toast deliberately
-        # leaves _notified untouched, which is what makes the resume side
-        # correct too: a fault that SURVIVES the pause is still the last thing
-        # _notified holds, so tick() will not re-announce it on resume; a fault
-        # that CLEARED during the pause leaves _notified on that fault, so the
-        # RUNNING transition on resume is still seen as a recovery and toasts.
-        if new is Health.PAUSED:
-            return
-        # Recovery is NOT debounced: the operator should learn at once that the
-        # problem cleared. Degradation waits for tick() so a blip stays silent.
+        # _notified is deliberately left alone by transitions, and that is what
+        # makes a flap quiet: a five-second up-swing no longer clears the record
+        # of what the guard was last told, so the fault cannot be re-announced
+        # when it returns. Whoever holds this lock must not touch _notified --
+        # only tick() may, and only when it actually announces something.
         #
-        # STARTING is excluded from the recovery toast on purpose: clear_all()
-        # (called by stop_engines on every settings edit) drops the state back to
-        # STARTING, and toasting "啟動中" every time the operator opens settings
-        # is exactly the notification-fatigue this debounce exists to avoid.
-        if new in _HEALTHY:
-            recovered = self._notified not in _HEALTHY
-            self._notified = new
-            if recovered and new is not Health.STARTING:
-                self._on_notify(new)
+        # The tray light is a separate matter and is NOT debounced: _on_change
+        # above fires on every transition, so the icon still tracks reality
+        # instantly even while the toasts stay silent.

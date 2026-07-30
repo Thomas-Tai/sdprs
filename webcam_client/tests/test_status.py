@@ -166,15 +166,45 @@ def test_blip_shorter_than_debounce_never_notifies():
     assert Health.NO_SERVER not in notifies, "a transient blip must never toast"
 
 
-def test_recovery_notifies_immediately_without_debounce():
-    """The guard should learn at once that the problem cleared."""
+def test_recovery_is_announced_after_a_full_window_of_health():
+    """REVISED by human decision 5 (2026-07-30). This test previously asserted
+    the opposite -- "recovery must not wait for a tick" -- and it was right for
+    an outage that ENDS. It was wrong for one that FLAPS: once a fault had banked
+    its 30 seconds, every up-swing toasted 監控中 and every down-swing re-toasted
+    the fault, measured at 8 toasts across 4 five-second flaps. A five-second
+    recovery in the middle of a flap is not a recovery, so announcing one was
+    itself a small untruth as well as the notification fatigue the debounce
+    exists to prevent.
+
+    The guarantee is now symmetric with degradation: announced once the app has
+    been healthy for the window. Revised rather than deleted, because the thing
+    it protects -- a real recovery must eventually reach the guard -- still
+    holds, and only its timing changed."""
     hub, _, notifies, clock = make()
     hub.report("cam1", Fault.NO_SERVER)
     clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
     hub.tick()
+    assert notifies == [Health.NO_SERVER], "precondition: the fault was announced"
     notifies.clear()
+
     hub.report("cam1", Fault.NONE)
-    assert notifies == [Health.RUNNING], "recovery must not wait for a tick"
+    assert hub.state is Health.RUNNING, "the tray light is NOT debounced"
+    hub.tick()
+    assert notifies == [], (
+        "uploads have worked for zero seconds; announcing a recovery now is what "
+        "made a flapping server toast on every up-swing")
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS - 1)
+    hub.tick()
+    assert notifies == [], "still inside the recovery window"
+
+    clock.advance(2)
+    hub.tick()
+    assert notifies == [Health.RUNNING], "a real recovery must still be announced"
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS * 3)
+    hub.tick()
+    assert notifies == [Health.RUNNING], "...exactly once, not on every tick"
 
 
 def test_tick_does_not_renotify_a_stable_state():
@@ -294,7 +324,19 @@ def test_resuming_with_the_fault_still_present_does_not_re_announce_it():
 def test_a_fault_that_cleared_during_the_pause_still_toasts_its_recovery():
     """...and the fix must not swallow a REAL recovery. The guard paused while
     the server was down, the server came back while paused; on resume they must
-    still learn that uploads are working again."""
+    still learn that uploads are working again.
+
+    A pause is real evidence of health here, not a gap in it, so it counts toward
+    the recovery window human decision 5 introduced. The control channel keeps
+    polling throughout a pause -- pausing only stops the push engines uploading --
+    so a CONTROL_SOURCE fault clearing mid-pause means the server really was
+    answering for those seconds. The clock therefore advances DURING the pause
+    below, and the recovery is announced on the first tick after resume rather
+    than waiting out a second window.
+
+    This can never announce a recovery that has not happened: the announcement
+    only fires while the state IS RUNNING, and if the fault were still present
+    _compute_locked would return the fault on resume, never RUNNING."""
     hub, _, notifies, clock = make()
     hub.report("cam1", Fault.NO_SERVER)
     clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
@@ -302,12 +344,16 @@ def test_a_fault_that_cleared_during_the_pause_still_toasts_its_recovery():
     notifies.clear()
 
     hub.set_paused(True)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)   # a real pause takes real time
     hub.report("cam1", Fault.NONE)       # the server came back while paused
     assert hub.state is Health.PAUSED, "PAUSED still outranks everything"
+    hub.tick()
+    assert notifies == [], "PAUSED is the guard's own click, never an announcement"
     notifies.clear()
 
     hub.set_paused(False)
     assert hub.state is Health.RUNNING
+    hub.tick()
     assert notifies == [Health.RUNNING], "a real recovery must still be announced"
 
 
@@ -443,6 +489,47 @@ def test_a_different_fault_starts_its_own_window():
     clock.advance(NOTIFY_DEBOUNCE_SECONDS)
     hub.tick()
     assert notifies == [Health.CAMERA_DOWN]
+
+
+def test_a_sustained_flap_is_announced_once_not_on_every_swing():
+    """Human decision 5 (2026-07-30), and the other half of finding #7's fix.
+
+    Making a flap announceable at all created the opposite failure. Once the
+    fault had banked its window, EVERY down-swing re-announced it and every
+    up-swing announced 監控中: measured at 8 further toasts across 4 five-second
+    flaps, alternating, roughly one every five seconds. That is precisely what
+    NOTIFY_DEBOUNCE_SECONDS' own comment says trains the operator to ignore all
+    notifications -- so the flap fix would have traded silence for noise.
+
+    Per episode the guard now hears the fault once, and 監控中 once the uploads
+    have actually held for the window. The tray light still tracks every swing;
+    only the toasts are quiet."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NONE)
+    notifies.clear()
+
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    assert notifies == [Health.NO_SERVER], "precondition: the outage was announced"
+
+    for _ in range(4):
+        hub.report("cam1", Fault.NONE)       # up for 5s -- not a recovery
+        clock.advance(5)
+        hub.tick()
+        hub.report("cam1", Fault.NO_SERVER)  # down again -- already announced
+        clock.advance(5)
+        hub.tick()
+
+    assert notifies == [Health.NO_SERVER], (
+        f"a flapping server must be announced once, not on every swing: {notifies}")
+
+    # ...and when it genuinely settles, the guard IS still told.
+    hub.report("cam1", Fault.NONE)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    assert notifies == [Health.NO_SERVER, Health.RUNNING], (
+        f"a settled recovery must still be announced, exactly once: {notifies}")
 
 
 # --------------------------------------------------------------------------
