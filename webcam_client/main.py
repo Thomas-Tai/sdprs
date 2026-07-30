@@ -64,7 +64,7 @@ def _handle_health(hub, tray) -> None:
     tray.set_health(hub.state)
 
 
-def _handle_notify(icon, state) -> None:
+def _handle_notify(icon, state, camera_names=None) -> None:
     """Toast the state this token was HANDED -- never hub.state.
 
     The opposite of _handle_health, and deliberately so. tick() decides which
@@ -85,6 +85,25 @@ def _handle_notify(icon, state) -> None:
 
     Coalescing is right for the tray light (one repaint, newest state) and wrong
     for notifications (each one is a distinct event the guard must see once).
+
+    camera_names does NOT ride the token the way state does, and that is a
+    deliberate, separate call, not an oversight (F-1). Threading names through
+    the token the same way would need StatusHub's on_notify to hand back the
+    fault-source set as well as the state -- on_notify fires from tick()/
+    _recompute_locked() while the hub still holds its own non-reentrant lock,
+    so the ONLY safe thing a callback may do is enqueue (see main()'s q
+    comment); calling hub.faulty_sources() from inside that callback would
+    try to re-take the same lock and deadlock the thread that is trying to
+    announce the fault. That callback shape belongs to status.py, not this
+    caller. So names are resolved by the CALLER of this function, at drain
+    time, from hub.faulty_sources() -- safe because by then the lock that
+    decided to notify has long since been released. Unlike state, this is not
+    a one-shot fact: hub.faulty_sources() stays truthfully queryable at any
+    time, and answering "which camera needs attention right NOW" is more
+    useful to the guard than freezing the answer to "whichever camera the
+    debounce math happened to be timing 30s ago" -- especially the one case
+    where the two would actually differ, a status window or settings wizard
+    blocking this loop for a while.
     """
     if state is None:
         # A bare "NOTIFY" string reaches _split_token's default payload of
@@ -92,7 +111,7 @@ def _handle_notify(icon, state) -> None:
         # is notify_state() rendering a toast for a state that does not exist.
         logger.warning("NOTIFY token carried no state; dropping it")
         return
-    notify_state(icon, state)
+    notify_state(icon, state, camera_names=camera_names)
 
 
 def _split_token(req):
@@ -222,9 +241,19 @@ def _report_rebuild_failure(controller, hub) -> None:
             "(live view) are unavailable until the next 重新連線")
 
 
-def _rebuild_engines(controller, hub=None) -> bool:
+def _rebuild_engines(controller, hub) -> bool:
     """Rebuild every engine in-process from the controller's CURRENT config.
     Returns True when the rebuild succeeded. Never raises.
+
+    hub has no default on purpose (NIT): a `hub=None` default let a call site
+    that simply forgot the argument keep running with the STARTING-forever
+    backstop silently switched off -- no error, no log line, just a tray that
+    can sit on 啟動中 forever after a failed rebuild, which is the exact bug
+    this whole phase exists to remove. The one production call site (main()'s
+    dispatch loop and its two start_engines() guards) always has a real hub to
+    give; a caller with none must say so explicitly (hub=None), not get there
+    by omission. `if hub is not None:` below still exists to serve that
+    explicit case -- it is no longer reachable by accident.
 
     apply() is stop_engines() + start_engines(), and stop_engines() ends in
     hub.clear_all() -- which resets _seen_any_report and drops the hub back to
@@ -290,7 +319,10 @@ def _status_pump(hub, tray, controller, q) -> dict:
         if name == "HEALTH":
             _handle_health(hub, tray)
         elif name == "NOTIFY":
-            _handle_notify(tray.icon, payload)
+            # See _handle_notify's docstring: names are resolved HERE, at drain
+            # time, deliberately -- not carried on the token the way state is.
+            _handle_notify(tray.icon, payload, _camera_display_names(
+                hub.faulty_sources(), enabled_cameras(controller.config)))
         elif name == "OPEN_STATUS":
             continue                       # already open; nothing to do
         else:
@@ -331,12 +363,18 @@ def _handle_open_status(hub, controller, q, tray=None) -> None:
         logger.exception("Unexpected error opening the status window")
 
 
-def _handle_request(req, controller, settings_fn, hub=None) -> bool:
+def _handle_request(req, controller, settings_fn, hub) -> bool:
     """Service one queued request on the MAIN thread. Returns False to quit.
 
     The tray (daemon thread) only enqueues; opening the settings window and
     rebuilding engines therefore happen here, on the main thread, which is what
-    lets Tk run correctly and the cameras be released before the window scans."""
+    lets Tk run correctly and the cameras be released before the window scans.
+
+    hub has no default, same reasoning as _rebuild_engines() (NIT): this
+    function's only use of it is forwarding to _rebuild_engines() on the
+    OPEN_SETTINGS error path, so a `hub=None` default here would silently
+    disable that same backstop one call further up. A caller that has no hub
+    to give must write hub=None, not rely on a default to get there."""
     if req == "QUIT":
         controller.shutdown()
         return False
@@ -487,14 +525,43 @@ def main():
             _handle_health(hub, tray)
             continue
         if name == "NOTIFY":
-            _handle_notify(tray.icon, payload)
+            # See _handle_notify's docstring: names are resolved HERE, at drain
+            # time, deliberately -- not carried on the token the way state is.
+            _handle_notify(tray.icon, payload, _camera_display_names(
+                hub.faulty_sources(), enabled_cameras(controller.config)))
             continue
         if name == "OPEN_STATUS":
             _handle_open_status(hub, controller, q, tray)
             continue
         running = _handle_request(
             name, controller, lambda cfg: run_setup_wizard(cfg, mode="edit"), hub)
-    controller.shutdown()
+
+    # Every exit path converges here: an ordinary QUIT from the tray menu
+    # (running went False, below) and SIGINT/SIGTERM (_signal_handler only
+    # flips _running, above -- it must stay fast and reentrant-safe, so it
+    # touches neither the tray nor the controller).
+    #
+    # tray.stop() NIM_DELETEs the icon. Before this fix nothing on the signal
+    # path ever called it -- TrayApp.stop() existed but main() never reached
+    # it -- so a guard who closed the app with Ctrl+C or a service stop still
+    # saw its icon sitting in the notification area, live-looking, until they
+    # happened to hover over it and Windows finally noticed the process was
+    # gone. Calling it here on EVERY path, including tray-quit (which already
+    # stopped the icon itself in TrayApp._quit()), is a deliberate no-op on
+    # that path: pystray's stop() is documented idempotent -- "if the icon is
+    # not running, calling this method has no effect."
+    tray.stop()
+
+    if running:
+        # `running` only becomes False inside _handle_request's QUIT branch,
+        # and that branch already called controller.shutdown() before
+        # returning it -- so reaching here with `running` still True means the
+        # loop instead exited because the signal handler flipped `_running`,
+        # and shutdown() has not run yet. Calling it unconditionally used to
+        # repeat it on every ordinary tray-quit: shutdown() -> stop_engines()
+        # -> hub.clear_all() pushes a "HEALTH" token onto a queue nobody is
+        # left to drain -- harmless today, but two calls for one quit.
+        controller.shutdown()
     logger.info("Shutdown complete")
 
 

@@ -77,6 +77,37 @@ def test_paused_toasts_its_action():
         f"the PAUSED toast must name the tray menu item {resume_label!r}: {message!r}"
 
 
+# --------------------------------------------------------------------------
+# F-1: the camera-down toast never said WHICH camera. camera_names threads
+# through exactly like the status window's build_status_lines() so the two
+# surfaces never disagree about how a list of names is punctuated.
+# --------------------------------------------------------------------------
+
+def test_notify_state_names_the_down_cameras():
+    icon = FakeIcon()
+    assert notify_state(icon, Health.CAMERA_DOWN,
+                        camera_names=["前門攝影機", "後門攝影機"]) is True
+    _, message = icon.calls[0]
+    assert "前門攝影機、後門攝影機目前沒有畫面" in message, (
+        f"names must join with the same 、 separator the status window uses: "
+        f"{message!r}")
+
+
+def test_notify_state_falls_back_to_the_generic_wording_with_no_names():
+    """No names to hand (an empty list, or the parameter omitted entirely)
+    must still render a sentence with a subject -- strings.py's own generic
+    "攝影機" default -- rather than "None目前沒有畫面" or a blank subject."""
+    icon = FakeIcon()
+    assert notify_state(icon, Health.CAMERA_DOWN) is True
+    _, message = icon.calls[0]
+    assert "攝影機目前沒有畫面" in message
+    assert "None" not in message
+
+    icon2 = FakeIcon()
+    notify_state(icon2, Health.CAMERA_DOWN, camera_names=[])
+    assert "攝影機目前沒有畫面" in icon2.calls[0][1]
+
+
 def test_an_object_without_notify_is_not_a_toast_channel():
     """The None check is not enough on its own: TrayApp.icon is a pystray Icon
     only on Windows, and the guard clause exists precisely because some backends

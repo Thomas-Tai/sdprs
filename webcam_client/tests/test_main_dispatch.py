@@ -28,7 +28,10 @@ def test_open_settings_applies_new_config_on_save(monkeypatch):
     saved = {}
     monkeypatch.setattr(m, "save_config", lambda c: saved.update(c))
     ctrl = FakeController({"server_url": "old"})
-    keep = m._handle_request("OPEN_SETTINGS", ctrl, lambda cfg: {"server_url": "new"})
+    # hub=None: this path never fails, so it never reaches the hub-dependent
+    # branch -- the omission is explicit rather than a silent default (NIT).
+    keep = m._handle_request("OPEN_SETTINGS", ctrl,
+                             lambda cfg: {"server_url": "new"}, hub=None)
     assert keep is True
     assert ctrl.calls == ["stop_engines", "apply"]
     assert ctrl.applied == {"server_url": "new"}
@@ -39,7 +42,7 @@ def test_open_settings_resumes_old_config_on_cancel(monkeypatch):
     import webcam_client.main as m
     monkeypatch.setattr(m, "save_config", lambda c: None)
     ctrl = FakeController({"server_url": "old"})
-    keep = m._handle_request("OPEN_SETTINGS", ctrl, lambda cfg: None)
+    keep = m._handle_request("OPEN_SETTINGS", ctrl, lambda cfg: None, hub=None)
     assert keep is True
     assert ctrl.calls == ["stop_engines", "start_engines"]
     assert ctrl.applied is None
@@ -48,9 +51,74 @@ def test_open_settings_resumes_old_config_on_cancel(monkeypatch):
 def test_quit_shuts_down_and_stops_loop():
     import webcam_client.main as m
     ctrl = FakeController({})
-    keep = m._handle_request("QUIT", ctrl, lambda cfg: None)
+    # hub=None: QUIT never touches the hub, so there is nothing to omit by
+    # accident here -- explicit anyway, per the contract change above (NIT).
+    keep = m._handle_request("QUIT", ctrl, lambda cfg: None, hub=None)
     assert keep is False
     assert ctrl.calls == ["shutdown"]
+
+
+# --------------------------------------------------------------------------
+# NIT: controller.shutdown() ran twice on the tray-quit path.
+#
+# _handle_request's QUIT branch already calls controller.shutdown() (proved
+# above) and returns False; main()'s trailing controller.shutdown(), after the
+# dispatch loop, then repeated it unconditionally. shutdown() -> stop_engines()
+# -> hub.clear_all(), which pushes a stray "HEALTH" token onto a queue nobody
+# will ever drain again -- harmless today, but two calls for one quit.
+# --------------------------------------------------------------------------
+
+def test_quit_from_the_tray_shuts_the_controller_down_exactly_once(monkeypatch):
+    import webcam_client.main as m
+
+    class CountingCtrl(_FakeCtrl):
+        def __init__(self, cfg, **kw):
+            super().__init__(cfg, **kw)
+            self.shutdown_calls = 0
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    made = {}
+
+    def ctrl_factory(cfg, **kw):
+        ctrl = CountingCtrl(cfg, **kw)
+        made["ctrl"] = ctrl
+        return ctrl
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            self._kw = kw
+
+        def start(self):
+            self._kw["on_quit"]()   # the guard picking 離開 from the tray menu
+
+        def set_health(self, state):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(m, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_acquire_single_instance", lambda: True)
+    monkeypatch.setattr(m, "is_first_run", lambda: False)
+    monkeypatch.setattr(m, "add_secret", lambda s: None)
+    monkeypatch.setattr(m, "_close_splash", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {
+        "server_url": "http://x", "api_key": "k",
+        "cameras": [{"device_index": 0, "enabled": True, "node_id": "n1"}]})
+    monkeypatch.setattr(m, "AppController", ctrl_factory)
+    monkeypatch.setattr(m, "TrayApp", FakeTray)
+    monkeypatch.setattr(m, "_running", True)
+
+    m.main()
+
+    assert made["ctrl"].shutdown_calls == 1, (
+        f"shutdown() ran {made['ctrl'].shutdown_calls} times on an ordinary "
+        "tray-quit -- main()'s trailing call must not repeat what "
+        "_handle_request's QUIT branch already did")
 
 
 def test_open_settings_recovers_from_settings_fn_exception():
@@ -67,7 +135,10 @@ def test_open_settings_recovers_from_settings_fn_exception():
         raise RuntimeError("boom: settings window blew up")
 
     ctrl = FakeController({"server_url": "old"})
-    keep = m._handle_request("OPEN_SETTINGS", ctrl, raising_fn)
+    # hub=None: FakeController.apply() never raises, so the recovery succeeds
+    # on the first attempt and never reaches the hub-dependent branch -- the
+    # omission is explicit, not a silent default (NIT).
+    keep = m._handle_request("OPEN_SETTINGS", ctrl, raising_fn, hub=None)
     assert keep is True
     assert ctrl.calls == ["stop_engines", "apply"]
     assert ctrl.applied == {"server_url": "old"}
@@ -79,6 +150,50 @@ def test_tray_open_settings_callback_only_enqueues():
     on_open = lambda: q.put("OPEN_SETTINGS")
     on_open()
     assert q.get_nowait() == "OPEN_SETTINGS"
+
+
+# --------------------------------------------------------------------------
+# NIT: TrayApp.stop() was dead code -- main() never called it -- so the
+# SIGINT/SIGTERM path never NIM_DELETEd the pystray icon. The process exits,
+# but Windows is never told the icon is gone, so it sits in the notification
+# area (looking perfectly live) until the guard happens to hover over it.
+# _signal_handler only flips the _running flag (it must stay fast and
+# reentrant-safe), so main()'s own shutdown sequence is the one place left
+# that can still call tray.stop().
+# --------------------------------------------------------------------------
+
+def test_signal_shutdown_still_stops_the_tray_icon(monkeypatch):
+    import webcam_client.main as m
+
+    stopped = []
+
+    class FakeTray:
+        icon = None
+
+        def __init__(self, **kw):
+            pass
+
+        def start(self):
+            pass
+
+        def set_health(self, state):
+            pass
+
+        def stop(self):
+            stopped.append(True)
+
+    _boot(monkeypatch, m, FakeTray)
+    # Simulate the signal having already fired before the loop's first check --
+    # exactly what happens when SIGINT/SIGTERM arrives during startup or while
+    # the loop is blocked on q.get().
+    monkeypatch.setattr(m, "_running", False)
+
+    m.main()
+
+    assert stopped, (
+        "TrayApp.stop() must run on every shutdown path, including "
+        "SIGINT/SIGTERM -- otherwise the icon is left in the notification "
+        "area after the process is already gone")
 
 
 def test_close_splash_is_safe_without_pyi_splash():
@@ -127,9 +242,11 @@ def test_open_settings_registers_rotated_key_with_redactor(monkeypatch, tmp_path
 
         ctrl = FakeController({"server_url": "old", "api_key": "OLDKEY111"})
         new_key = "ROTATEDKEY999"
+        # hub=None: the save succeeds, so this never reaches the hub-dependent
+        # branch -- explicit, not a silent default (NIT).
         keep = m._handle_request(
             "OPEN_SETTINGS", ctrl,
-            lambda cfg: {"server_url": "old", "api_key": new_key})
+            lambda cfg: {"server_url": "old", "api_key": new_key}, hub=None)
         assert keep is True
 
         logging.getLogger("webcam_client.test").warning(
@@ -213,6 +330,9 @@ def test_main_proceeds_when_setup_logging_raises(monkeypatch):
         def set_health(self, state):
             pass
 
+        def stop(self):
+            pass
+
     monkeypatch.setattr(m, "setup_logging", raising_setup_logging)
     monkeypatch.setattr(m, "_acquire_single_instance", lambda: True)
     monkeypatch.setattr(m, "AppController", FakeCtrl)
@@ -282,6 +402,9 @@ def test_tray_starts_before_engines(monkeypatch):
             order.append("tray")
 
         def set_health(self, state):
+            pass
+
+        def stop(self):
             pass
 
     monkeypatch.setattr(m, "AppController", FakeCtrl)
@@ -391,7 +514,7 @@ def test_notify_message_toasts_the_state_it_was_handed(monkeypatch):
 
     sent = []
     monkeypatch.setattr(m, "notify_state",
-                        lambda icon, state: sent.append(state) or True)
+                        lambda icon, state, camera_names=None: sent.append(state) or True)
     m._handle_notify(object(), Health.NO_SERVER)
     assert sent == [Health.NO_SERVER]
 
@@ -440,7 +563,7 @@ def _matured_no_server(monkeypatch):
 
     toasts = []
     monkeypatch.setattr(m, "notify_state",
-                        lambda icon, state: toasts.append(state) or True)
+                        lambda icon, state, camera_names=None: toasts.append(state) or True)
     clock = _FakeClock()
     q = queue.Queue()
     hub = StatusHub(on_change=lambda state: q.put("HEALTH"),
@@ -463,17 +586,33 @@ def _matured_no_server(monkeypatch):
 def test_a_matured_notification_is_not_lost_when_recovery_beats_the_drain(monkeypatch):
     """Case A. The server was down for 30+ seconds and came back while the
     status window was open. Re-reading hub.state told the guard 監控中 TWICE
-    and never mentioned the outage -- the notification was simply lost."""
-    from webcam_client.status import Fault, Health, CONTROL_SOURCE
+    and never mentioned the outage -- the notification was simply lost.
+
+    Timing updated for human decision 5 (2026-07-30): the recovery is no longer
+    announced on the transition, it waits for a full window of health. The
+    guarantee THIS test exists for is untouched and is what the first assertion
+    still pins -- the matured NO_SERVER survives a recovery that beats the drain,
+    and the guard does not get a bare 監控中 in its place. The recovery arriving
+    later is asserted too, so "not lost" cannot be satisfied by never announcing
+    it at all."""
+    from webcam_client.status import (Fault, Health, CONTROL_SOURCE,
+                                     NOTIFY_DEBOUNCE_SECONDS)
 
     hub, q, clock, toasts, drain = _matured_no_server(monkeypatch)
     hub.report(CONTROL_SOURCE, Fault.NONE)      # recovery, before the drain
     drain()
 
+    assert toasts == [Health.NO_SERVER], (
+        "the outage must still be announced even though the recovery overtook "
+        f"the drain -- and must not be replaced by a bare 監控中: {toasts}")
+    assert hub.state is Health.RUNNING, "the tray light is not debounced"
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+    hub.tick()
+    drain()
     assert toasts == [Health.NO_SERVER, Health.RUNNING], (
-        "the outage must still be announced, then the recovery -- not two "
-        f"identical 監控中 toasts: {toasts}")
-    assert hub.state is Health.RUNNING
+        f"...and once the uploads have held for a full window, the recovery "
+        f"must be announced too: {toasts}")
 
 
 def test_a_new_fault_before_the_drain_does_not_bypass_the_debounce(monkeypatch):
@@ -583,6 +722,108 @@ def test_a_fault_source_with_no_camera_is_never_shown_raw():
     assert names == []
 
 
+# --------------------------------------------------------------------------
+# F-1: the camera-down toast never said WHICH camera.
+#
+# notify_state() built the toast from describe(state) with no context, so
+# camera_down's "{camera_names}目前沒有畫面。" fell back to strings.py's generic
+# "攝影機" default. On a multi-camera site the guard learned SOME camera was
+# down without learning which -- the one fact that decides what they
+# physically go and check. The status window already resolved this correctly
+# via main._camera_display_names(); the toast needed the same names threaded
+# through to notify_state().
+# --------------------------------------------------------------------------
+
+class _NameClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, secs):
+        self.now += secs
+
+
+def test_camera_down_toast_names_the_specific_camera_that_is_down(monkeypatch):
+    """Drives the REAL dispatch loop end to end -- real StatusHub, real
+    notify_state(), real strings.describe() -- so this proves the actual toast
+    TEXT names the camera, not merely that some list of names reached a mock.
+
+    Camera names are captured at NOTIFY-drain time (hub.faulty_sources(),
+    called from the dispatch loop, never from inside StatusHub's on_notify
+    callback -- that callback fires while the hub still holds its own
+    non-reentrant lock, and faulty_sources() takes that same lock, so calling
+    it from inside the callback would deadlock the thread that is supposed to
+    announce the fault). This is deliberately NOT the same treatment `state`
+    gets: state rides the token because tick() commits to it once, at fire
+    time, and nothing can ever recover which state matured after the fact.
+    Camera names have no such one-shot commitment in status.py (which this
+    lane does not own) -- hub.faulty_sources() stays queryable at any time --
+    so reading it fresh at drain time answers the more useful question for a
+    toast that can land seconds (or, behind a blocked status window, minutes)
+    after the fault matured: which camera needs the guard's attention RIGHT
+    NOW, not which one the debounce math happened to be timing 30s earlier."""
+    import webcam_client.main as m
+    from webcam_client.status import Fault, NOTIFY_DEBOUNCE_SECONDS
+
+    clock = _NameClock()
+    made = {}
+    real_hub_cls = m.StatusHub
+
+    def hub_factory(**kw):
+        made["hub"] = real_hub_cls(clock=clock, **kw)
+        return made["hub"]
+
+    class FakeIcon:
+        def __init__(self):
+            self.calls = []
+
+        def notify(self, message, title=None):
+            self.calls.append((title, message))
+
+    fake_icon = FakeIcon()
+    tray_kw = {}
+
+    class FakeTray:
+        icon = fake_icon
+
+        def __init__(self, **kw):
+            tray_kw.update(kw)
+
+        def start(self):
+            pass
+
+        def set_health(self, state):
+            pass
+
+        def stop(self):
+            pass
+
+    cams = [{"node_id": "n1", "name": "前門攝影機", "device_index": 0, "enabled": True},
+            {"node_id": "n2", "name": "後門攝影機", "device_index": 1, "enabled": True}]
+
+    def a_camera_fails():
+        # Only the BACK door camera goes dark; the front door is fine.
+        made["hub"].report("n2", Fault.CAMERA_DOWN)
+        clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)
+        made["hub"].tick()          # matures the toast synchronously, no real sleep
+        tray_kw["on_quit"]()        # let the loop drain HEALTH, NOTIFY, then QUIT
+
+    _boot(monkeypatch, m, FakeTray, cameras=cams, on_start_engines=a_camera_fails)
+    monkeypatch.setattr(m, "StatusHub", hub_factory)
+
+    m.main()
+
+    assert fake_icon.calls, "no toast reached the icon"
+    _, message = fake_icon.calls[-1]
+    assert "後門攝影機" in message, (
+        f"the toast must name the camera that is actually down: {message!r}")
+    assert "前門攝影機" not in message, "must not blame the camera that is fine"
+    assert "n2" not in message and "__control__" not in message, (
+        f"an internal identifier leaked into operator-facing text: {message!r}")
+
+
 def test_enabled_cameras_are_read_from_the_live_config():
     """The count in the window must come from the CURRENT config, not from the
     list captured at startup: after a settings edit the startup list is stale
@@ -644,6 +885,9 @@ def test_tray_open_status_menu_reaches_the_status_window(monkeypatch):
         def set_health(self, state):
             pass
 
+        def stop(self):
+            pass
+
     _boot(monkeypatch, m, FakeTray)
     m.main()
 
@@ -677,10 +921,51 @@ def test_status_window_reconnect_button_rebuilds_engines(monkeypatch):
         def set_health(self, state):
             pass
 
+        def stop(self):
+            pass
+
     made = _boot(monkeypatch, m, FakeTray)
     m.main()
     captured["on_reconnect"]()
     assert made["ctrl"].applied == [made["ctrl"].config]
+
+
+# --------------------------------------------------------------------------
+# NIT: hub=None defaults on _handle_request() and _rebuild_engines() let a
+# future call site silently drop the STARTING-forever backstop -- no error,
+# no log line, just a tray that can now sit on 啟動中 forever after a failed
+# rebuild, exactly like before this whole phase existed. The sole production
+# call site (main()'s dispatch loop, and main()'s two start_engines() guards)
+# always passes a real hub; only tests legitimately have no hub to give. So
+# the default is removed -- hub becomes REQUIRED -- and every test call site
+# that does not care about the hub-dependent branch now says so explicitly
+# (hub=None), rather than getting there by omission.
+# --------------------------------------------------------------------------
+
+def test_rebuild_engines_requires_hub_explicitly():
+    """A call site that forgets hub must fail loudly at once, not silently
+    keep the STARTING-forever backstop switched off."""
+    import pytest
+    import webcam_client.main as m
+
+    class Ctrl:
+        config = {"cameras": []}
+
+        def apply(self, cfg):
+            pass
+
+    with pytest.raises(TypeError):
+        m._rebuild_engines(Ctrl())
+
+
+def test_handle_request_requires_hub_explicitly():
+    import pytest
+    import webcam_client.main as m
+
+    ctrl = FakeController({})
+
+    with pytest.raises(TypeError):
+        m._handle_request("QUIT", ctrl, lambda cfg: None)
 
 
 def test_a_failed_rebuild_never_leaves_the_light_claiming_startup():
@@ -966,6 +1251,9 @@ def test_the_reconnect_button_cannot_strand_the_guard(monkeypatch):
         def set_health(self, state):
             pass
 
+        def stop(self):
+            pass
+
     made = _boot(monkeypatch, m, FakeTray)
     m.main()
 
@@ -1002,6 +1290,7 @@ def test_a_failed_startup_never_leaves_the_light_claiming_startup(monkeypatch):
         def __init__(self, **kw): pass
         def start(self): pass
         def set_health(self, state): pass
+        def stop(self): pass
 
     class ExplodingCtrl:
         def __init__(self, cfg, **kw):
@@ -1052,6 +1341,7 @@ def test_a_successful_startup_does_not_invent_a_fault(monkeypatch):
         def __init__(self, **kw): pass
         def start(self): pass
         def set_health(self, state): pass
+        def stop(self): pass
 
     _boot(monkeypatch, m, FakeTray)
     monkeypatch.setattr(m, "StatusHub", hub_factory)
@@ -1116,6 +1406,9 @@ def test_a_worker_fault_repaints_the_tray_from_the_main_loop(monkeypatch):
         def set_health(self, state):
             painted.append(state)
 
+        def stop(self):
+            pass
+
     def a_camera_fails():
         # start_engines() runs AFTER the tray's first paint, which is exactly
         # where a real worker would first report.
@@ -1176,6 +1469,7 @@ def test_the_idle_loop_ticks_the_hub(monkeypatch):
         def __init__(self, **kw): pass
         def start(self): pass
         def set_health(self, state): painted.append(state)
+        def stop(self): pass
 
     def stopper():
         # Ends the loop from OUTSIDE it. The ceiling is generous (this needs two
@@ -1253,6 +1547,7 @@ def test_hub_callbacks_only_enqueue(monkeypatch):
         def __init__(self, **kw): pass
         def start(self): trips.append("tray.start")
         def set_health(self, state): trips.append("tray.set_health")
+        def stop(self): trips.append("tray.stop")
 
     class RecordingQueue(queue.Queue):
         """Records every call, not only put(): a callback that DRAINS the queue,
@@ -1273,7 +1568,7 @@ def test_hub_callbacks_only_enqueue(monkeypatch):
     monkeypatch.setattr(m.queue, "Queue", RecordingQueue)
     monkeypatch.setattr(m, "StatusHub", FakeHub)
     monkeypatch.setattr(m, "notify_state",
-                        lambda icon, state: trips.append("notify_state"))
+                        lambda icon, state, camera_names=None: trips.append("notify_state"))
     monkeypatch.setattr(m, "open_status_window",
                         lambda state, **kw: trips.append("open_status_window"))
     monkeypatch.setattr(m, "run_setup_wizard",
@@ -1388,7 +1683,8 @@ def test_the_status_window_toasts_the_state_that_matured(monkeypatch):
     import webcam_client.main as m
     hub, tray, controller, q = _pump_ctx()
     toasted = []
-    monkeypatch.setattr(m, "notify_state", lambda icon, state: toasted.append(state))
+    monkeypatch.setattr(m, "notify_state",
+                        lambda icon, state, camera_names=None: toasted.append(state))
 
     hub.state = Health.RUNNING                  # recovery already happened
     q.put(("NOTIFY", Health.NO_SERVER))         # the outage matured earlier
