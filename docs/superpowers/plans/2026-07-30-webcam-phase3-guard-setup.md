@@ -1,6 +1,6 @@
 # Webcam Client Phase 3 — Guard-Facing Setup Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Turn the setup window from a developer form into a single guided page a non-technical security guard can complete alone — three numbered sections that unlock in order, plain-language 繁中 labels, and no operation that freezes the UI. Closes the nine open interface findings U1, U2, U3, U4, U5, U8, U10, U11, U12.
 
@@ -37,7 +37,8 @@
 | `webcam_client/gui/wizard/__init__.py` | *new* — package façade, re-exports the public surface |
 | `webcam_client/gui/wizard/flow.py` | *new* — pure section-unlock state machine |
 | `webcam_client/gui/wizard/connection.py` | *new* — off-thread network: test + register |
-| `webcam_client/gui/wizard/scanning.py` | *new* — `_scan_cameras_async`, `_load_thumbnail_async` |
+| `webcam_client/gui/wizard/scanning.py` | *new* — `_scan_cameras_async`, `_prepare_thumbnail_async` (`_load_thumbnail_async` was **deleted**, not moved: it built a Tk `PhotoImage` on a worker thread and always reopened the device) |
+| `webcam_client/gui/preview.py` | *modify* — `prepare_thumbnail` (worker-safe) + `to_photo_image` (Tk thread) |
 | `webcam_client/gui/wizard/window.py` | *new* — Tk rendering of the three sections |
 | `webcam_client/autostart.py` | *new* — HKCU Run decisions (pure) + thin `winreg` shim |
 | `webcam_client/camera_manager.py` | *modify* — early stop + return frame |
@@ -48,8 +49,10 @@
 | `webcam_client/tests/test_wizard_flow.py` | *new* |
 | `webcam_client/tests/test_wizard_connection.py` | *new* |
 | `webcam_client/tests/test_autostart.py` | *new* |
+| `webcam_client/tests/test_wizard_scanning.py` | *new* — off-thread guarantees + the assertion that proves U2 |
+| `webcam_client/tests/test_wizard_window.py` | *new* — the window's two pure helpers; constructs no `tk.Tk()` |
 | `webcam_client/tests/test_camera_manager.py` | *modify* |
-| `webcam_client/tests/test_setup_wizard.py` | *rewritten in Task 9* |
+| `webcam_client/tests/test_setup_wizard.py` | *deleted in Task 9; all 15 assertions redistributed* |
 
 ---
 
@@ -83,7 +86,7 @@ At first run the client has **zero** registered cameras, so every ownership-chec
 - **(B) Sentinel-id probe** — `GET /webcam/<sentinel>/commands`; 401 = bad key, 403 = key good. Honours §9 and is genuinely side-effect-free today (the ownership guard at `:195` runs *before* the dequeue at `:198`). But success is signalled by an HTTP error, and if that guard is ever moved below the dequeue the test button silently steals a command off the client's control channel. Rejected unless (A) is refused.
 - **(C) Narrow U4 to reachability** — use public `GET /api/health`, relabel the button so it does not promise password verification. Honours §9, but the guard learns their password is wrong only at 開始監控, which is most of what U4 was for.
 
-- [ ] **Step 0: Obtain the decision and record it here before writing any connection code.**
+- [x] **Step 0: Obtain the decision and record it here before writing any connection code.**
 
 If (A): add the route above the `/{node_id}/...` routes in `webcam.py`, add it to the module docstring inventory (`:9-16`, maintained as complete), and add two tests to `central_server/tests/test_webcam_api.py` following its existing fixture pattern (`tmp_db` autouse + `app` + `authed_client`; a valid key is minted through `POST /api/nodes/webcam`, never inserted directly into the DB). The route must **not** take a `node_id`, must **not** touch `webcam_clients.status`, and must **not** log the submitted key.
 
@@ -107,7 +110,7 @@ If (A): add the route above the `/{node_id}/...` routes in `webcam.py`, add it t
 
 **This makes Task 5 load-bearing for U2.** Until the thumbnail path consumes `cams[i]["frame"]` instead of calling `grab_preview_frame(device_index)` (`gui/wizard/scanning.py:41`), Task 1 is **strictly slower** per hit device: extra read, no offsetting saving. The `frame` semantics are a drop-in for `grab_preview_frame`'s contract (`frame if ok else None`, `gui/preview.py:46-47`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `webcam_client/tests/test_camera_manager.py`. Use a fake capture factory — no test may touch real hardware:
 
@@ -138,9 +141,9 @@ def test_scan_returns_the_frame_it_already_grabbed():
     assert cams[0]["frame"] is not None, "the thumbnail must not need a second open"
 ```
 
-- [ ] **Step 2: Verify RED** — run the file, confirm failures are about the new signature/keys, not import errors.
-- [ ] **Step 3: Implement** — track `consecutive_misses`, `break` at the threshold, keep the retrieved frame on the dict. Preserve the existing `max_index` upper bound.
-- [ ] **Step 4: Verify GREEN** — this file plus `test_setup_wizard.py` (its `fake_scan` returns dicts without `frame`; confirm nothing crashes on the missing key).
+- [x] **Step 2: Verify RED** — run the file, confirm failures are about the new signature/keys, not import errors.
+- [x] **Step 3: Implement** — track `consecutive_misses`, `break` at the threshold, keep the retrieved frame on the dict. Preserve the existing `max_index` upper bound.
+- [x] **Step 4: Verify GREEN** — this file plus `test_setup_wizard.py` (its `fake_scan` returns dicts without `frame`; confirm nothing crashes on the missing key).
 
 ---
 
@@ -160,9 +163,9 @@ def test_scan_returns_the_frame_it_already_grabbed():
 
 This fails **loudly**, not silently: the fake never runs, so `seen["thread"]` raises `KeyError` and the test errors — but only after really probing DSHOW hardware. Therefore:
 
-- [ ] **Step 1:** Move bodies to the new modules; `gui/setup_wizard.py` becomes `from .wizard import *` plus explicit re-exports and `import httpx` (needed — seven tests patch `webcam_client.gui.setup_wizard.httpx.post`).
-- [ ] **Step 2:** Update **only** the two patch targets in `test_setup_wizard.py:179, 207-208` to `webcam_client.gui.wizard.scanning`. Change nothing else in that file. Record in the commit message that exactly two lines changed and why.
-- [ ] **Step 3: Verify GREEN** — all 15 `test_setup_wizard.py` tests pass, and `test_main_dispatch.py` (54 tests, monkeypatches `main.run_setup_wizard` at `:1574`) still passes. If any of the other 13 needed a change, the move was not behaviour-preserving — stop and find out why.
+- [x] **Step 1:** Move bodies to the new modules; `gui/setup_wizard.py` becomes `from .wizard import *` plus explicit re-exports and `import httpx` (needed — seven tests patch `webcam_client.gui.setup_wizard.httpx.post`).
+- [x] **Step 2:** Update **only** the two patch targets in `test_setup_wizard.py:179, 207-208` to `webcam_client.gui.wizard.scanning`. Change nothing else in that file. Record in the commit message that exactly two lines changed and why.
+- [x] **Step 3: Verify GREEN** — all 15 `test_setup_wizard.py` tests pass, and `test_main_dispatch.py` (54 tests, monkeypatches `main.run_setup_wizard` at `:1574`) still passes. If any of the other 13 needed a change, the move was not behaviour-preserving — stop and find out why.
 
 ---
 
@@ -177,10 +180,10 @@ This fails **loudly**, not silently: the fake never runs, so `seen["thread"]` ra
 
 **Why edit mode starts pre-verified but re-locks:** a guard opening 設定 to rename a camera should not be forced to re-test a connection that is demonstrably working. But the moment they touch 連線位址 or 連線密碼, the verified state is a lie — so any edit to either field re-locks section 2. This is the same "the light must never lie" thesis Phase 2 was built on.
 
-- [ ] **Step 1: Write the failing tests** — first-run starts locked; `on_connection_verified()` unlocks; `on_credentials_edited()` re-locks even after verification; edit mode starts unlocked; `can_confirm` is False with zero cameras selected.
-- [ ] **Step 2: Verify RED.**
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Verify GREEN.**
+- [x] **Step 1: Write the failing tests** — first-run starts locked; `on_connection_verified()` unlocks; `on_credentials_edited()` re-locks even after verification; edit mode starts unlocked; `can_confirm` is False with zero cameras selected.
+- [x] **Step 2: Verify RED.**
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Verify GREEN.**
 
 ---
 
@@ -212,10 +215,10 @@ This fails **loudly**, not silently: the fake never runs, so `seen["thread"]` ra
 
 Both must be closed here, with tests.
 
-- [ ] **Step 1: Write the failing tests** — follow the proven idiom at `test_setup_wizard.py:170-190`: `threading.Event()`, `assert done.wait(5), "on_done was never called"`, and `assert seen["thread"] is not _t.current_thread()`. Assert every failure maps to a `strings.*` constant and that no status code or exception repr appears in the message.
-- [ ] **Step 2: Verify RED.**
-- [ ] **Step 3: Implement** — `threading.Thread(..., daemon=True)`; all exceptions become `(None, message)`; the status code and exception go to `logger`, never to the return value.
-- [ ] **Step 4: Verify GREEN.**
+- [x] **Step 1: Write the failing tests** — follow the proven idiom at `test_setup_wizard.py:170-190`: `threading.Event()`, `assert done.wait(5), "on_done was never called"`, and `assert seen["thread"] is not _t.current_thread()`. Assert every failure maps to a `strings.*` constant and that no status code or exception repr appears in the message.
+- [x] **Step 2: Verify RED.**
+- [x] **Step 3: Implement** — `threading.Thread(..., daemon=True)`; all exceptions become `(None, message)`; the status code and exception go to `logger`, never to the return value.
+- [x] **Step 4: Verify GREEN.**
 
 ---
 
@@ -254,9 +257,9 @@ Both must be closed here, with tests.
 2. **The window must opt into the stale-reply guard.** 測試連線 runs off the Tk thread, so a success can land *after* the guard has gone back and changed 連線位址 — unlocking section 2 for credentials the app never tried, which is this branch's exact failure mode arriving through the back door. Mint a token with `begin_connection_test()` and pass it to `on_connection_verified(token)`. The zero-arg call still unlocks unconditionally, so **skipping this fails silently**.
 3. **`wizard/__init__.py` does not export `flow`** (Task 3 was scoped out of it), and the package docstring's module list is one module out of date. Fix both here.
 
-- [ ] **Step 1:** Build the window against `WizardFlow`; keep all logic in `flow.py`/`connection.py` so `window.py` holds only rendering.
-- [ ] **Step 2:** Strip `frame` off every camera dict before `save_config` — see Task 7.
-- [ ] **Step 3:** Manual smoke on a real display; automated coverage is Tasks 3/4. **No test may construct a `tk.Tk()`** — `webcam_client/tests/` has no display guard and must pass on a headless build machine.
+- [x] **Step 1:** Build the window against `WizardFlow`; keep all logic in `flow.py`/`connection.py` so `window.py` holds only rendering.
+- [x] **Step 2:** Strip `frame` off every camera dict before `save_config` — see Task 7.
+- [x] **Step 3:** Manual smoke on a real display; automated coverage is Tasks 3/4. **No test may construct a `tk.Tk()`** — `webcam_client/tests/` has no display guard and must pass on a headless build machine.
 
 ---
 
@@ -279,8 +282,8 @@ Both must be closed here, with tests.
 - **The checkbox can lie.** Disabling an entry via Task Manager writes to `HKCU\...\Explorer\StartupApproved\Run` and **leaves the `Run` value in place**. A checkbox reading only `Run` renders ON while autostart is OFF. On a branch whose entire thesis is that the status must never lie, either read `StartupApproved` too or do not claim to report state.
 - **A failed registry write must never fail the config save.** Same rule `main.py:437-440` applies to `setup_logging()`: a nicety must not become a startup dependency.
 
-- [ ] **Step 1: Write the failing tests** — `build_run_command` returns `None` when `frozen=False`; quotes a path containing spaces; never returns a string containing `_MEI`. Monkeypatch the `winreg` seam for `is_enabled`/`set_enabled`; assert a raising write returns `False` rather than propagating.
-- [ ] **Step 2: Verify RED.** — [ ] **Step 3: Implement.** — [ ] **Step 4: Verify GREEN.**
+- [x] **Step 1: Write the failing tests** — `build_run_command` returns `None` when `frozen=False`; quotes a path containing spaces; never returns a string containing `_MEI`. Monkeypatch the `winreg` seam for `is_enabled`/`set_enabled`; assert a raising write returns `False` rather than propagating.
+- [x] **Step 2: Verify RED.** — [ ] **Step 3: Implement.** — [ ] **Step 4: Verify GREEN.**
 
 ---
 
@@ -290,11 +293,11 @@ Both must be closed here, with tests.
 
 **This is not defensive tidiness.** `config.py:111-112` opens the file in `"w"` — truncating it — and *then* runs `json.dump`. A non-serialisable value (a `numpy.ndarray` frame, a `PhotoImage`) raises `TypeError` **after the file is already empty**. Next launch, `load_config` hits `JSONDecodeError`, returns defaults (`:88-90`), and `main.py:454` fires the first-run wizard: the guard's address, password and cameras are gone. Task 1 puts an ndarray on every camera dict, so this becomes reachable in exactly this phase.
 
-- [ ] **Step 1:** Test that `save_config` with a non-serialisable value leaves the **existing file intact**.
-- [ ] **Step 2: Verify RED** (it will truncate).
-- [ ] **Step 3:** Serialise to a string first, then write — `json.dumps(...)` before `open(...)`, or write-temp-then-`os.replace`. The latter also fixes power-loss-mid-write.
-- [ ] **Step 4:** Add `"autostart": False` to `DEFAULT_CONFIG` (`:16-22`). `load_config` merges over defaults (`:91-92`), so this round-trips with no migration.
-- [ ] **Step 5: Verify GREEN.**
+- [x] **Step 1:** Test that `save_config` with a non-serialisable value leaves the **existing file intact**.
+- [x] **Step 2: Verify RED** (it will truncate).
+- [x] **Step 3:** Serialise to a string first, then write — `json.dumps(...)` before `open(...)`, or write-temp-then-`os.replace`. The latter also fixes power-loss-mid-write.
+- [x] **Step 4:** Add `"autostart": False` to `DEFAULT_CONFIG` (`:16-22`). `load_config` merges over defaults (`:91-92`), so this round-trips with no migration.
+- [x] **Step 5: Verify GREEN.**
 
 ---
 
@@ -311,7 +314,7 @@ Move every string still hardcoded in the wizard into `strings.py`, where the aut
 - If it names a control, interpolate that control's constant by f-string — never retype the label. Add a drift test asserting `strings.BTN_X in <message>`.
 - If it is a new stuck-state message, add it to the hardcoded `stuck` tuple in `test_the_setup_window_speaks_the_same_language_as_everything_else` (it does **not** auto-grow), and it must contain `請`. Escalate to `管理員` only if the guard genuinely cannot fix it alone.
 
-- [ ] **Step 1:** Add constants. — [ ] **Step 2:** Extend the `stuck` tuple and add drift tests. — [ ] **Step 3: Verify GREEN.**
+- [x] **Step 1:** Add constants. — [ ] **Step 2:** Extend the `stuck` tuple and add drift tests. — [ ] **Step 3: Verify GREEN.**
 
 **Known gap worth closing here:** `test_the_destination_has_exactly_one_name` (「監控中心」must never appear) is scoped to `describe()` output only. The dynamic constant scan does not check it, so a new `WIZ_*` constant could slip it through. Extend the scan.
 
@@ -323,10 +326,10 @@ Move every string still hardcoded in the wizard into `strings.py`, where the aut
 
 Only after Tasks 3–5 have their own passing tests. This reaches the end state spec §10 specifies.
 
-- [ ] **Step 1:** Point `main.py:9` at `from .gui.wizard import run_setup_wizard`. Confirm `run_setup_wizard` remains a module-level attribute of `webcam_client.main` (`test_main_dispatch.py:1574` monkeypatches it there).
-- [ ] **Step 2:** Redistribute `test_setup_wizard.py`'s 15 tests to `test_wizard_flow.py` / `test_wizard_connection.py` / `test_camera_manager.py`. **Every assertion must survive somewhere** — if one no longer has a home, say so explicitly rather than dropping it.
-- [ ] **Step 3:** Delete the façade.
-- [ ] **Step 4: Verify GREEN across all 17+ test files.**
+- [x] **Step 1:** Point `main.py:9` at `from .gui.wizard import run_setup_wizard`. Confirm `run_setup_wizard` remains a module-level attribute of `webcam_client.main` (`test_main_dispatch.py:1574` monkeypatches it there).
+- [x] **Step 2:** Redistribute `test_setup_wizard.py`'s 15 tests to `test_wizard_flow.py` / `test_wizard_connection.py` / `test_camera_manager.py`. **Every assertion must survive somewhere** — if one no longer has a home, say so explicitly rather than dropping it.
+- [x] **Step 3:** Delete the façade.
+- [x] **Step 4: Verify GREEN across all 17+ test files.**
 
 ---
 
