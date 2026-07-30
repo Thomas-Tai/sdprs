@@ -53,9 +53,16 @@
 
 ---
 
-## Task 0 — BLOCKED ON A HUMAN DECISION. Do not start Tasks 3/4 until this is resolved.
+## Task 0 — DECIDED 2026-07-30: option (A). Spec §9 is amended by this decision.
 
-**U4 as specified cannot be built without violating spec §9.**
+**The user chose (A): add `GET /api/webcam/ping`.** Spec §9's 「不新增任何 server 端 API」
+no longer holds unqualified — it is amended to permit this single side-effect-free
+authentication probe, and nothing further. Tasks 3/4 are unblocked. Update spec §9 to
+record the amendment before implementing, so the spec stops contradicting the plan.
+
+The analysis that produced the decision is kept below as the record.
+
+**U4 as specified could not be built without violating spec §9.**
 
 Spec §7.2 requires 「測試連線」to verify *identity* (`只驗證身分，不註冊攝影機`). Spec §9 YAGNI locks 「**不新增任何 server 端 API**」.
 
