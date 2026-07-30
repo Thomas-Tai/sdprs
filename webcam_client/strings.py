@@ -15,12 +15,34 @@ status.py can import strings without a circular import.
 
 WINDOW_TITLE = "SDPRS 監控狀態"
 TRAY_TOOLTIP_PREFIX = "SDPRS 監控"
-ALREADY_RUNNING = "SDPRS 監控已經在執行中，圖示在螢幕右下角。"
 
+# --- Every label the guard can read, or be told to press -------------------
+# The tray menu's labels used to live in gui/tray_app.py, outside the guarantee
+# this module's docstring makes for the whole app -- and it cost exactly what
+# you would expect. The tray spelled its settings item 「開啟設定」 while the
+# status window's button said 「設定」 and bad_key's action told the guard to
+# press 「設定」: three spellings, two of them wrong, for one control. The pause
+# label had already drifted the same way once (推送 → 上傳), and the only reason
+# that was caught is that a test happened to pin the literal.
+#
+# So every such label is a constant here, and the instruction text further down
+# interpolates these rather than retyping them. A control and the sentence that
+# tells the guard to press it can then no longer disagree.
 MENU_STATUS = "監控狀態"
 BTN_OPEN_LOGS = "開啟記錄檔"
 BTN_RECONNECT = "重新連線"
 BTN_SETTINGS = "設定"
+MENU_QUIT = "離開"
+MENU_PAUSE = "暫停上傳"
+MENU_RESUME = "恢復上傳"
+
+# Shown when the guard launches the app while it is already running. That is the
+# one moment they are actively hunting for it, which makes it the only good place
+# to teach the double-click that opens the status window: nothing else in the app
+# ever mentions it, and the tooltip cannot carry the hint -- szTip is capped at
+# 127 characters and already holds the title, the detail and the action.
+ALREADY_RUNNING = (f"SDPRS 監控已經在執行中，圖示在螢幕右下角。"
+                   f"在圖示上點兩下，就會打開「{MENU_STATUS}」。")
 
 # --- The setup window ------------------------------------------------------
 # This window used to hold its own strings. That put the FIRST screen a guard
@@ -92,7 +114,9 @@ _TEXT = {
         # and 「無法連線到伺服器」 when it breaks has no way to know those are
         # the same machine, and reports two systems to a technician who has one.
         "上傳已被手動暫停，畫面不會傳到伺服器。",
-        "要繼續上傳，請在螢幕右下角的圖示上按滑鼠右鍵，選「恢復上傳」。",
+        # 「恢復上傳」 is interpolated, not retyped: this sentence names a tray
+        # menu item, and the tray used to spell its own labels independently.
+        f"要繼續上傳，請在螢幕右下角的圖示上按滑鼠右鍵，選「{MENU_RESUME}」。",
     ),
     "no_server": (
         "無法連線到伺服器",

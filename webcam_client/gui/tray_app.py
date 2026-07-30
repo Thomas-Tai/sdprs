@@ -4,7 +4,8 @@ import threading
 from typing import Callable, Optional
 
 from ..status import Health
-from ..strings import describe, TRAY_TOOLTIP_PREFIX, MENU_STATUS
+from ..strings import (describe, TRAY_TOOLTIP_PREFIX, MENU_STATUS, MENU_QUIT,
+                       MENU_PAUSE, MENU_RESUME, BTN_SETTINGS)
 
 logger = logging.getLogger("webcam_client.gui.tray")
 
@@ -29,7 +30,13 @@ def _create_icon(color: str = "green") -> "Image.Image":
 
 
 def _pause_label(paused: bool) -> str:
-    return "恢復上傳" if paused else "暫停上傳"
+    """The one menu item whose label changes with state.
+
+    Sourced from strings.py rather than spelled here: the paused state's action
+    line tells the guard to right-click and choose this exact label, and while
+    the two were written independently they drifted once already (推送 → 上傳).
+    """
+    return MENU_RESUME if paused else MENU_PAUSE
 
 
 # Worst-first colour, matching the meaning the guard needs, not the raw enum
@@ -118,16 +125,14 @@ class TrayApp:
         menu = pystray.Menu(
             # default=True makes this the double-click action (pystray 0.19.5).
             pystray.MenuItem(MENU_STATUS, lambda: self._on_open_status(), default=True),
-            # TODO: drift -- status_window's equivalent button is strings.BTN_SETTINGS
-            # ("設定"), not "開啟設定". Both labels belong in strings.py (its docstring
-            # claims to hold "every operator-facing string, in one place"), but this
-            # file hardcodes its own; left as-is to avoid colliding with the in-flight
-            # strings.py edit -- ledger separately.
-            pystray.MenuItem("開啟設定", lambda: self._on_open_settings()),
+            # BTN_SETTINGS, not a local 「開啟設定」: this item opens the same
+            # window as the status window's own 設定 button, and bad_key's action
+            # tells the guard to press 「設定」. One control, one spelling.
+            pystray.MenuItem(BTN_SETTINGS, lambda: self._on_open_settings()),
             pystray.MenuItem(lambda item: _pause_label(self._paused),
                              lambda: self._toggle_pause()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("離開", lambda: self._quit()),
+            pystray.MenuItem(MENU_QUIT, lambda: self._quit()),
         )
         self._icon = pystray.Icon("SDPRS Webcam", _create_icon(_health_color(self._state)),
                                   _tooltip(self._state), menu)

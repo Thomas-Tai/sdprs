@@ -235,6 +235,30 @@ def test_the_setup_window_speaks_the_same_language_as_everything_else():
         "a blank field is the guard's to fix; do not send them to the administrator"
 
 
+def test_the_pause_instruction_names_the_actual_menu_item():
+    """F-2: the paused action tells the guard to right-click the tray icon and
+    choose a menu item BY NAME, while tray_app.py spelled that item's label
+    independently. The two drifted once already -- the instruction said 恢復推送
+    while the menu said 恢復上傳 -- and the only reason it was caught is that a
+    test happened to pin the literal. Assert against the constant instead."""
+    _, _, action = strings.describe(Health.PAUSED)
+    assert strings.MENU_RESUME in action, \
+        f"paused must name the menu item that resumes uploading: {action!r}"
+
+
+def test_already_running_tells_the_guard_how_to_reach_the_status_window():
+    """F-4: nothing in the app told the guard that double-clicking the tray icon
+    opens 監控狀態, even though that is the menu's `default=True` item. This
+    message fires exactly when the guard is hunting for an app that is already
+    running, which makes it the only good place to say so -- the tooltip cannot,
+    since szTip is capped at 127 characters and already carries the title, the
+    detail and the action."""
+    assert strings.MENU_STATUS in strings.ALREADY_RUNNING, \
+        f"the guard is never told what the icon opens: {strings.ALREADY_RUNNING!r}"
+    assert "點兩下" in strings.ALREADY_RUNNING, \
+        "naming the window is not enough; say how to open it"
+
+
 def test_the_destination_has_exactly_one_name():
     """paused said 監控中心 while every other surface said 伺服器. A guard who
     reads 'not reaching the 監控中心' when paused and '無法連線到伺服器' when it

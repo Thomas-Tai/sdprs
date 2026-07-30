@@ -34,9 +34,62 @@ def test_create_icon_colors_track_status():
 
 
 def test_pause_label_reflects_state():
+    """Asserted against the constants, not literals. Pinning the literal here is
+    what let 推送/上傳 drift between this label and the instruction that names
+    it -- the test went green on the old spelling either way."""
     from webcam_client.gui.tray_app import _pause_label
-    assert _pause_label(False) == "暫停上傳"
-    assert _pause_label(True) == "恢復上傳"
+    from webcam_client import strings
+    assert _pause_label(False) == strings.MENU_PAUSE
+    assert _pause_label(True) == strings.MENU_RESUME
+
+
+@pytest.mark.skipif(not TRAY_AVAILABLE, reason="PIL/pystray not installed")
+def test_the_tray_menu_labels_all_come_from_strings(monkeypatch):
+    """F-2: the tray is the app's ONLY permanent surface, and its labels lived
+    here rather than in strings.py, whose docstring claims to hold every
+    operator-facing string. It showed: the menu said 「開啟設定」 while the status
+    window's button said 「設定」 and bad_key's action told the guard to press
+    「設定」 -- three spellings for one control, two of them wrong.
+
+    Pin the whole visible label set, in order, against the constants. A label
+    retyped in this file then fails here instead of drifting silently."""
+    import types
+    from webcam_client.gui import tray_app as ta
+    from webcam_client import strings
+
+    labels = []
+
+    class FakeMenuItem:
+        def __init__(self, text, action=None, default=False):
+            # The pause item's label is a callable of the pystray item.
+            labels.append(text(None) if callable(text) else text)
+
+    class FakeMenu:
+        SEPARATOR = object()
+
+        def __init__(self, *items):
+            self.items = items
+
+    class FakeIcon:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(ta, "pystray", types.SimpleNamespace(
+        Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon))
+    # start() hands icon.run to a daemon thread; keep it off the test runner.
+    monkeypatch.setattr(ta.threading, "Thread",
+                        lambda *a, **kw: types.SimpleNamespace(start=lambda: None))
+
+    app = ta.TrayApp(on_open_settings=lambda: None, on_quit=lambda: None,
+                     on_pause=lambda: None, on_resume=lambda: None)
+    app.start()
+
+    assert labels == [strings.MENU_STATUS, strings.BTN_SETTINGS,
+                      strings.MENU_PAUSE, strings.MENU_QUIT], (
+        f"tray labels must be the shared constants, in menu order; got {labels}")
 
 
 @pytest.mark.skipif(not TRAY_AVAILABLE, reason="PIL/pystray not installed")
