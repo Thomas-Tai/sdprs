@@ -176,7 +176,7 @@ def test_scan_cameras_async_runs_off_the_calling_thread(monkeypatch):
         seen["thread"] = _t.current_thread()
         return [{"device_index": 0, "width": 640, "height": 480}]
 
-    monkeypatch.setattr(sw, "scan_cameras", fake_scan)
+    monkeypatch.setattr("webcam_client.gui.wizard.scanning.scan_cameras", fake_scan)
     done = _t.Event()
     result = {}
 
@@ -204,8 +204,8 @@ def test_load_thumbnail_async_runs_off_the_calling_thread(monkeypatch):
         assert frame == "FRAME"
         return "THUMB"
 
-    monkeypatch.setattr(sw, "grab_preview_frame", fake_grab)
-    monkeypatch.setattr(sw, "make_thumbnail", fake_make_thumbnail)
+    monkeypatch.setattr("webcam_client.gui.wizard.scanning.grab_preview_frame", fake_grab)
+    monkeypatch.setattr("webcam_client.gui.wizard.scanning.make_thumbnail", fake_make_thumbnail)
     done = _t.Event()
     result = {}
 
