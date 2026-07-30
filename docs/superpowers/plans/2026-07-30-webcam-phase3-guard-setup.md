@@ -101,7 +101,11 @@ If (A): add the route above the `/{node_id}/...` routes in `webcam.py`, add it t
 
 **Why the miss threshold is a parameter, not a constant:** device indices are not guaranteed contiguous. A guard with a USB hub can legitimately have cameras at 0 and 4, and an unconditional early stop would lose the second one. So: the **first-run** scan stops after `stop_after_misses` consecutive misses (fast — the common case is indices 0..1), and the **重新掃描** button passes `stop_after_misses=max_index` to force a full sweep. The button is therefore the documented escape hatch for the gap case, and the copy in `WIZ_NO_CAMERA_FOUND` already points at it.
 
-**Why the frame comes back:** today `scan_cameras` opens each device, reads its resolution, closes it — then `_load_thumbnail_async` reopens the same device to grab a preview. Two opens per camera, each costing a DSHOW negotiation. The scan already has a frame in hand at the moment it reads `width`/`height`; returning it deletes the second open entirely.
+**Why the frame comes back:** today `scan_cameras` opens each device, reads its resolution, closes it — then `_load_thumbnail_async` reopens the same device to grab a preview. Two opens per camera, each costing a DSHOW negotiation. Returning the frame from the first open removes the second.
+
+**Correction, verified 2026-07-30 against the source:** an earlier draft of this line claimed the scan "already has a frame in hand at the moment it reads `width`/`height`". It does not. The old `scan_cameras` never called `cap.read()` — only `cap.get(CAP_PROP_FRAME_WIDTH/HEIGHT)`, which are driver property queries, not frame grabs. So this is **a trade, not a free lunch**: the scan now pays one frame grab per *hit* device that it never paid before (a first DSHOW frame can cost a few hundred ms), and buys back an entire open+negotiate+read. One negotiation beats two, so it is still clearly positive — but smaller than "deletes the second open entirely" implied.
+
+**This makes Task 5 load-bearing for U2.** Until the thumbnail path consumes `cams[i]["frame"]` instead of calling `grab_preview_frame(device_index)` (`gui/wizard/scanning.py:41`), Task 1 is **strictly slower** per hit device: extra read, no offsetting saving. The `frame` semantics are a drop-in for `grab_preview_frame`'s contract (`frame if ok else None`, `gui/preview.py:46-47`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -201,6 +205,13 @@ This fails **loudly**, not silently: the fake never runs, so `seen["thread"]` ra
 
 `root.update()` pumps the event loop once, then the synchronous POST blocks the Tk thread for the full connect timeout. The window is dead — unrepaintable, undraggable, "not responding" — for as long as the network takes. Phase 2's `54e5303` fixed this window's *copy*; it did not touch its *threading*.
 
+**Two pre-existing bugs in `register_cameras`, found during the Task 2 move and deliberately left for this task** (a pure move was not the place to fix them). Both are in the result-zip loop at `gui/wizard/connection.py:74-83`:
+
+1. **It can raise, despite its docstring promising it never does.** `r.get("node_id")` at `:81` sits **outside** the `try`, which guards only `resp.json()`. If the server returns 201 with a JSON *object* rather than a list, iterating it yields string keys, `r` is a truthy `str`, and `r.get` raises `AttributeError` straight out into the Tk callback — the exact "windowed exe swallows it, the 開始 button appears dead" failure this function exists to prevent.
+2. **Silent under-registration.** The loop never checks `len(registered) == len(new_cams)`. If the server returns fewer entries than were posted, `next(reg, None)` yields `None`, the trailing cameras keep no `node_id`, and the function still returns `err is None` — so the wizard saves a config containing cameras that were never registered, with nothing said to the guard and nothing in the log.
+
+Both must be closed here, with tests.
+
 - [ ] **Step 1: Write the failing tests** — follow the proven idiom at `test_setup_wizard.py:170-190`: `threading.Event()`, `assert done.wait(5), "on_done was never called"`, and `assert seen["thread"] is not _t.current_thread()`. Assert every failure maps to a `strings.*` constant and that no status code or exception repr appears in the message.
 - [ ] **Step 2: Verify RED.**
 - [ ] **Step 3: Implement** — `threading.Thread(..., daemon=True)`; all exceptions become `(None, message)`; the status code and exception go to `logger`, never to the return value.
@@ -230,6 +241,7 @@ This fails **loudly**, not silently: the fake never runs, so `seen["thread"]` ra
 - **Confirm button label stays mode-dependent** (`:317`: `BTN_WIZARD_SAVE` in edit mode, else `BTN_WIZARD_START`). This is deliberate and is a bench item — do not collapse it to one label.
 - **The confirm button must be disabled while a network call is in flight.** No widget in this codebase is ever disabled today — this is a **new** convention, not one to copy. Re-enable it from the `_safe_after` callback, including on the failure path.
 - **`root.update()` must not appear anywhere in the new module.**
+- **The scan is all-or-nothing today, and that is a guard-facing bug.** `gui/wizard/scanning.py:28-30` wraps the *whole* sweep in `except Exception: cams = []`, so a single flaky virtual-camera driver failing mid-sweep discards every camera already found — the guard has two working cameras and is told none exist. Found 2026-07-30 while implementing Task 1; deliberately not fixed there because per-device exception swallowing inside `scan_cameras` would have been untested new behaviour outside that task's brief. Fix it here or in a follow-up: catch per device, keep the hits, and let the copy distinguish "found nothing" from "some devices failed".
 
 - [ ] **Step 1:** Build the window against `WizardFlow`; keep all logic in `flow.py`/`connection.py` so `window.py` holds only rendering.
 - [ ] **Step 2:** Strip `frame` off every camera dict before `save_config` — see Task 7.
