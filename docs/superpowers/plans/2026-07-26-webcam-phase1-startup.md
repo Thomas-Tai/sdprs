@@ -4,7 +4,7 @@
 
 **Goal:** Cut `SDPRS_Webcam.exe` warm start from 39.4 s to ≤20 s, and replace ~40 s of blank screen with a splash inside 3 s — without changing any existing UI layout.
 
-**Architecture:** Two independent tracks. (1) *Packaging* — the onefile payload is 409 MB and is re-extracted to `%TEMP%` on every launch, so payload size **is** startup time; we cut it to ≤200 MB by swapping ffmpeg full→essentials and dropping binaries this client provably never calls, then add a PyInstaller `Splash` so the bootloader paints something during extraction. (2) *Runtime* — a named-mutex single-instance guard, rotating file logging with API-key redaction, and reordering `main()` so the tray icon appears before cameras are opened.
+**Architecture:** Two independent tracks. (1) *Packaging* — the onefile payload is 409 MB and is re-extracted to `%TEMP%` on every launch, so payload size **is** startup time; we cut it to ≤250 MB (**revised from the ≤200 MB drafted here** — see spec §5.3 and the Task 6 Step 3 note below) by swapping ffmpeg full→essentials and dropping binaries this client provably never calls, then add a PyInstaller `Splash` so the bootloader paints something during extraction. (2) *Runtime* — a named-mutex single-instance guard, rotating file logging with API-key redaction, and reordering `main()` so the tray icon appears before cameras are opened.
 
 **Tech Stack:** Python 3.14, PyInstaller 6.21, ctypes/kernel32, `logging.handlers.RotatingFileHandler`, Pillow (asset generation only), pytest.
 
@@ -30,7 +30,7 @@
 | `webcam_client/logging_setup.py` | *new* — rotating file handler + secret redaction |
 | `webcam_client/assets/make_assets.py` | *new* — regenerates icon/splash from code |
 | `webcam_client/assets/sdprs.ico`, `splash.png` | *new* — generated, committed |
-| `webcam_client/tools/payload_audit.py` | *new* — per-component payload sizing (makes the ≤200 MB criterion re-runnable) |
+| `webcam_client/tools/payload_audit.py` | *new* — per-component payload sizing (makes the payload criterion re-runnable) |
 | `webcam_client/main.py` | *modify* — startup order, splash close |
 | `webcam_client/build.spec` | *modify* — ffmpeg resolution + size guard, binary excludes, Splash, icon |
 | `webcam_client/tests/test_single_instance.py` | *new* |
@@ -1257,14 +1257,31 @@ export SDPRS_FFMPEG="<path printed above>"
 ```bash
 cd webcam_client && /c/Python314/python -m PyInstaller build.spec --noconfirm
 ```
-Expected: the build log prints `[build.spec] ffmpeg 85 MB from ...` (a number ≤120) and `[build.spec] dropped N excluded binaries` with N ≥ 2. **If it prints the oversized-ffmpeg WARNING banner, stop and fix `SDPRS_FFMPEG` before continuing** — the measurement below will be meaningless otherwise.
+Expected: the build log prints `[build.spec] ffmpeg 85 MB from ...` (a number ≤120) and a `[build.spec] dropped N excluded binaries` line. **If it prints the oversized-ffmpeg WARNING banner, stop and fix `SDPRS_FFMPEG` before continuing** — the measurement below will be meaningless otherwise.
+
+> **Do not assert `N ≥ 2` (correction, 2026-07-30).** This draft assumed one dropped
+> entry per name in `EXCLUDED_BINARIES`, but `N` counts entries PyInstaller actually
+> *collected*, which varies by opencv/PIL wheel. On the 2026-07-30 rebuild it printed
+> `dropped 1` and the payload was still correct: verified against
+> `build/build/PKG-00.toc` that **both** `opencv_videoio_ffmpeg` and `_avif` are absent
+> — only one of the two had been collected in the first place. Check the outcome (the
+> names are not in the TOC), never the count.
 
 - [ ] **Step 3: Measure the payload**
 
 ```bash
 cd webcam_client && /c/Python314/python tools/payload_audit.py build/build/PKG-00.toc
 ```
-Expected: `TOTAL (uncompressed)` ≤ **200.0** MB (baseline was 409.4 MB).
+Expected: `TOTAL (uncompressed)` ≤ **250.0** MB (baseline was 409.4 MB).
+
+> **The 200 MB figure in this plan is superseded — use 250 MB (correction, 2026-07-30).**
+> This plan's 200 MB was derived from an assumed ~85 MB ffmpeg essentials build; the real
+> `Gyan.FFmpeg.Essentials` binary measures 101.5 MB, and the draft's own subtraction was
+> wrong besides (even at 85 MB the arithmetic gives ~211 MB, not the 190 MB written here).
+> `docs/superpowers/specs/2026-07-26-webcam-startup-and-guard-ux-design.md` §5.3 re-derived
+> the target to **≤250 MB** during Phase 1 and recorded the component arithmetic.
+> Measured 2026-07-30 (Phase 2 rebuild): **247.5 MB — meets the revised target**, with only
+> ~2.5 MB (≈1%) of headroom. Treat any future growth in cv2/numpy as a gate breach.
 
 - [ ] **Step 4: Measure startup, same harness as the baseline**
 
@@ -1326,7 +1343,35 @@ git commit -m "docs(webcam): record measured Phase 1 startup results"
 
 ---
 
-### Task 7 (OPTIONAL, may be abandoned): drop OpenBLAS
+### Task 7 — ATTEMPTED AND REJECTED 2026-07-30. Do not retry. ~~(OPTIONAL, may be abandoned): drop OpenBLAS~~
+
+> **VERDICT: rejected on evidence. The steps below were executed in full; do not run them again.**
+>
+> Task 6 missed the ≤200 MB figure drafted here (measured 247.5 MB), which per Step
+> "attempt only if…" made this task live, so it was carried out on 2026-07-30.
+>
+> - **Static:** `libscipy_openblas64_*.dll` is a **hard, non-delay-loaded import-table
+>   entry** of `numpy/_core/_multiarray_umath.cp314-win_amd64.pyd`. The Windows loader
+>   must resolve it before any Python code runs — there is no lazy path to exploit.
+> - **Dynamic:** with the exclusion added, the build **succeeded**
+>   (`dropped 2 excluded binaries`) and the payload fell to **227.1 MB**, matching the
+>   spec's 226.7 MB prediction. The exe then died on launch with
+>   `ImportError: DLL load failed while importing _multiarray_umath`, via
+>   `app.py → webcam_client.main → gui/setup_wizard → camera_manager → import cv2 →
+>   import numpy`. **cv2 hard-depends on numpy, so this is total startup failure**, not
+>   a degraded feature.
+> - **Reverted**, per Step 3: `EXCLUDED_BINARIES` is back to
+>   `('opencv_videoio_ffmpeg', '_avif')`, with a `DO NOT ADD` comment and the reasoning
+>   left in `buildconfig.py` itself. Restored exe: `--check` → `exit=0`, 7 consecutive runs.
+> - **Gotcha for whoever touches this next:** the crashed onefile exe leaves its
+>   bootloader process resident **holding a lock on `dist/SDPRS_Webcam.exe`** (overwriting
+>   gives *Device or resource busy*; `tasklist` shows 2 PIDs). `taskkill /F /IM
+>   SDPRS_Webcam.exe` before replacing the file.
+>
+> Consequence: **247.5 MB is the floor for this feature set.** The two largest remaining
+> items are ffmpeg 101.5 MB (already the essentials build) and cv2 74.5 MB (OpenCV
+> itself). Going lower is an architecture decision (replace cv2, or stop bundling ffmpeg),
+> not a packaging tweak. Full write-up in spec §5.3.
 
 **Files:**
 - Modify: `webcam_client/build.spec` (`_EXCLUDED_BINARIES`)

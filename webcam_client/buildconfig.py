@@ -32,6 +32,16 @@ FFMPEG_MAX_MB = 120
 #                                   i/o anywhere.
 #   _avif                    7.8MB  PIL AVIF codec. PIL draws a 64x64 tray
 #                                   circle and one Tk thumbnail.
+#   libscipy_openblas64_*   20.4MB  DO NOT ADD. Attempted and rejected
+#                                   2026-07-30: it is a hard (non-delay-loaded)
+#                                   import-table entry of numpy's
+#                                   _multiarray_umath.pyd, so the Windows loader
+#                                   needs it before any Python runs. Excluding it
+#                                   builds fine and cuts the payload to 227.1 MB,
+#                                   then the exe dies at startup with "DLL load
+#                                   failed while importing _multiarray_umath"
+#                                   (cv2 imports numpy). 20 MB is not worth the
+#                                   client failing to start.
 EXCLUDED_BINARIES = ('opencv_videoio_ffmpeg', '_avif')
 
 

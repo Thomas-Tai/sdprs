@@ -199,6 +199,24 @@ mutex 取得（失敗 → 顯示「SDPRS 監控已在執行中」並喚起既有
 | Splash 出現 | 不存在 | **≤ 3 s** | 程式化輪詢：PowerShell `Get-Process`／`Get-CimInstance` 每 100ms 檢查一次 `SDPRS_Webcam.exe` 各行程的 `MainWindowHandle`，非碼錶或螢幕錄影 | **約 0.45–0.49 s（2026-07-26 fix round 1 重新量測，兩次獨立乾淨量測，含 PID/PPID 逐筆記錄）— 達標**，遠低於 3 s 門檻；詳見下方「splash 行程歸屬」說明 |
 | — | — | — | — | — |
 
+**Phase 2 重新量測（2026-07-30，branch `feat/webcam-truthful-status` @ `956b90b`）**
+
+Phase 2 動到 `status.py` / `main.py` / `app_controller.py` / `control_channel.py`，
+所以重跑 packaging 與啟動量測當回歸檢查。結論：**無回歸**。
+
+| 指標 | Phase 1（2026-07-26） | Phase 2（2026-07-30） | 目標 | 判定 |
+|---|---:|---:|---:|---|
+| Payload 解壓 | 247.5 MB | **247.5 MB** | ≤250 MB | 達標，數字未動 |
+| exe 檔案大小 | — | 95,750,666 bytes | — | — |
+| `--check` 暖啟動（收斂值） | 18.22 s | **15.1–16.2 s** | ≤25 s | 達標 |
+
+暖啟動這次跑 **7 次**而非 3 次，因為前 3 次還沒收斂：
+`47.35 / 39.16 / 25.11 / 15.34 / 15.11 / 16.15 / 16.15 s`（全部 `exit=0`）。
+第 3 次的 25.11 s 若照原本 3 次 harness 就會被記成「剛好超過 ≤25 s 門檻」，
+但那是量測污染——該次之前剛用 `cp` 覆寫過 exe 並跑過一個壞 build，
+Defender 正在重掃全新 payload。**教訓：3 次 harness 不足以保證收斂；
+量測前若動過 exe 檔案本身，要跑到連續兩次持平才算數。**
+
 **目標修訂（2026-07-26，安裝 essentials build 後實測）**
 
 本文件初稿假設 ffmpeg essentials 約 85 MB，據此把 payload 目標訂為 ≤200 MB。
@@ -213,15 +231,49 @@ mutex 取得（失敗 → 顯示「SDPRS 監控已在執行中」並喚起既有
 | `opencv_videoio_ffmpeg*.dll` | −28.6 |
 | `PIL\_avif.pyd` | −7.8 |
 | **預估結果** | **247.1 MB** |
-| 再加 OpenBLAS（有風險，§3.1） | 226.7 MB |
+| ~~再加 OpenBLAS（有風險，§3.1）~~ | ~~226.7 MB~~ — **已實測並否決，見下** |
 
 （此欄位下方 §5.3 已記錄的實測值 **247.5 MB** 與此處 247.1 MB 的預估非常接近，
 差異在誤差範圍內，可視為互相印證。）
 
 因此目標修訂為 **payload ≤250 MB、暖啟動 ≤25 s**。
-連帶影響：**§5.1.3 的 OpenBLAS 排除從「選配」升為「預期要做」**——它是唯一還能
-再砍 20 MB 的項目。仍然保留「一旦 `import numpy` 失敗就立刻還原」的規則：
-20 MB 不值得賭掉 client 能否啟動。
+
+**OpenBLAS 排除：已實測，永久否決（2026-07-30）**
+
+上一段曾把「§5.1.3 的 OpenBLAS 排除」從選配升為「預期要做」，理由是它是唯一還能
+再砍 20 MB 的項目。**該升級現已撤回——這條路走不通，不要再試。**
+
+證據有兩層，互相印證：
+
+1. **靜態證據（PE import table）**：`libscipy_openblas64_-b78821…dll` 是
+   `numpy/_core/_multiarray_umath.cp314-win_amd64.pyd` 的**硬性（非 delay-load）
+   匯入表項目**。Windows loader 在任何 Python 程式碼執行之前就必須解析它，
+   因此不存在「用不到就不載入」的可能。
+2. **動態證據（實際 build + `--check`）**：把 `'libscipy_openblas'` 加進
+   `buildconfig.EXCLUDED_BINARIES`，build **成功**（`dropped 2 excluded binaries`），
+   payload 降到 **227.1 MB**（與上表預估 226.7 MB 相符），但 exe 一啟動就死：
+
+   ```
+   ImportError: DLL load failed while importing _multiarray_umath:
+                The specified module could not be found.
+   ```
+
+   呼叫鏈是 `app.py` → `webcam_client.main` → `gui/setup_wizard` →
+   `camera_manager` → `import cv2` → `import numpy` → 炸。**cv2 硬性依賴 numpy**，
+   所以這不是「某個邊緣功能壞掉」，而是**整個 client 無法啟動**。
+
+附帶觀察（bench 值得知道）：這個壞掉的 onefile exe **crash 後 bootloader 行程仍然
+駐留並鎖住 `dist/SDPRS_Webcam.exe`**（`cp` 覆蓋時得到 *Device or resource busy*，
+`tasklist` 顯示 2 個 PID）。要覆蓋檔案前得先 `taskkill /F /IM SDPRS_Webcam.exe`。
+
+已還原：`EXCLUDED_BINARIES` 回到 `('opencv_videoio_ffmpeg', '_avif')`，並在
+`buildconfig.py` 就地留下「DO NOT ADD」註解與理由，讓下一個人在改動點上直接看到，
+不必翻文件。還原後的 exe `--check` 連續 7 次全部 `exit=0`。
+
+因此 **247.5 MB 就是這個功能集合下的實際地板**：剩下最大兩項是 ffmpeg 101.5 MB
+（已是 essentials build）與 cv2 74.5 MB（OpenCV 本體），兩者都不可能在不砍功能的
+前提下再縮。若未來要再降，只剩「換掉 cv2」或「不打包 ffmpeg、改為外部相依」這類
+架構決策，不是打包參數微調。
 
 **誠實結論：** 在 onefile 前提下，剩餘 payload 的最大宗是 `cv2.pyd`（74.5 MB，
 單體模組無法拆）與 ffmpeg（約 101.5 MB，除非自行編譯只含 h264+hls 的最小版本）。
