@@ -487,7 +487,7 @@ StartingUp / Running / Paused / NoServer / BadKey / CameraDown
 
 ## 11. 安全約束（沿用，不得違反）
 
-不得硬編任何憑證；`Msc@2333`、`MSC-Person` 不得出現於任何位置；正式路徑不得出現
+不得硬編任何憑證；`Msc@***`、`MSC-***` 不得出現於任何位置；正式路徑不得出現
 `broker.emqx.io`；**不得對 edge 裝置新增 `stream_start` / `stream_stop` 以外的任何指令
 下行介面**。
 

@@ -60,7 +60,7 @@
 **Security constraints** (non-negotiable — this system commands real water pumps):
 
 - No hardcoded credentials of any kind. No WiFi or MQTT passwords in committed source
-- The literals `Msc@2333` and `MSC-Person` must never appear in any file
+- The literals `Msc@***` and `MSC-***` must never appear in any file
 - No `broker.emqx.io` (or any public broker) on a production code path
 - New payload/heartbeat fields are **telemetry-only**. Do not add a downlink or command
   surface to the edge nodes beyond the existing `cmd/*` topic set. The webcam control

@@ -19,7 +19,7 @@
 - **Branch: `feat/webcam-startup-and-guard-ux`** (already created, spec committed at `432f09f`).
 - **Write/Edit tools must use absolute Windows paths** beginning `C:\D\WorkSpace\[Cloud]_Company_Sync\...`.
 - **The API key must never appear in the log file.** New risk introduced by this phase; Task 2 tests it.
-- **Never hardcode credentials.** `Msc@2333` and `MSC-Person` must not appear anywhere; `broker.emqx.io` must not appear on a production path.
+- **Never hardcode credentials.** `Msc@***` and `MSC-***` must not appear anywhere; `broker.emqx.io` must not appear on a production path.
 - **Do not add any downlink command interface to edge devices** beyond the existing `stream_start` / `stream_stop`. This phase is client-side only and touches none of it.
 
 ## File Structure

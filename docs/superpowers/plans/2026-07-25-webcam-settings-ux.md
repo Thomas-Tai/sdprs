@@ -15,7 +15,7 @@
 - Packaging stays **single-file (onefile)** — no onedir, no `COLLECT`. (User decision.)
 - Settings apply **in-process, no app restart**. (User decision.)
 - All UI strings are **Traditional Chinese (zh-TW)**.
-- Security (verbatim, must hold): **no hardcoded credentials of any kind**; the literal strings `Msc@2333` and `MSC-Person` must **NEVER** appear anywhere; no `broker.emqx.io` in any production path; **do NOT add any new command/downlink surface to edge devices beyond the existing `stream_start` / `stream_stop`**. This work is client-side and touches none of these — keep it that way.
+- Security (verbatim, must hold): **no hardcoded credentials of any kind**; the literal strings `Msc@***` and `MSC-***` must **NEVER** appear anywhere; no `broker.emqx.io` in any production path; **do NOT add any new command/downlink surface to edge devices beyond the existing `stream_start` / `stream_stop`**. This work is client-side and touches none of these — keep it that way.
 - Working dir for all commands: `sdprs/`. Branch: `feat/webcam-settings-ux` (spec already committed there).
 
 ---
