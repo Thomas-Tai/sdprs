@@ -11,6 +11,7 @@ In-memory + on-disk state for the webcam-client HLS relay:
 """
 import asyncio
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -42,7 +43,33 @@ LEASE_TTL_SECONDS = 90   # spec §391: survives two missed 30s renews (one netwo
 _command_queue_activity: Dict[str, float] = {}
 
 
+# node_id reaches these helpers from a URL path segment. Every router caller
+# checks camera ownership first and webcam node_ids are server-assigned, so a
+# hostile value cannot arrive today -- but store_hls_segment calls get_hls_dir
+# BEFORE its containment check on the target file, so that check has never
+# protected the mkdir, and cleanup_hls_dir hands the same unchecked value to
+# shutil.rmtree. One new caller that skips the ownership guard turns those into
+# arbitrary mkdir and arbitrary tree deletion. Same char class verify_node_id
+# uses on the edge side (auth.py), for the same reason.
+_NODE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _safe_node_id(node_id: str) -> str:
+    """Return node_id if it can only ever name a direct child of the HLS root.
+
+    Rejects rather than sanitises: a value that is not a plain path component
+    is a bug or an attack, and quietly rewriting it would hide both.
+    """
+    if not isinstance(node_id, str) or not _NODE_ID_RE.match(node_id):
+        raise ValueError(f"Refusing to use an unsafe node_id for HLS storage: {node_id!r}")
+    # `.` and `..` pass the char class (both are made of allowed characters).
+    if node_id in (".", ".."):
+        raise ValueError(f"Refusing to use an unsafe node_id for HLS storage: {node_id!r}")
+    return node_id
+
+
 def get_hls_dir(node_id: str) -> Path:
+    node_id = _safe_node_id(node_id)
     settings = get_settings()
     base = Path(settings.HLS_STORAGE_PATH)
     base.mkdir(parents=True, exist_ok=True)
@@ -100,6 +127,7 @@ def get_hls_file(node_id: str, filename: str) -> Optional[bytes]:
 
 
 def cleanup_hls_dir(node_id: str) -> None:
+    node_id = _safe_node_id(node_id)
     settings = get_settings()
     base = Path(settings.HLS_STORAGE_PATH)
     node_dir = base / node_id

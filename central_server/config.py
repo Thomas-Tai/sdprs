@@ -124,6 +124,14 @@ if PYDANTIC_AVAILABLE:
         HLS_MAX_SEGMENTS: int = 5
         HLS_VIEWER_TIMEOUT_SECONDS: int = 300
 
+        # Hard ceiling on a request body, enforced by BodySizeLimitMiddleware
+        # BEFORE anything buffers it. Must stay ABOVE the per-file cap in
+        # alerts.upload_video (100 MB): this is the coarse gate that protects
+        # the multipart parser, and the handler's own check is the exact
+        # file-level limit. Setting it below the file cap would reject every
+        # legitimate maximum-size clip.
+        MAX_UPLOAD_BYTES: int = 110 * 1024 * 1024
+
         class Config:
             env_file = ".env"
             env_file_encoding = "utf-8"
@@ -197,6 +205,7 @@ else:
         HLS_STORAGE_PATH: str
         HLS_MAX_SEGMENTS: int
         HLS_VIEWER_TIMEOUT_SECONDS: int
+        MAX_UPLOAD_BYTES: int
 
         def __init__(self):
             self.DASHBOARD_USER = _get_env_str("DASHBOARD_USER", required=True)
@@ -230,6 +239,7 @@ else:
             self.HLS_STORAGE_PATH = _get_env_str("HLS_STORAGE_PATH", "./storage/hls")
             self.HLS_MAX_SEGMENTS = _get_env_int("HLS_MAX_SEGMENTS", 5)
             self.HLS_VIEWER_TIMEOUT_SECONDS = _get_env_int("HLS_VIEWER_TIMEOUT_SECONDS", 300)
+            self.MAX_UPLOAD_BYTES = _get_env_int("MAX_UPLOAD_BYTES", 110 * 1024 * 1024)
 
 
 @lru_cache()

@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -160,6 +161,101 @@ async def lifespan(app: FastAPI):
 SECRET_KEY = get_settings().SECRET_KEY
 
 
+# ===== Request body size gate (Storage-H, 2026-07-30) =====
+class BodySizeLimitMiddleware:
+    """Refuse an over-sized request body BEFORE anything buffers it.
+
+    WHY THIS CANNOT LIVE IN THE ENDPOINT
+        `alerts.upload_video` checked `file.size > 100 MB` in the handler. By
+        the time a FastAPI handler runs, Starlette has already parsed the whole
+        multipart body and spooled it to a temp file -- and
+        `MultiPartParser.max_part_size` (1 MB) applies ONLY to non-file parts
+        (`formparsers.py`: `if self._current_part.file is None`), so file parts
+        stream with no cap at all. The handler check therefore prevented
+        *storing* an oversized upload but never *receiving* one: a client
+        holding the shared edge key could fill the server disk and be told 413
+        afterwards. The only place to stop that is ASGI level, which is here.
+
+        The handler's own 100 MB check stays. Two layers, different jobs: this
+        one is the coarse gate protecting the parser, that one is the exact
+        per-file limit. MAX_UPLOAD_BYTES must stay above it (see config.py).
+
+    Pure ASGI, not BaseHTTPMiddleware, because BaseHTTPMiddleware gives no
+    access to the receive channel -- and intercepting the body as it streams is
+    exactly the job.
+
+    Two gates, because either alone leaks:
+      1. A declared `content-length` over the limit is rejected outright, which
+         costs nothing and catches every honest client and most hostile ones.
+      2. A chunked body declares no length, so the bytes are counted as they
+         arrive and the stream is cut the moment it goes over. Without this,
+         omitting one header defeats gate 1 entirely.
+    """
+
+    def __init__(self, app, max_bytes: int = 0):
+        self.app = app
+        self._max_bytes = max_bytes
+
+    @staticmethod
+    async def _reject(scope, send) -> None:
+        async def _noop_receive():  # Response.__call__ takes one but never uses it
+            return {"type": "http.disconnect"}
+        response = PlainTextResponse("Request body too large", status_code=413)
+        await response(scope, _noop_receive, send)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        # Read at request time, not import time, so a config change (and the
+        # test suite's monkeypatched env) takes effect without a restart.
+        limit = self._max_bytes or get_settings().MAX_UPLOAD_BYTES
+        if limit <= 0:
+            return await self.app(scope, receive, send)
+
+        declared = Headers(scope=scope).get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > limit:
+                    return await self._reject(scope, send)
+            except ValueError:
+                pass  # malformed header: fall through to the streaming counter
+
+        received = 0
+        exceeded = False
+        started = False
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    exceeded = True
+                    # Presenting a disconnect is what stops the parser cold. It
+                    # will raise; we swallow that below and answer 413 ourselves
+                    # rather than letting a 400 "malformed body" surface, which
+                    # would send an operator hunting the wrong problem.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            nonlocal started
+            if exceeded and not started:
+                return
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not exceeded:
+                raise
+        if exceeded and not started:
+            await self._reject(scope, send)
+
+
 # ===== CSRF Origin gate (Auth-E1, 2026-07-16) =====
 # Defense-in-depth backup to the SessionMiddleware same_site="lax" cookie flag.
 # For POST/PUT/PATCH/DELETE requests to /api/* and /logout, require the Origin
@@ -284,6 +380,13 @@ app.add_middleware(
 # → route. This is what lets the CSRF check reject a cross-site POST before
 # any route dependency (get_current_user, DB access, etc.) even runs.
 app.add_middleware(CSRFOriginMiddleware)
+
+# Body-size gate goes on LAST, which makes it the OUTERMOST middleware --
+# ahead of CSRF, ahead of the session, ahead of every route dependency. That
+# ordering is the whole point: the limit has to bite before auth, or an
+# unauthenticated client can still push an unbounded body through the parser
+# and only then be told 401.
+app.add_middleware(BodySizeLimitMiddleware)
 
 # Get the directory where this file is located
 BASE_DIR = Path(__file__).resolve().parent

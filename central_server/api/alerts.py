@@ -220,12 +220,28 @@ async def upload_video(
     """
     logger.info(f"Uploading video for alert {alert_id}, filename={file.filename}")
     
-    # Validate file size (max 100 MB)
+    # Exact per-file cap. The coarse gate that stops an unbounded body from
+    # being buffered at all is BodySizeLimitMiddleware (main.py) -- it has to
+    # be, because by the time this handler runs Starlette has already parsed
+    # and spooled the whole multipart body. This check is the precise limit on
+    # what gets STORED; that one is what stops it being RECEIVED.
     MAX_VIDEO_SIZE = 100 * 1024 * 1024
     if file.size and file.size > MAX_VIDEO_SIZE:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Video file too large (max {MAX_VIDEO_SIZE // (1024*1024)} MB)"
+        )
+
+    # An empty part is not a video. `if file.size and ...` above is falsy at
+    # size 0, so a 0-byte upload used to sail through, write an empty file, and
+    # flip the alert out of PENDING_VIDEO -- the operator then opens a clip that
+    # does not exist, and the alert has lied about its own completeness. Reject
+    # it and leave the status alone so a real upload can still arrive.
+    if file.size is not None and file.size == 0:
+        logger.warning(f"Rejected 0-byte video upload for alert {alert_id}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty video file"
         )
     
     # Validate MIME type
