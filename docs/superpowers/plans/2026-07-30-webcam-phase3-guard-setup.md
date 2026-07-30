@@ -236,11 +236,16 @@ Both must be closed here, with tests.
 **Per-item requirements:**
 - **U5** — the camera list goes in a `Canvas` + `Scrollbar`. `gui/setup_wizard.py:171` currently sets `resizable(False, False)` with no scroll region, so six cameras render off the bottom of the screen with no way to reach 開始.
 - **U8** — `<Return>` confirms, `<Escape>` cancels, `focus_set()` on 連線位址 at open. Zero such bindings exist today.
-- **U11** — cancel is currently a bare `command=root.destroy` (`:320`). It must explain the consequence (監控不會啟動) and say how to get back here (the tray 設定 menu item, named via `strings.BTN_SETTINGS`, not retyped).
+- **U11** — cancel is currently a bare `command=root.destroy` (`:320`). It must explain the consequence and say how to get back here.
+  **Corrected 2026-07-30 — the single message this plan originally specified would have been false in BOTH modes**, verified against `main.py:456-459` and `:536`:
+  - *First run:* cancel makes the wizard return `None` and `main()` **returns before `TrayApp` is ever constructed**. There is no tray icon. Copy that names the tray 設定 menu item sends the guard hunting for something that does not exist. → `WIZ_CONFIRM_CANCEL` says the program closes and the way back is to open it again.
+  - *Edit mode:* the tray **is** up and cancelling stops nothing, so 「監控不會啟動」 is a lie. → `WIZ_CONFIRM_CANCEL_EDIT` says monitoring continues on the previous settings, and names the tray 設定 item, which there genuinely exists.
+  Both constants exist and are tested. The window must pick by `mode`. (The alternative — change `main.py` so a first-run cancel does not exit — is a product decision, not an implementation one; not taken.)
 - **U12** — a 顯示 toggle flipping `show="*"` (`:183`) to `show=""`. Default masked.
 - **Confirm button label stays mode-dependent** (`:317`: `BTN_WIZARD_SAVE` in edit mode, else `BTN_WIZARD_START`). This is deliberate and is a bench item — do not collapse it to one label.
 - **The confirm button must be disabled while a network call is in flight.** No widget in this codebase is ever disabled today — this is a **new** convention, not one to copy. Re-enable it from the `_safe_after` callback, including on the failure path.
 - **`root.update()` must not appear anywhere in the new module.**
+- **Suppress the count line when the list is empty.** Today the status line says 「找到 0 支攝影機」 while `_render` simultaneously shows `WIZ_NO_CAMERA_FOUND` — two messages about the same nothing, one of which is a number the guard cannot act on.
 - **The scan is all-or-nothing today, and that is a guard-facing bug.** `gui/wizard/scanning.py:28-30` wraps the *whole* sweep in `except Exception: cams = []`, so a single flaky virtual-camera driver failing mid-sweep discards every camera already found — the guard has two working cameras and is told none exist. Found 2026-07-30 while implementing Task 1; deliberately not fixed there because per-device exception swallowing inside `scan_cameras` would have been untested new behaviour outside that task's brief. Fix it here or in a follow-up: catch per device, keep the hits, and let the copy distinguish "found nothing" from "some devices failed".
 
 - [ ] **Step 1:** Build the window against `WizardFlow`; keep all logic in `flow.py`/`connection.py` so `window.py` holds only rendering.

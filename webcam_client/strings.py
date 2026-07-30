@@ -87,6 +87,104 @@ WIZ_SERVER_REFUSED = (f"伺服器拒絕了這次設定。請確認「{LBL_SERVER
                       f"仍然失敗請通知管理員「攝影機登記不成功」。")
 WIZ_BAD_RESPONSE = "伺服器的回覆無法辨識，設定沒有完成。請通知管理員「攝影機登記回應異常」。"
 
+# --- The guided setup page: three numbered sections ------------------------
+# The window used to be two unnumbered LabelFrames titled 伺服器連線 and 攝影機
+# -- a layout that assumes the reader already knows setup has an order. The
+# guard doing this is the same person who will work the night shift with it,
+# and they meet it once. Numbering the sections is the whole navigation aid:
+# it says how many steps there are, which one you are on, and that there is an
+# end. 伺服器連線 also leaked the machine's role into a heading no guard needs
+# to reason about -- they are connecting, not administering a server.
+WIZ_SECTION_CONNECT = "1 連線"
+WIZ_SECTION_CAMERAS = "2 選擇要監控的攝影機"
+WIZ_SECTION_START = "3 開始監控"
+
+# Field and control labels. No trailing colon: the widget appends 「：」 the way
+# LBL_SERVER_URL / LBL_API_KEY already are at their call sites, so the colon
+# style stays in one place instead of being baked into half the constants.
+LBL_CAMERA_NAME = "名稱"
+BTN_WIZARD_TEST = "測試連線"
+BTN_REVEAL_KEY = "顯示"
+CHK_AUTOSTART = "開機時自動啟動"
+
+# Camera row labels. str.format templates, NOT finished strings, matching the
+# _TEXT table's convention -- and there is a second reason here. The constant
+# scan in tests bans any bare 3-digit number in 100-599 (it is how a status
+# code leaks), and a resolution written out as "640x480" trips it on the 480.
+# Keeping width and height as placeholders means the literal carries no digits
+# at all, so the check stays strict without the copy having to lie about what
+# it shows. Three call sites share WIZ_CAMERA_LABEL -- the checkbox subtitle,
+# the default value of the 名稱 box, and the fallback used when the guard
+# clears that box -- so a rename cannot leave the three disagreeing.
+WIZ_CAMERA_LABEL = "攝影機 {index}"
+WIZ_CAMERA_LABEL_WITH_SIZE = "攝影機 {index}（畫面 {width}x{height}）"
+WIZ_SCAN_FOUND = "找到 {count} 支攝影機"
+
+# In-progress lines. 掃描中 / 連線中 became 正在… ，請稍候: the old form states a
+# mode, this one states that waiting is the correct thing to do. A full sweep
+# takes seconds, and a guard who reads a bare 掃描中... presses the button
+# again. 掃描 itself is also mildly technical; 尋找攝影機 is not.
+WIZ_SCANNING = "正在尋找攝影機，請稍候…"
+WIZ_CONNECTING = "正在連線，請稍候…"
+
+# 測試連線 exists so the guard can prove the address and password before they
+# have chosen a single camera -- the old window only found out at 開始, after
+# the guard had done all the work, and then threw all of it away behind a
+# modal. Only the two OUTCOMES that are new live here. Its failures are the
+# SAME two faults the save path already names, so they reuse
+# WIZ_KEY_REJECTED and WIZ_CANNOT_REACH_SERVER rather than getting a second
+# wording: one fault with two spellings is precisely what this module exists
+# to prevent, and the drift would be invisible because each is only reachable
+# down its own branch.
+WIZ_TEST_IN_PROGRESS = "正在測試連線，請稍候…"
+WIZ_TEST_OK = f"連線成功。請接著完成「{WIZ_SECTION_CAMERAS}」。"
+
+# The password box is masked, and the guard may well be typing a key an
+# administrator read out to them over the phone. Masked + typed-from-dictation
+# is the combination that produces a rejection the guard cannot diagnose,
+# because the one thing that would settle it -- looking at what they typed --
+# is the one thing the field forbids.
+WIZ_REVEAL_KEY_HINT = (f"「{LBL_API_KEY}」預設會遮起來。"
+                       f"想確認有沒有打錯，請按「{BTN_REVEAL_KEY}」。")
+
+# A camera sitting past a gap in the device indices is missed by the quick
+# scan, and the guard's evidence is simply "mine isn't in the list" -- a state
+# with no error and no message, which is why it needs copy at all. Physical
+# action first (same rule as camera_down), and no 管理員: a missing camera is
+# very often an unseated cable, and escalating on the first try would turn
+# every one of those into a phone call. WIZ_NO_CAMERA_FOUND still carries the
+# escalation for the case where nothing is found at all.
+WIZ_RESCAN_HINT = (f"清單裡少了某一支攝影機？請先確認它的 USB 線已插好，"
+                   f"再按「{BTN_WIZARD_RESCAN}」重新找一次；"
+                   f"這會多花幾秒，請等它跑完。")
+
+# autostart.py writes a Run entry; config defaults it to False. Worth
+# recommending in words rather than just defaulting it on, because the reason
+# is one only the guard can weigh: the site loses power, and without this
+# nothing restarts monitoring until a person walks to the machine.
+WIZ_AUTOSTART_HINT = (f"建議勾選「{CHK_AUTOSTART}」。勾選後這台電腦一開機就會自己"
+                      f"開始監控，停電後電力恢復也不必有人來按。")
+
+# Cancel is TWO messages because it has two consequences, and one text would
+# have to be false about one of them.
+#
+# On a first run, main() takes run_setup_wizard() returning None and returns
+# immediately -- before TrayApp is ever constructed. There is no tray icon
+# afterwards, so telling the guard to right-click one and choose 設定 sends
+# them hunting for something that is not on the screen. The program closing is
+# itself the fact they need, so the first-run text says that and names the only
+# way back that actually exists: open it again.
+#
+# In edit mode the tray is already running and cancelling changes nothing --
+# monitoring carries on with the settings it already had. 監控不會啟動 would be
+# a lie there, so that variant states what is really at stake (the edits) and
+# CAN name the tray item, because this time there is one.
+WIZ_CONFIRM_CANCEL = ("取消就不會儲存這次的設定，監控不會啟動，畫面也不會上傳。"
+                      "取消後這個程式會關閉；要重新設定，請再開啟一次這個程式。")
+WIZ_CONFIRM_CANCEL_EDIT = (f"取消就不會儲存這次的修改，監控會繼續照原本的設定執行。"
+                           f"要再回來修改，請在螢幕右下角的圖示上按滑鼠右鍵，"
+                           f"選「{BTN_SETTINGS}」。")
+
 # Shown when 開啟記錄檔 cannot hand the folder to the shell. The guard pressing
 # this button is almost always already on the phone with a technician who asked
 # for it, so a button that silently does nothing leaves them with nothing to
