@@ -527,3 +527,153 @@ def test_this_module_inlines_no_operator_copy():
             assert not re.search(_CJK_RE, node.value), (
                 f"operator copy inlined at line {node.lineno}: {node.value!r} -- "
                 "every guard-visible message must be a strings.* constant")
+
+
+# ==========================================================================
+# Migrated from test_setup_wizard.py when the transitional façade was deleted.
+# These assertions predate the split and are the reason several behaviours
+# above exist; they keep their original comments so the record of WHY each was
+# written does not disappear with the file it came from.
+# ==========================================================================
+
+# --- URL normalization -----------------------------------------------------
+# The trigger: a schemeless URL made httpx raise UnsupportedProtocol, which is
+# NOT an httpx.ConnectError, so it escaped the bare `except httpx.ConnectError`
+# as an unhandled Tk-callback exception -> swallowed to stderr -> in a
+# console=False exe the button simply "did nothing".
+
+def test_normalize_prepends_http_when_scheme_missing():
+    # THE trigger: user pastes host:port with no scheme.
+    assert conn.normalize_server_url("localhost:8000") == "http://localhost:8000"
+    assert conn.normalize_server_url(" 192.168.1.50:8000/ ") == "http://192.168.1.50:8000"
+    assert conn.normalize_server_url("myapp.zeabur.app") == "http://myapp.zeabur.app"
+
+
+def test_normalize_keeps_explicit_scheme_and_strips_trailing_slash():
+    assert conn.normalize_server_url("https://app.zeabur.app/") == "https://app.zeabur.app"
+    assert conn.normalize_server_url("http://localhost:8000") == "http://localhost:8000"
+
+
+# --- Re-home cameras when the client identity changes ----------------------
+# The idempotent register_cameras keeps a camera's existing node_id so repeated
+# edits under the SAME client do not mint duplicate dashboard tiles. But a
+# node_id is owned by the client that registered it: if the operator changes the
+# API Key (or Server URL) in the settings window, the key now authenticates as a
+# DIFFERENT webcam client, and reusing the old node_ids makes the server reject
+# every snapshot/command with 403 "Camera not owned by this client". So when the
+# identity changes, the old node_ids must be dropped and the cameras
+# re-registered under the new client.
+
+def test_identity_unchanged_when_url_and_key_match():
+    cfg = {"server_url": "https://msc-sdprs.zeabur.app", "api_key": "sk-webcam-aaa"}
+    assert conn._client_identity_changed(cfg, "https://msc-sdprs.zeabur.app",
+                                         "sk-webcam-aaa") is False
+    # config server_url is stored normalized; a trailing slash on input still matches
+    assert conn._client_identity_changed(
+        cfg, conn.normalize_server_url("https://msc-sdprs.zeabur.app/"),
+        "sk-webcam-aaa") is False
+
+
+def test_identity_changed_when_key_or_url_differs():
+    cfg = {"server_url": "https://msc-sdprs.zeabur.app", "api_key": "sk-webcam-aaa"}
+    assert conn._client_identity_changed(cfg, "https://msc-sdprs.zeabur.app",
+                                         "sk-webcam-BBB") is True
+    assert conn._client_identity_changed(cfg, "https://other.example.com",
+                                         "sk-webcam-aaa") is True
+    # first-run: no prior config -> treated as changed (harmless; rows have no node_id)
+    assert conn._client_identity_changed({}, "https://x", "sk-webcam-aaa") is True
+
+
+def test_build_cameras_preserves_node_id_only_when_identity_unchanged():
+    rows = [{"device_index": 0, "name": "前門", "node_id": "webcam_b4a4f203"}]
+    # same client -> keep node_id (idempotent, no duplicate tile)
+    kept = conn._build_cameras_for_registration(rows, identity_changed=False)
+    assert kept[0]["node_id"] == "webcam_b4a4f203"
+    assert kept[0]["name"] == "前門" and kept[0]["device_index"] == 0
+    assert kept[0]["resolution"] == [640, 480]
+    # identity changed -> DROP node_id so it re-registers under the new client
+    rehomed = conn._build_cameras_for_registration(rows, identity_changed=True)
+    assert "node_id" not in rehomed[0]
+    assert rehomed[0]["name"] == "前門" and rehomed[0]["device_index"] == 0
+
+
+def test_build_cameras_never_invents_node_id_for_new_rows():
+    rows = [{"device_index": 1, "name": "後門", "node_id": None}]
+    for changed in (False, True):
+        out = conn._build_cameras_for_registration(rows, identity_changed=changed)
+        assert "node_id" not in out[0]
+
+
+# --- register_cameras: every failure becomes a message, never a raise ------
+
+def test_register_cameras_returns_message_not_raises_on_schemeless_or_transport_error():
+    # The exact bug: a non-ConnectError httpx error must NOT escape.
+    for exc in (httpx.UnsupportedProtocol("no scheme"),
+                httpx.ConnectTimeout("timed out"),
+                httpx.ConnectError("refused")):
+        with patch("webcam_client.gui.wizard.connection.httpx.post", side_effect=exc):
+            cams, err = conn.register_cameras("http://x", "k", [{"device_index": 0}])
+        assert cams is None
+        # Asserted against the constant, not a phrase: the message itself is
+        # operator copy and may be rewritten, but it must always be THE
+        # connection-failure message and must never carry the exception repr,
+        # whose text is English ("All connection attempts failed") and blames
+        # the server for what is usually a mistyped address.
+        assert err == strings.WIZ_CANNOT_REACH_SERVER, (exc, err)
+        assert str(exc) not in err, "the exception repr must go to the log, not the guard"
+
+
+def test_register_cameras_maps_401_and_other_status():
+    with patch("webcam_client.gui.wizard.connection.httpx.post",
+               return_value=MagicMock(status_code=401)):
+        cams, err = conn.register_cameras("http://x", "k", [{"device_index": 0}])
+    assert cams is None and err == strings.WIZ_KEY_REJECTED
+
+    with patch("webcam_client.gui.wizard.connection.httpx.post",
+               return_value=MagicMock(status_code=500)):
+        cams, err = conn.register_cameras("http://x", "k", [{"device_index": 0}])
+    # Inverted deliberately. This once asserted `"500" in err`, which did not
+    # merely miss the leak -- it REQUIRED it, so anyone cleaning up the copy got
+    # a red test telling them the guard needs the status code. That is why this
+    # line survived the operator copy pass that rewrote the statement above it.
+    # The code is not lost: register_cameras logs it for the technician.
+    assert cams is None
+    assert "500" not in err, f"the guard must never be shown a status code: {err!r}"
+    assert err == strings.WIZ_SERVER_REFUSED
+
+
+def test_register_cameras_non_json_201_is_reported_not_raised():
+    resp = MagicMock(status_code=201)
+    resp.json.side_effect = ValueError("not json")
+    with patch("webcam_client.gui.wizard.connection.httpx.post", return_value=resp):
+        cams, err = conn.register_cameras("http://x", "k", [{"device_index": 0}])
+    assert cams is None and err == strings.WIZ_BAD_RESPONSE
+
+
+# --- register_cameras is idempotent ---------------------------------------
+
+def test_register_skips_post_when_all_cameras_already_registered():
+    # Editing settings must NOT re-register already-known cameras (that minted a
+    # fresh node_id each edit -> duplicate dashboard tiles).
+    selected = [{"device_index": 0, "node_id": "webcam_a", "name": "A"}]
+    with patch("webcam_client.gui.wizard.connection.httpx.post") as post:
+        cams, err = conn.register_cameras("http://x", "k", selected)
+    post.assert_not_called()
+    assert err is None
+    assert cams[0]["node_id"] == "webcam_a"
+
+
+def test_register_posts_only_new_cameras_and_preserves_existing_ids():
+    selected = [
+        {"device_index": 0, "node_id": "webcam_a", "name": "A"},  # existing
+        {"device_index": 1, "name": "B"},                          # new
+    ]
+    resp = MagicMock(status_code=201)
+    resp.json.return_value = [{"node_id": "webcam_new"}]
+    with patch("webcam_client.gui.wizard.connection.httpx.post", return_value=resp) as post:
+        cams, err = conn.register_cameras("http://x", "k", selected)
+    body = post.call_args.kwargs["json"]
+    assert body["cameras"] == [{"device_index": 1, "name": "B"}]  # only the new one
+    assert err is None
+    assert cams[0]["node_id"] == "webcam_a"    # preserved
+    assert cams[1]["node_id"] == "webcam_new"  # assigned to the new one

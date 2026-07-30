@@ -157,7 +157,7 @@ def open_status_window(state, *, camera_count, faulty_names, on_open_logs,
     root.attributes("-topmost", True)
 
     def _drop_topmost():
-        # Same race as setup_wizard._safe_after: the guard may close the window
+        # Same race as wizard.window._safe_after: the guard may close the window
         # inside the delay, and some Tcl builds raise RuntimeError rather than
         # TclError for a call on a destroyed root.
         try:

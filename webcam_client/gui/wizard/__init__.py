@@ -10,9 +10,8 @@ The split is what makes the wizard testable: every rule worth pinning ended up
 in ``flow`` or ``connection``, which need no display, and ``window`` is the thin
 remainder that a bench pass covers.
 
-This package is the real home; ``gui/setup_wizard.py`` is a transitional façade
-that re-exports everything below and will be deleted once the new modules carry
-their own tests.
+``gui/setup_wizard.py`` was a transitional façade over this package while the
+move was verified; it is gone, and callers import from here.
 """
 from .connection import (
     normalize_server_url,
@@ -24,13 +23,11 @@ from .connection import (
     _build_cameras_for_registration,
 )
 from .flow import MODE_EDIT, MODE_FIRST_RUN, WizardFlow
-from .scanning import (_load_thumbnail_async, _prepare_thumbnail_async,
-                       _scan_cameras_async)
+from .scanning import _prepare_thumbnail_async, _scan_cameras_async
 from .window import run_setup_wizard, _camera_rows_from_config
 
-# Underscored names are listed deliberately: the façade re-exports this package
-# with ``import *``, and the wizard's callers/tests reach for these private
-# helpers by name. Dropping them here silently breaks ``setup_wizard.*``.
+# Underscored names are listed deliberately: the wizard's tests reach for these
+# private helpers by name.
 __all__ = [
     "run_setup_wizard",
     "WizardFlow",
@@ -45,6 +42,5 @@ __all__ = [
     "_client_identity_changed",
     "_build_cameras_for_registration",
     "_scan_cameras_async",
-    "_load_thumbnail_async",
     "_prepare_thumbnail_async",
 ]

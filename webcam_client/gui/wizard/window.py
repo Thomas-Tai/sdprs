@@ -38,8 +38,7 @@ from .connection import (normalize_server_url, register_cameras,
                          register_cameras_async, test_connection_async,
                          _client_identity_changed, _build_cameras_for_registration)
 from .flow import MODE_EDIT, MODE_FIRST_RUN, WizardFlow
-from .scanning import (_load_thumbnail_async, _prepare_thumbnail_async,
-                       _scan_cameras_async)
+from .scanning import _prepare_thumbnail_async, _scan_cameras_async
 
 logger = logging.getLogger("webcam_client.gui.wizard")
 

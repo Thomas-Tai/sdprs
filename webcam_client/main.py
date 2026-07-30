@@ -6,7 +6,7 @@ import signal
 from .config import load_config, save_config, is_first_run
 from .app_controller import AppController, enabled_cameras
 from .gui.notifier import notify_state
-from .gui.setup_wizard import run_setup_wizard
+from .gui.wizard import run_setup_wizard
 from .gui.status_window import open_status_window, open_log_folder
 from .gui.tray_app import TrayApp
 from .logging_setup import setup_logging, add_secret

@@ -68,7 +68,7 @@ LBL_API_KEY = "連線密碼"
 
 # These fire on the day the guard is standing at an unfamiliar PC trying to get
 # the app working -- the day they can least afford a status code. The code and
-# the exception are NOT discarded: setup_wizard.py logs both for the technician
+# the exception are NOT discarded: wizard/connection.py logs both for the technician
 # before showing any of these. None names the confirm button, because the guard
 # just pressed it and it is still in front of them; 再試一次 stays true whether
 # that button says 開始 or 儲存.

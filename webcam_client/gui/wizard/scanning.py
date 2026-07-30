@@ -1,19 +1,18 @@
 # sdprs/webcam_client/gui/wizard/scanning.py
 """Off-the-Tk-thread camera discovery and thumbnail grabbing.
 
-Moved verbatim out of ``gui/setup_wizard.py``. Both helpers hand their result
-to a callback that runs on the WORKER thread; a Tk caller marshals back with
-``root.after``.
+Both helpers hand their result to a callback that runs on the WORKER thread; a
+Tk caller marshals back with ``root.after``.
 
-Note for tests: ``scan_cameras``/``grab_preview_frame``/``make_thumbnail`` are
-resolved as globals of THIS module, so a test faking them must patch
-``webcam_client.gui.wizard.scanning``, not the ``setup_wizard`` façade.
+Note for tests: ``scan_cameras``/``grab_preview_frame``/``prepare_thumbnail``
+are resolved as globals of THIS module, so a test faking them must patch
+``webcam_client.gui.wizard.scanning``.
 """
 import logging
 import threading
 
 from ...camera_manager import scan_cameras
-from ..preview import make_thumbnail, grab_preview_frame, prepare_thumbnail
+from ..preview import grab_preview_frame, prepare_thumbnail
 
 logger = logging.getLogger("webcam_client.gui.wizard")
 
@@ -67,15 +66,11 @@ def _prepare_thumbnail_async(device_index, frame, on_ready) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
-def _load_thumbnail_async(device_index, on_ready) -> None:
-    """Grab a preview frame + build its thumbnail OFF the Tk thread so the
-    settings window paints immediately. on_ready(thumb_or_None) runs on the
-    worker thread; a Tk caller marshals back with root.after."""
-    def worker():
-        try:
-            thumb = make_thumbnail(grab_preview_frame(device_index))
-        except Exception as e:
-            logger.warning(f"thumbnail grab for device {device_index} failed: {e}")
-            thumb = None
-        on_ready(thumb)
-    threading.Thread(target=worker, daemon=True).start()
+# _load_thumbnail_async was deleted here. It did the same job as
+# _prepare_thumbnail_async above, but finished with make_thumbnail -- which
+# builds an ImageTk.PhotoImage, a Tk object, ON THE WORKER THREAD, against this
+# codebase's standing rule that only the main loop touches Tk. It also always
+# reopened the device, so it could not take advantage of the frame the scan
+# already grabbed. Its one guarantee worth keeping, "the grab does not run on
+# the caller thread", is asserted against the replacement in
+# test_wizard_scanning.py.
