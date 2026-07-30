@@ -9,16 +9,68 @@ import numpy as np
 logger = logging.getLogger("webcam_client.camera")
 
 
-def scan_cameras(max_index: int = 10) -> List[dict]:
-    found = []
+def scan_cameras(
+    max_index: int = 10,
+    stop_after_misses: int = 3,
+    capture_factory=None,
+) -> List[dict]:
+    """Probe device indices 0..max_index-1 and return the cameras that answered.
+
+    Each hit is {"device_index", "width", "height", "frame"}.
+
+    Stops early after `stop_after_misses` CONSECUTIVE failures to open a device.
+    On Windows every miss still pays a full DSHOW negotiation (~0.5-2 s), so an
+    unconditional 0..9 sweep freezes the setup window for 10-20 s and a guard
+    reads that as "broken". Device indices are not guaranteed contiguous though
+    -- a USB hub can legitimately put cameras at 0 and 4 -- so the threshold is a
+    parameter, not a constant: the 重新掃描 button passes
+    `stop_after_misses=max_index` to force a full sweep, and that button is the
+    escape hatch for the gap case. `max_index` remains the hard ceiling.
+
+    `frame` is the frame this probe already grabbed, so the thumbnail loader
+    never has to reopen the device -- one DSHOW negotiation per camera instead of
+    two. It is None when the device opened but handed over no frame; that still
+    counts as a HIT, not a miss, because the device plainly exists.
+
+    `capture_factory` takes a device index and returns a capture object; when
+    None the real `cv2.VideoCapture` is used. It exists so tests never have to
+    touch real hardware.
+    """
+    if capture_factory is None:
+        backend = cv2.CAP_DSHOW if os.name == "nt" else 0
+
+        def _open(index):
+            return cv2.VideoCapture(index, backend)
+    else:
+        _open = capture_factory
+
+    found: List[dict] = []
+    consecutive_misses = 0
     for i in range(max_index):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW if os.name == "nt" else 0)
-        if cap.isOpened():
+        cap = _open(i)
+        try:
+            if not cap.isOpened():
+                consecutive_misses += 1
+                if consecutive_misses >= stop_after_misses:
+                    logger.debug(
+                        f"camera scan stopped at index {i} after "
+                        f"{consecutive_misses} consecutive misses"
+                    )
+                    break
+                continue
+            consecutive_misses = 0
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            found.append({"device_index": i, "width": w, "height": h})
-            cap.release()
-        else:
+            ok, frame = cap.read()
+            found.append(
+                {
+                    "device_index": i,
+                    "width": w,
+                    "height": h,
+                    "frame": frame if ok else None,
+                }
+            )
+        finally:
             cap.release()
     return found
 
