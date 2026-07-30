@@ -113,7 +113,11 @@ def test_poll_node_5xx_triggers_backoff():
     assert mock_wait.call_count == 0, "_poll_node must never block the cycle"
     delay = ch._next_poll_at["webcam_01"] - clock.now
     assert delay > 0                       # backed off, not an immediate re-poll
-    assert ch._backoff > 1.0               # backoff grew for the next cycle
+    # F5: the penalty is now owned per node, so read THIS node's own counter.
+    # Same guarantee as before -- the next failure of the node that just failed
+    # waits longer than the 1s floor -- but it can no longer be satisfied by
+    # growth some other node caused.
+    assert ch._backoff_for("webcam_01") > 1.0
 
 
 def test_control_channel_reports_bad_key_on_401():
@@ -235,9 +239,13 @@ def test_control_channel_reports_worst_fault_once_per_cycle():
     assert client.calls.count("n1") > 6, (
         "the healthy node must not be held to the failing node's cadence")
     assert seen == [Fault.BAD_KEY], f"one stable fault per cycle, got {seen}"
-    # n1's 200 used to reset _backoff to 1.0 every cycle, so n2's backoff never
-    # grew and the flapping cycle stayed at ~1.1s forever.
-    assert ch._backoff >= 4.0, f"a persistently failing node must back off, got {ch._backoff}"
+    # n1's 200 used to reset the shared _backoff to 1.0 every cycle, so n2's
+    # backoff never grew and the flapping cycle stayed at ~1.1s forever. Read on
+    # n2's OWN counter since F5: that is what "a persistently failing node must
+    # back off" always meant, and on the shared counter the assertion could have
+    # been satisfied by growth n1 caused.
+    assert ch._backoff_for("n2") >= 4.0, (
+        f"a persistently failing node must back off, got {ch._backoff_for('n2')}")
 
 
 def test_a_backed_off_node_never_delays_a_healthy_one():
@@ -284,9 +292,12 @@ def test_a_backed_off_node_never_delays_a_healthy_one():
         ch.run()
 
     assert client.calls.count("n2") == 8, "precondition: n2 failed eight times"
-    assert ch._backoff == 30.0, (
+    # Since F5 the ceiling is a property of the FAILING node's own counter --
+    # same guarantee (a permanently broken camera decays to 30s and stops
+    # hammering the server), now unattributable to any other node.
+    assert ch._backoff_for("n2") == 30.0, (
         f"precondition: the failing node must still decay to the ceiling, "
-        f"got {ch._backoff}")
+        f"got {ch._backoff_for('n2')}")
     assert seen == [Fault.BAD_KEY], "the cycle verdict must not flap while n2 is skipped"
 
     gaps = [b - a for a, b in zip(n1_polls, n1_polls[1:])]
@@ -390,15 +401,22 @@ def test_control_channel_401_still_reaches_the_hub_before_stopping():
 
 
 def test_control_channel_recovery_reports_none_and_resets_backoff():
-    """A cycle in which EVERY node answered cleanly is what earns the reset:
-    the fault clears and the poll cadence returns to normal."""
+    """Answering cleanly is what earns the reset: the fault clears and the poll
+    cadence returns to normal.
+
+    The reset used to be a whole-CYCLE decision (every node's latest verdict
+    good) because one shared counter meant a single healthy node's reset also
+    freed the failing ones. Since F5 each node owns its penalty, so recovery is
+    a per-node fact: both nodes here answer cleanly, and each one's own counter
+    must be back at the 1s floor. Same observable outcome, decided per node.
+    """
     from webcam_client.control_channel import ControlChannel
     from webcam_client.status import Fault
 
     seen = []
     ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
                         on_fault=seen.append)
-    ch._backoff = 16.0                     # as if it had been failing for a while
+    ch._backoff = {"n1": 16.0, "n2": 16.0}   # as if both had been failing a while
 
     def on_get(node, nth):
         if node == "n2":
@@ -410,7 +428,8 @@ def test_control_channel_recovery_reports_none_and_resets_backoff():
         ch.run()
 
     assert seen == [Fault.NONE]
-    assert ch._backoff == 1.0
+    assert ch._backoff_for("n1") == 1.0
+    assert ch._backoff_for("n2") == 1.0
 
 
 def test_control_channel_reports_no_server_on_connect_timeout():
@@ -633,8 +652,46 @@ def test_control_channel_with_no_nodes_does_not_busy_loop():
     ch._stop_event.set()          # let a spinning thread die either way
 
     assert finished, "run() with no nodes spun without ever sleeping"
-    assert waits and waits[0] and waits[0] > 0, "an empty cycle must still sleep"
+    # F8: pin the FLOOR, not merely "some sleep". `waits[0] > 0` was satisfied by
+    # 0.001 -- which is 1000 cycles a second on a PC whose camera list is empty,
+    # i.e. exactly the state every machine is in before setup is finished. The
+    # documented value is _idle_wait()'s 1.0s empty-node floor; a regression that
+    # keeps a positive but tiny wait still burns a core on the guard's desk and
+    # the old assertion would have stayed green through it.
+    assert waits, "an empty cycle must still sleep"
+    assert waits[0] == 1.0, (
+        f"the empty-node anti-spin floor is 1.0s; a smaller wait spins the CPU "
+        f"on a PC with no camera configured yet -- got {waits[0]}")
     assert seen == [], "nothing was polled -- report nothing"
+
+
+def test_idle_wait_floors_an_overdue_cycle_at_50ms():
+    """The other half of _idle_wait, and the one with no test of its own.
+
+    An overdue node is the ROUTINE case, not a corner: the long-poll runs up to
+    5s, so with two or more cameras the earliest deadline is usually already in
+    the past by the time the cycle gets here. min(due_in) is then <= 0 and the
+    0.05 floor is the only thing bounding how fast the loop may spin -- without
+    it the channel spins a core AND floods the uplink at ~20 requests a second
+    per node, on a guard's site network, indefinitely.
+
+    Worth its own test because NOTHING else here notices its removal: replacing
+    `max(0.05, min(due_in))` with `min(due_in)` was run against the whole file
+    and every other test stayed green. The run()-driven tests cannot see it --
+    _FakeClock only moves inside wait(), so a node is never overdue in them, and
+    the floor they exercise is never the one that binds in production.
+    """
+    from webcam_client.control_channel import ControlChannel
+
+    clock = _FakeClock()
+    ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
+                        clock=clock)
+    ch._next_poll_at["n1"] = clock.now - 5.0     # overdue: the long-poll overran
+    ch._next_poll_at["n2"] = clock.now + 12.0
+
+    assert ch._idle_wait() == 0.05, (
+        f"an overdue cycle must still be floored at 50ms, or the loop spins a "
+        f"core and floods the uplink -- got {ch._idle_wait()}")
 
 
 def test_precedence_holds_regardless_of_node_order():
@@ -742,5 +799,283 @@ def test_an_always_malformed_body_still_tells_the_hub_something():
     assert seen == [Fault.NONE], (
         f"this arm must not invent a network fault the guard would go check a "
         f"cable for; it must simply stop withholding a verdict -- got {seen}")
-    assert ch._backoff > 1.0, \
-        "an application error must still decay the poll cadence, not run full speed"
+    # On n1's OWN counter since F5, and pinned at the level the sentence above
+    # actually claims. `> 1.0` was too weak to say it: three consecutive app
+    # errors must decay the cadence EVERY time (1s, 2s, 4s spent -> 8s next), and
+    # a counter that merely oscillates 1 -> 2 also satisfied `> 1.0` while the
+    # captive portal was in fact re-polled at 1s forever. That is not a
+    # hypothetical: it is what happens if the 200 arm's _clear_backoff is moved
+    # ABOVE resp.json(), which a reader could easily think is the tidier place
+    # for it. Verified by mutation -- `> 1.0` passed with the reset moved up.
+    assert ch._backoff_for("n1") >= 4.0, (
+        f"an application error must decay the poll cadence on EVERY poll, not "
+        f"run near full speed forever -- got {ch._backoff_for('n1')} after "
+        f"{client.calls.count('n1')} failed polls")
+
+
+def test_a_crashing_fault_callback_does_not_kill_the_channel_silently(caplog):
+    """F3: run() had no try/finally, so an exception on the REPORTING path --
+    _report -> on_fault -> StatusHub.report -> the hub's own on_change -- escaped
+    run() itself.
+
+    In the windowed console=False onefile build sys.stderr is None, so
+    threading.excepthook writes that traceback NOWHERE. Three consequences, all
+    pinned below: the control-channel thread died leaving ZERO evidence, the
+    httpx connection pool leaked (close() sat below the loop, outside any
+    finally), and remote commands were dead for the life of the process with
+    nothing written down for the technician the guard eventually calls.
+
+    The last assertion pins the DELIBERATE non-report instead: the crash arm
+    must not invent a verdict. See the comment at its own site for why every
+    fault value available to this module would be a lie to the guard.
+    """
+    import logging
+    import threading
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    closed = []
+
+    class _ClosingClient(_FakeClient):
+        def close(self):
+            closed.append(True)
+
+    ch = None                              # rebound below; the callback reads it
+
+    def exploding_on_fault(fault):
+        seen.append(fault)
+        ch._stop_event.set()               # a FIXED run() must still terminate
+        raise RuntimeError("the tray callback blew up")
+
+    ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
+                        on_fault=exploding_on_fault)
+    client = _ClosingClient({"n1": 403})
+    escaped = []
+
+    # Driven on a worker thread and the escape captured, so the pre-fix
+    # behaviour fails these assertions instead of erroring out of the test body.
+    def drive():
+        try:
+            with patch("webcam_client.control_channel.httpx.Client",
+                       return_value=client), \
+                 patch.object(ch._stop_event, "wait"):
+                ch.run()
+        except BaseException as exc:       # exactly the escape this test is about
+            escaped.append(exc)
+
+    with caplog.at_level(logging.WARNING, logger="webcam_client.control"):
+        t = threading.Thread(target=drive, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+    finished = not t.is_alive()
+    ch._stop_event.set()                   # let a spinning thread die either way
+
+    assert seen, "precondition: the reporting path must have been reached"
+    assert finished, "run() never returned"
+    assert not escaped, (
+        f"the exception escaped run(): in the windowed build its traceback goes "
+        f"nowhere, so the thread dies with no evidence at all -- got {escaped}")
+    assert closed == [True], \
+        "the httpx connection pool leaked when the channel thread died"
+    records = [r for r in caplog.records if r.name == "webcam_client.control"]
+    assert any(r.levelno >= logging.ERROR and r.exc_info for r in records), \
+        "the technician needs the traceback of the crash that killed the channel"
+    assert seen == [Fault.BAD_KEY], (
+        f"the crash arm must not invent a verdict -- no fault available to this "
+        f"module is true of a crashed channel; got {seen}")
+
+
+def test_no_fault_reaches_the_hub_after_the_main_thread_calls_stop():
+    """F4: stop() means teardown, and teardown ends with the hub emptied.
+
+    AppController.stop_engines() runs on the MAIN thread: it calls
+    self._control.stop() and then self._hub.clear_all(), whose entire job is to
+    drop every fault that no live worker owns any more. It does NOT join this
+    thread, so a cycle already in flight kept going and reported AFTER that
+    clear_all() -- re-inserting a fault owned by a channel being torn down. The
+    guard is left a red light (or, if the last verdict was clean, a green one)
+    with no worker behind it, which is precisely what clear_all() exists to
+    prevent, and on a settings edit it survives until the NEW channel's first
+    cycle overwrites it.
+
+    The opposite case must keep working and is pinned separately by
+    test_control_channel_401_still_reaches_the_hub_before_stopping: a 401 sets
+    _stop_event ITSELF and its verdict must still be announced. So this cannot
+    be keyed on _stop_event -- only on "the main thread told us to shut down".
+    """
+    from webcam_client.control_channel import ControlChannel
+
+    seen = []
+    clock = _FakeClock()
+    ch = ControlChannel("http://x", "k", ["n1"], lambda *a: None,
+                        on_fault=seen.append, clock=clock)
+
+    def on_get(node, nth):
+        # The main thread tears the channel down while this cycle is in flight.
+        ch.stop()
+
+    client = _FakeClient({"n1": 403}, on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait", _advancing_wait(clock, ch)):
+        ch.run()
+
+    assert client.calls == ["n1"], (
+        f"precondition: exactly one poll, whose 403 verdict lands after stop() "
+        f"-- got {client.calls}")
+    assert seen == [], (
+        f"a fault reported after stop() re-inserts what clear_all() is about to "
+        f"drop, leaving a light no live worker owns; got {seen}")
+
+
+def test_a_node_does_not_inherit_its_neighbours_backoff():
+    """F5: the penalty is SPENT per node, so it must be OWNED per node.
+
+    It was one channel-wide float. _back_off(node) deferred that node by the
+    shared value and then doubled the shared value, so the nodes fined each
+    other by list position: with one permanently-403 camera driving the shared
+    value to the 30s ceiling, the FIRST transient failure on a perfectly healthy
+    camera cost 30 seconds instead of 1 -- a sentence it had not earned, for a
+    fault that had already cleared.
+
+    The second half matters just as much: isolating the nodes must not stop the
+    genuinely broken one from decaying to the ceiling.
+    """
+    from webcam_client.control_channel import ControlChannel
+
+    clock = _FakeClock()
+    ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
+                        clock=clock)
+
+    for _ in range(5):
+        ch._back_off("n2")                 # n2 fails five times: 1, 2, 4, 8, 16
+    ch._back_off("n1")                     # n1's FIRST failure
+
+    assert ch._next_poll_at["n1"] - clock.now == 1.0, (
+        f"n1's first failure must cost n1 one second, not the penalty n2 grew: "
+        f"got {ch._next_poll_at['n1'] - clock.now}s")
+    assert ch._next_poll_at["n2"] - clock.now == 16.0, \
+        "n1's failure must not have moved n2's own deadline"
+
+    ch._back_off("n2")                     # n2's sixth failure
+    assert ch._next_poll_at["n2"] - clock.now == 30.0, (
+        "a permanently failing node must still decay to the 30s ceiling -- "
+        "per-node penalties must not hand it a full-speed retry")
+
+
+def test_a_failing_cameras_penalty_is_not_charged_to_a_healthy_one():
+    """F5 at the cadence the guard actually feels.
+
+    n2 is permanently 403 and has failed its way to the 30s ceiling. n1 -- a
+    fully working camera -- then drops a single packet. With one shared counter
+    that one blip deferred n1 by THIRTY SECONDS, so a guard pressing "live view"
+    on the working camera waited half a minute for stream_start over a fault
+    that had already cleared, purely because of which camera sat next to it in
+    the list. n1 must serve its own one-second sentence.
+    """
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    seen = []
+    clock = _FakeClock()
+    codes = {"n1": 200, "n2": 403}
+    ch = ControlChannel("http://x", "k", ["n1", "n2"], lambda *a: None,
+                        on_fault=seen.append, clock=clock)
+    state = {"fail_at": None, "next_after_fail": None}
+    n1_polls = []
+
+    def on_get(node, nth):
+        if node == "n1":
+            n1_polls.append(clock.now)
+            if state["fail_at"] is None:
+                if codes["n1"] == 500:
+                    state["fail_at"] = clock.now       # THE transient failure
+            else:
+                codes["n1"] = 200                      # one blip, then fine again
+                state["next_after_fail"] = clock.now
+                ch._stop_event.set()
+        else:
+            if nth == 6:
+                # n2 is at the ceiling now; n1 drops exactly one packet.
+                codes["n1"] = 500
+            if nth > 30:
+                ch._stop_event.set()      # a broken schedule must fail, not hang
+        if len(n1_polls) > 20000:
+            ch._stop_event.set()
+
+    client = _FakeClient(codes, on_get=on_get)
+    with patch("webcam_client.control_channel.httpx.Client", return_value=client), \
+         patch.object(ch._stop_event, "wait", _advancing_wait(clock, ch)):
+        ch.run()
+
+    assert client.calls.count("n2") >= 6, (
+        f"precondition: n2 must have failed its way to the ceiling, got "
+        f"{client.calls.count('n2')} polls")
+    assert state["fail_at"] is not None, \
+        "precondition: n1 must have seen its transient failure"
+    assert state["next_after_fail"] is not None, \
+        "n1 was never polled again after its blip"
+    penalty = state["next_after_fail"] - state["fail_at"]
+    assert penalty <= 1.5, (
+        f"one dropped packet on a healthy camera cost it {penalty:.1f}s because "
+        f"its failing neighbour had grown the penalty; a guard pressing live "
+        f"view waits that long for a fault that already cleared")
+    assert seen == [Fault.BAD_KEY], (
+        f"the cycle verdict must not flap while this plays out; got {seen}")
+
+
+def test_a_transport_failure_names_the_camera_in_the_log(caplog):
+    """F7: the guard's site has more than one camera; the log must say WHICH.
+
+    This line used to read "Control channel transport failure, retry in 1.0s"
+    with no node in it, so a technician looking at a four-camera site's log knew
+    an uplink had dropped but not whose -- and the 403 and 5xx lines beside it
+    name the node, so the omission also reads as if this one were channel-wide
+    when it is not. `current` is in scope; use it.
+    """
+    import logging
+    from webcam_client.control_channel import ControlChannel
+    import httpx
+
+    ch = ControlChannel("http://x", "k", ["webcam_lobby"], lambda *a: None)
+
+    def fake_poll_node(node_id):
+        ch._stop_event.set()               # one cycle is all this needs
+        raise httpx.ConnectTimeout("timed out")
+
+    ch._poll_node = fake_poll_node
+    with caplog.at_level(logging.WARNING, logger="webcam_client.control"), \
+         patch.object(ch._stop_event, "wait"):
+        ch.run()
+
+    records = [r for r in caplog.records if r.name == "webcam_client.control"]
+    assert records, "a transport failure must survive the root logger's INFO level"
+    assert any("webcam_lobby" in r.getMessage() for r in records), (
+        f"the technician cannot tell which camera's uplink dropped: "
+        f"{[r.getMessage() for r in records]}")
+
+
+def test_a_rejected_key_names_the_camera_in_the_log(caplog):
+    """F7, the other half: "API key rejected" said nothing about the node.
+
+    A 401 is answered per camera. The guard is sent to the administrator for a
+    new key (strings.py, bad_key), and the first thing the administrator needs
+    from the log is which camera the server refused -- the key may be right for
+    the others. The record is also the last thing this channel will ever write:
+    the 401 arm stops it.
+    """
+    import logging
+    from webcam_client.control_channel import ControlChannel
+    from webcam_client.status import Fault
+
+    ch = ControlChannel("http://x", "k", ["webcam_gate"], lambda *a: None)
+    ch._client = _FakeClient({"webcam_gate": 401})
+
+    with caplog.at_level(logging.WARNING, logger="webcam_client.control"):
+        assert ch._poll_node("webcam_gate") is Fault.BAD_KEY
+
+    records = [r for r in caplog.records if r.name == "webcam_client.control"]
+    assert records, "a rejected key must survive the root logger's INFO level"
+    assert any("webcam_gate" in r.getMessage() for r in records), (
+        f"the administrator cannot tell which camera the server refused: "
+        f"{[r.getMessage() for r in records]}")
