@@ -326,6 +326,12 @@ class _FakeCtrl:
     def pause_all(self): pass
     def resume_all(self): pass
 
+    def running_node_ids(self):
+        # Nothing is really running behind this fake, which is also what a
+        # failed rebuild leaves behind -- the state _report_rebuild_failure has
+        # to describe honestly.
+        return []
+
 
 def _boot(monkeypatch, m, tray_cls, cameras=None, on_start_engines=None):
     """Stub everything main() touches before its dispatch loop, so a test can
@@ -685,7 +691,11 @@ def test_a_failed_rebuild_never_leaves_the_light_claiming_startup():
     for the rest of the process. Grey tray, "啟動中 / 正在連線並開啟攝影機，
     請稍候。" forever, and no toast either, because tick() never announces a
     healthy state. The guard reaches that dead end by pressing 重新連線 -- the
-    button they press to FIX things."""
+    button they press to FIX things.
+
+    With an empty camera list this is the ONE case where NO_SERVER is the honest
+    report (see _report_rebuild_failure): nothing is running and there is no
+    camera to blame."""
     import webcam_client.main as m
     from webcam_client.status import StatusHub, Health
 
@@ -700,10 +710,191 @@ def test_a_failed_rebuild_never_leaves_the_light_claiming_startup():
             hub.clear_all()          # stop_engines() got this far...
             raise RuntimeError("camera 0 will not open")
 
+        def running_node_ids(self):
+            return []
+
     assert m._rebuild_engines(ExplodingCtrl(), hub) is False
     assert len(attempts) == 2, "a failed rebuild must be retried once"
     assert hub.state is not Health.STARTING, \
         "the tray would sit grey on 啟動中 forever, with no toast to correct it"
+
+
+# --------------------------------------------------------------------------
+# Finding #18: a PARTIALLY failed rebuild used to latch a permanent, false
+# 「無法連線到伺服器」 that nothing alive could ever clear.
+#
+# start_engines() publishes each engine the moment it starts (deliberately, so a
+# later failure cannot leak an open camera) and builds the ControlChannel LAST.
+# So when camera 2 refuses to start, camera 1 is alive and uploading and there is
+# no control channel at all. Writing CONTROL_SOURCE/NO_SERVER then put a fault on
+# a key NOTHING alive owns -- no control channel exists to report Fault.NONE for
+# it -- and NO_SERVER outranks CAMERA_DOWN, so the guard read 「無法連線到伺服器 /
+# 請檢查電腦後方的網路線」 forever while camera 1's snapshots landed on the server
+# perfectly well. Only another clear_all() (a settings save, or pressing 重新連線
+# again) could shift it.
+#
+# The backstop now reports what is actually true, per camera: the cameras left
+# with NO worker have no picture, and CAMERA_DOWN is the fault whose text says so
+# and whose action -- re-seat the USB cable, then press 重新連線 -- is what makes
+# the fix take. It is also the LOWEST fault in _PRECEDENCE, so a stale one masks
+# nothing, which is the whole difference from the NO_SERVER it replaces.
+# --------------------------------------------------------------------------
+
+_TWO_CAMS = [
+    {"node_id": "n1", "name": "前門攝影機", "device_index": 0, "enabled": True},
+    {"node_id": "n2", "name": "後門攝影機", "device_index": 1, "enabled": True},
+]
+
+
+def test_a_partially_failed_rebuild_names_only_the_cameras_with_no_worker():
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Fault, Health, CONTROL_SOURCE
+
+    hub = StatusHub()
+
+    class HalfBuiltCtrl:
+        config = {"cameras": list(_TWO_CAMS)}
+
+        def apply(self, cfg):
+            hub.clear_all()               # stop_engines() got this far...
+            hub.report("n1", Fault.NONE)  # ...camera 1 came up and is uploading
+            raise RuntimeError("camera 2 will not start")
+
+        def running_node_ids(self):
+            return ["n1"]
+
+    ctrl = HalfBuiltCtrl()
+    assert m._rebuild_engines(ctrl, hub) is False
+
+    assert CONTROL_SOURCE not in hub.faulty_sources(), (
+        "the backstop wrote a fault under a key no live worker owns: NO_SERVER "
+        "outranks every camera fault, so the guard is told the network is down "
+        "while camera 1 uploads fine, and nothing alive can ever clear it")
+    assert hub.faulty_sources() == ["n2"], (
+        f"only the camera with no worker has no picture: {hub.faulty_sources()}")
+    assert hub.state is Health.CAMERA_DOWN
+
+    # ...and the guard is told WHICH camera, by the name they typed in settings.
+    names = m._camera_display_names(hub.faulty_sources(),
+                                    m.enabled_cameras(ctrl.config))
+    assert names == ["後門攝影機"]
+
+
+def test_a_working_camera_keeps_uploading_after_a_failed_rebuild():
+    """The other half of the same judgement: the engine that IS working is left
+    alone. Stopping it would make the old NO_SERVER message true, at the price of
+    taking a camera that was recording perfectly well off the air."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Fault, Health
+
+    hub = StatusHub()
+    stopped = []
+
+    class HalfBuiltCtrl:
+        config = {"cameras": list(_TWO_CAMS)}
+
+        def apply(self, cfg):
+            hub.clear_all()
+            hub.report("n1", Fault.NONE)
+            raise RuntimeError("camera 2 will not start")
+
+        def stop_engines(self):
+            stopped.append(True)
+
+        def running_node_ids(self):
+            return ["n1"]
+
+    m._rebuild_engines(HalfBuiltCtrl(), hub)
+
+    assert stopped == [], "the surviving camera must not be taken off the air"
+    # n1 goes on reporting, and its healthy reports are not drowned out.
+    hub.report("n1", Fault.NONE)
+    assert hub.state is Health.CAMERA_DOWN, "n2 still has no worker"
+    assert "n1" not in hub.faulty_sources()
+
+
+def test_a_total_rebuild_failure_names_every_camera():
+    """Nothing came up at all: every enabled camera is without a picture, so
+    every one of them is named. Honest, and still not a network message."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Health
+
+    hub = StatusHub()
+
+    class DeadCtrl:
+        config = {"cameras": list(_TWO_CAMS)}
+
+        def apply(self, cfg):
+            hub.clear_all()
+            raise RuntimeError("nothing will start")
+
+        def running_node_ids(self):
+            return []
+
+    assert m._rebuild_engines(DeadCtrl(), hub) is False
+    assert hub.faulty_sources() == ["n1", "n2"]
+    assert hub.state is Health.CAMERA_DOWN
+    assert m._camera_display_names(hub.faulty_sources(),
+                                   m.enabled_cameras(DeadCtrl.config)) == \
+        ["前門攝影機", "後門攝影機"]
+
+
+def test_a_rebuild_that_lost_only_the_command_channel_invents_no_fault(caplog):
+    """The one failure mode where every enabled camera DOES have a worker: the
+    engines all started and the ControlChannel was what raised (it is built
+    last). Every camera has a picture and is uploading, so any fault at all
+    would be a lie -- CAMERA_DOWN about cameras that are fine, NO_SERVER about an
+    uplink that is carrying snapshots. The engines report the truth by
+    themselves; the missing command channel (no live view) has no word in the
+    frozen Fault vocabulary, so it goes to the technician's log instead."""
+    import logging
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub, Fault, Health
+
+    hub = StatusHub()
+
+    class NoChannelCtrl:
+        config = {"cameras": list(_TWO_CAMS)}
+
+        def apply(self, cfg):
+            hub.clear_all()
+            hub.report("n1", Fault.NONE)
+            hub.report("n2", Fault.NONE)
+            raise RuntimeError("control channel would not start")
+
+        def running_node_ids(self):
+            return ["n1", "n2"]
+
+    with caplog.at_level(logging.WARNING, logger="webcam_client.main"):
+        assert m._rebuild_engines(NoChannelCtrl(), hub) is False
+
+    assert hub.faulty_sources() == [], (
+        f"both cameras are uploading; any fault here is a lie: "
+        f"{hub.faulty_sources()}")
+    assert hub.state is Health.RUNNING
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING], \
+        "a rebuild failure that cannot be shown to the guard must still be logged"
+
+
+def test_the_failed_rebuild_backstop_never_raises():
+    """_rebuild_engines() documents that it never raises, and three call sites
+    depend on it -- including startup, where an escaping exception leaves main()
+    and the traceback goes to a sys.stderr that is None in the windowed build."""
+    import webcam_client.main as m
+    from webcam_client.status import StatusHub
+
+    hub = StatusHub()
+
+    class BrokenCtrl:
+        config = {"cameras": list(_TWO_CAMS)}
+
+        def apply(self, cfg):
+            raise RuntimeError("no")
+
+        def running_node_ids(self):
+            raise RuntimeError("and the backstop's own lookup is broken too")
+
+    assert m._rebuild_engines(BrokenCtrl(), hub) is False
 
 
 def test_a_successful_rebuild_leaves_the_hub_alone():
@@ -826,6 +1017,7 @@ def test_a_failed_startup_never_leaves_the_light_claiming_startup(monkeypatch):
         def apply(self, cfg):
             raise RuntimeError("camera 0 still will not open")
 
+        def running_node_ids(self): return []
         def stop_engines(self): pass
         def shutdown(self): pass
         def pause_all(self): pass
@@ -883,6 +1075,7 @@ def test_open_settings_recovery_failure_also_reports_to_the_hub():
 
         def stop_engines(self): hub.clear_all()
         def apply(self, cfg): raise RuntimeError("still broken")
+        def running_node_ids(self): return []
 
     def raising_fn(cfg):
         raise RuntimeError("boom: settings window blew up")
@@ -938,12 +1131,26 @@ def test_a_worker_fault_repaints_the_tray_from_the_main_loop(monkeypatch):
 
 def test_the_idle_loop_ticks_the_hub(monkeypatch):
     """hub.tick() is what promotes a sustained fault into a toast, and NOTHING
-    else calls it -- there is no timer thread. If the queue.Empty branch drops
-    it, every notification in the app silently stops working."""
+    else in the dispatch loop calls it -- there is no timer thread. If the
+    queue.Empty branch drops it, every notification in the app silently stops
+    working.
+
+    #19: the previous version asserted only that tick() had been called at least
+    once, and it ended the loop from inside tick() ITSELF. Two holes followed.
+    Deleting hub.tick() from the Empty branch made this test HANG rather than
+    fail, because nothing was then left to stop the loop -- and a hung run is not
+    a red test. And a tick HOISTED out of the loop (moved above the `while`) still
+    satisfied it, so the one thing the name promises -- that the LOOP ticks, every
+    idle pass -- was never pinned at all.
+
+    So: two ticks are required, and the loop is ended from a separate thread, so
+    a missing tick fails an assertion instead of hanging."""
+    import threading
     import webcam_client.main as m
     from webcam_client.status import Health
 
     ticks = []
+    ticked_twice = threading.Event()
 
     class FakeHub:
         def __init__(self, **kw):
@@ -958,73 +1165,145 @@ def test_the_idle_loop_ticks_the_hub(monkeypatch):
 
         def tick(self):
             ticks.append(True)
-            m._running = False      # restored by _boot's monkeypatch.setattr
+            if len(ticks) >= 2:
+                ticked_twice.set()
+
+    painted = []
 
     class FakeTray:
         icon = None
 
         def __init__(self, **kw): pass
         def start(self): pass
-        def set_health(self, state): pass
+        def set_health(self, state): painted.append(state)
+
+    def stopper():
+        # Ends the loop from OUTSIDE it. The ceiling is generous (this needs two
+        # 1-second idle waits) and only ever reached when the loop is not
+        # ticking, which is the case that must fail loudly rather than hang.
+        ticked_twice.wait(timeout=15)
+        m._running = False          # restored by _boot's monkeypatch.setattr
 
     monkeypatch.setattr(m, "StatusHub", FakeHub)
     _boot(monkeypatch, m, FakeTray)
+    stop_thread = threading.Thread(target=stopper)
+    stop_thread.start()
     m.main()
-    assert ticks, "the idle dispatch loop never called hub.tick()"
+    stop_thread.join(timeout=5)
+
+    assert len(ticks) >= 2, (
+        f"the dispatch loop must tick the hub on every idle pass, not once "
+        f"before the loop begins: {len(ticks)} tick(s)")
+    assert painted == [Health.STARTING], (
+        f"nothing was ever enqueued, so those ticks can only have come from the "
+        f"queue.Empty branch rather than from a drained token: {painted}")
 
 
 def test_hub_callbacks_only_enqueue(monkeypatch):
-    """The hub invokes on_change/on_notify while HOLDING its lock, from worker
-    threads. Anything more than a q.put() there re-enters the hub or touches Tk
-    off the main thread -- the exact bug class this design exists to prevent."""
+    """The hub invokes on_change/on_notify while HOLDING its non-reentrant lock,
+    from worker threads. Anything more than a q.put() there re-enters the hub or
+    touches Tk/pystray off the main thread -- the exact bug class this design
+    exists to prevent.
+
+    #19: this used to assert only that the callbacks enqueued the RIGHT TOKEN, so
+    a callback that ALSO called tray.set_health(...) -- the precise violation the
+    sentence above names -- sailed through. It now proves ONLY. Every route out of
+    a callback is tripwired: the hub (re-entry), the tray and the two window/toast
+    entry points (Tk off the main thread), and the queue records ALL of its own
+    calls rather than just puts, so a second queue interaction shows up too.
+
+    The tripwires are proved live before they are trusted: main()'s own startup
+    trips several of them, and that is asserted as a precondition. Residual, and
+    stated rather than papered over -- this cannot prove the absence of an
+    arbitrary side effect (a file write, a socket). It pins the three classes the
+    design names."""
     import queue
     import webcam_client.main as m
     from webcam_client.status import Health
 
     captured = {}
+    trips = []
+    q_calls = []
 
     class FakeHub:
         def __init__(self, **kw):
             captured.update(kw)
-            self.state = Health.STARTING
+            self._state = Health.STARTING
 
-        def faulty_sources(self): return []
-        def report(self, source, fault): pass
-        def set_paused(self, paused): pass
-        def clear_all(self): pass
+        @property
+        def state(self):
+            trips.append("hub.state")
+            return self._state
+
+        def faulty_sources(self):
+            trips.append("hub.faulty_sources")
+            return []
+
+        def report(self, source, fault): trips.append("hub.report")
+        def set_paused(self, paused): trips.append("hub.set_paused")
+        def clear_all(self): trips.append("hub.clear_all")
 
         def tick(self):
+            trips.append("hub.tick")
             m._running = False
 
     class FakeTray:
         icon = None
 
         def __init__(self, **kw): pass
-        def start(self): pass
-        def set_health(self, state): pass
-
-    puts = []
+        def start(self): trips.append("tray.start")
+        def set_health(self, state): trips.append("tray.set_health")
 
     class RecordingQueue(queue.Queue):
+        """Records every call, not only put(): a callback that DRAINS the queue,
+        or puts twice, is as much a violation as one that touches Tk."""
+
         def put(self, item, *a, **kw):
-            puts.append(item)
+            q_calls.append(("put", item))
             super().put(item, *a, **kw)
+
+        def get(self, *a, **kw):
+            q_calls.append(("get", None))
+            return super().get(*a, **kw)
+
+        def get_nowait(self, *a, **kw):
+            q_calls.append(("get_nowait", None))
+            return super().get_nowait(*a, **kw)
 
     monkeypatch.setattr(m.queue, "Queue", RecordingQueue)
     monkeypatch.setattr(m, "StatusHub", FakeHub)
+    monkeypatch.setattr(m, "notify_state",
+                        lambda icon, state: trips.append("notify_state"))
+    monkeypatch.setattr(m, "open_status_window",
+                        lambda state, **kw: trips.append("open_status_window"))
+    monkeypatch.setattr(m, "run_setup_wizard",
+                        lambda cfg, **kw: trips.append("run_setup_wizard"))
     _boot(monkeypatch, m, FakeTray)
     m.main()
 
     assert callable(captured.get("on_change")) and callable(captured.get("on_notify"))
-    captured["on_change"](Health.BAD_KEY)
-    assert puts[-1] == "HEALTH", "on_change must ONLY enqueue"
+    # The instruments must be live, or "trips == []" below proves nothing.
+    assert "tray.set_health" in trips and "hub.state" in trips, \
+        f"the tripwires never fired during main(), so they cannot be trusted: {trips}"
+    assert any(kind == "get" for kind, _ in q_calls), \
+        "the queue recorder never saw the loop's own get()"
+
+    for name, token in (("on_change", "HEALTH"),
+                        ("on_notify", ("NOTIFY", Health.BAD_KEY))):
+        del trips[:]
+        del q_calls[:]
+        captured[name](Health.BAD_KEY)
+        assert q_calls == [("put", token)], (
+            f"{name} must make exactly ONE queue call, a put of {token!r}: "
+            f"{q_calls}")
+        assert trips == [], (
+            f"{name} did more than enqueue -- it reached {trips}. That runs on a "
+            f"WORKER thread inside the hub's own non-reentrant lock: a hub call "
+            f"deadlocks or reads state the hub is midway through changing, and a "
+            f"tray/Tk call paints from the wrong thread.")
     # I-2: on_notify still ONLY enqueues -- the load-bearing invariant is
-    # untouched -- but the token now CARRIES the state, because the state that
-    # matured cannot be recovered at drain time. Assert both halves: the
-    # payload is there, and nothing but a put() happened.
-    captured["on_notify"](Health.BAD_KEY)
-    assert puts[-1] == ("NOTIFY", Health.BAD_KEY), \
-        "on_notify must ONLY enqueue, and must carry the state that matured"
+    # untouched -- but its token CARRIES the state, because the state that
+    # matured cannot be recovered at drain time (see _handle_notify).
 
 
 # --------------------------------------------------------------------------

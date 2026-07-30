@@ -268,6 +268,140 @@ def test_a_fault_that_cleared_during_the_pause_still_toasts_its_recovery():
 
 
 # --------------------------------------------------------------------------
+# Finding #7: a FLAPPING fault could never be announced at all.
+#
+# tick() used to measure the debounce from _state_since, and _recompute_locked()
+# resets _state_since on EVERY state change. An uplink that flaps -- down 5s, up
+# 5s, down 5s, faster than the 30s window -- therefore reset the announcement
+# clock forever, and the guard was never told anything, no matter how many hours
+# the site had been effectively unusable. A flapping uplink is one of the
+# commonest real site conditions there is, and it produced total silence.
+#
+# The window is now measured against how long the fault has ACTUALLY been
+# present during this episode, not against how long the state has held without
+# interruption. That is strictly EASIER to satisfy than "30 CONSECUTIVE
+# seconds" -- on purpose, because consecutive-30 IS the rule that produced the
+# silence: test_a_flapping_fault_is_eventually_announced below has a longest
+# unbroken stretch of 5 seconds, so consecutive-30 would never fire. What it is
+# strictly harder than is the obvious wrong fix, "30 seconds since the trouble
+# started" -- see test_a_second_blip_a_window_later_still_does_not_announce.
+#
+# The standing rule (never announce a blip shorter than the window) holds on its
+# own terms: a toast cannot fire until the fault has been PRESENT for the full
+# 30s, so a fault present for less can never be announced.
+#
+# The four tests below pin both directions -- the flap is announced, and none of
+# the three shapes of blip that must stay silent become audible.
+# --------------------------------------------------------------------------
+
+def test_a_flapping_fault_is_eventually_announced():
+    """Six 5-second outages with 5 seconds of working uploads between them: 30
+    seconds of real downtime, no single stretch longer than 5. The guard has to
+    be told; before this the clock reset 12 times and nothing ever fired."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NONE)
+    notifies.clear()
+
+    for cycle in range(1, 7):
+        hub.report("cam1", Fault.NO_SERVER)
+        clock.advance(5)
+        hub.tick()
+        if cycle < 6:
+            assert notifies == [], (
+                f"cycle {cycle}: only {5 * cycle}s of real downtime so far, so "
+                f"the fault has not been present for a full window yet")
+            hub.report("cam1", Fault.NONE)          # ...and back up again
+            clock.advance(5)
+            hub.tick()
+            assert notifies == [], (
+                f"cycle {cycle}: uploads are working at this instant")
+
+    assert notifies == [Health.NO_SERVER], (
+        "60 seconds into a server that flaps every 5 seconds the guard has "
+        "still been told nothing: every transition reset the announcement clock")
+
+
+def test_a_second_blip_a_window_later_still_does_not_announce():
+    """The trap the obvious fix falls into, and the reason the clock counts
+    downtime rather than the span it happened in.
+
+    An implementation that merely remembered WHEN the trouble started ("first
+    degraded 31s ago, and it is degraded right now") toasts here -- after two
+    seconds of actual downtime, which is exactly the blip the rule forbids."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NONE)
+    notifies.clear()
+
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(1)
+    hub.report("cam1", Fault.NONE)               # a 1s blip
+    clock.advance(29)                            # 29s of perfectly good uploads
+    hub.report("cam1", Fault.NO_SERVER)          # a second 1s blip, 30s later
+    clock.advance(1)
+    hub.tick()
+
+    assert notifies == [], (
+        f"two seconds of downtime inside 31 seconds is a blip, not an outage: "
+        f"{notifies}")
+
+
+def test_a_full_window_of_recovery_forgets_the_earlier_downtime():
+    """An episode has to END, or the accumulator becomes a lifetime total: a 25s
+    outage this morning would bank 25 seconds of credit, and a 25s outage this
+    afternoon -- a blip, which must stay silent -- would toast 5 seconds in."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NONE)
+    notifies.clear()
+
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(25)                            # just inside the window
+    hub.tick()
+    assert notifies == [], "precondition: 25s must not have announced"
+    hub.report("cam1", Fault.NONE)
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS + 1)   # a FULL window of good uploads
+    hub.tick()
+
+    hub.report("cam1", Fault.NO_SERVER)          # a genuinely new outage
+    clock.advance(25)
+    hub.tick()
+    assert notifies == [], (
+        f"the second outage must serve its own full window instead of "
+        f"inheriting credit from one that had already cleared: {notifies}")
+
+    clock.advance(6)
+    hub.tick()
+    assert notifies == [Health.NO_SERVER], "...and must still be announced"
+
+
+def test_a_different_fault_starts_its_own_window():
+    """Cumulative downtime is tracked PER FAULT. A freshly-begun CAMERA_DOWN
+    must not inherit the 29 seconds an unrelated server outage had banked --
+    that is the "a new fault bypasses the debounce" bug, which was a review
+    finding of its own."""
+    hub, _, notifies, clock = make()
+    hub.report("cam1", Fault.NONE)
+    notifies.clear()
+
+    hub.report("cam1", Fault.NO_SERVER)
+    clock.advance(29)
+    hub.tick()
+    assert notifies == [], "precondition: NO_SERVER is still inside its window"
+
+    hub.report("cam2", Fault.CAMERA_DOWN)        # NO_SERVER still outranks it
+    hub.report("cam1", Fault.NONE)               # now CAMERA_DOWN, 0s old
+    assert hub.state is Health.CAMERA_DOWN
+    clock.advance(2)
+    hub.tick()
+    assert notifies == [], (
+        f"CAMERA_DOWN began 2 seconds ago and must serve its own window: "
+        f"{notifies}")
+
+    clock.advance(NOTIFY_DEBOUNCE_SECONDS)
+    hub.tick()
+    assert notifies == [Health.CAMERA_DOWN]
+
+
+# --------------------------------------------------------------------------
 # Ledger row A: the branch's central design claim, under real threads.
 # --------------------------------------------------------------------------
 

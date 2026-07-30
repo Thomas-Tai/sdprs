@@ -156,26 +156,91 @@ def _camera_display_names(sources, cameras) -> list:
     return names
 
 
+def _report_rebuild_failure(controller, hub) -> None:
+    """Tell the hub what is TRUE after a rebuild that failed twice.
+
+    start_engines() can fail PARTWAY. It publishes each engine the moment it
+    starts (deliberately -- so a later failure cannot leak an open camera) and it
+    builds the ControlChannel LAST. So a camera that refuses to start leaves the
+    cameras before it alive and uploading, the cameras after it never attempted,
+    and no control channel at all.
+
+    This used to report CONTROL_SOURCE/NO_SERVER unconditionally, and that was
+    wrong in the worst way available (finding #18): there is no control channel
+    alive to ever report Fault.NONE for that key, so the fault was PERMANENT, and
+    NO_SERVER outranks CAMERA_DOWN, so it masked everything under it. The guard
+    read 「無法連線到伺服器 / 請檢查電腦後方的網路線是否鬆脫」 for the rest of the
+    process while camera 1's snapshots landed on the server perfectly well, and
+    only another clear_all() -- a settings save, or pressing 重新連線 again --
+    could shift it.
+
+    What is actually true is per camera, so that is what is reported:
+
+    * A camera with NO worker has no picture. Nothing will upload for it and
+      nothing will ever discover that it is fine again, so CAMERA_DOWN is not
+      merely allowed to outlive the report -- it is CORRECT that it does, and
+      camera_down's action line says exactly that: re-seat the USB cable, then
+      press 重新連線. CAMERA_DOWN is also the LOWEST fault in _PRECEDENCE, so a
+      stale one masks nothing; that is the whole difference from the NO_SERVER it
+      replaces, and it is why leaving working cameras running is safe here.
+    * A camera that IS running is left alone. The alternative -- stop_engines()
+      first, so the old 「畫面目前無法上傳」 becomes literally true -- would make
+      the tray honest by taking a camera that was recording perfectly well off
+      the air, and NO_SERVER's own action line promises 「網路恢復後會自動繼續
+      上傳」, which nothing would then be alive to do. Trading a working camera
+      for a message that is still half false is the wrong way round.
+    * Nothing running and no camera to name (an empty camera list) is the one
+      case where NO_SERVER is the honest report: nothing is uploading and there
+      is no camera to blame. Kept, because the hub must never be left on
+      STARTING -- a grey tray reading 啟動中 forever, with no toast, is the
+      silent lie this whole phase exists to remove.
+    * Every camera running, and the ControlChannel is what raised: every camera
+      has a picture and is uploading, so ANY fault here would be a lie, and the
+      engines report the truth by themselves. The loss is live view, which has no
+      word in the frozen Fault vocabulary -- so it goes to the technician's log
+      and nothing is said to the guard. ERROR, not DEBUG: the root logger sits at
+      INFO and a DEBUG line would be discarded, and this log entry is the only
+      trace this failure will ever leave.
+    """
+    running = set(controller.running_node_ids())
+    enabled = enabled_cameras(controller.config)
+    # Cameras with no node_id are skipped: the hub keys on node_id and
+    # _camera_display_names() maps by it, so a report for one could neither be
+    # cleared nor named at the guard.
+    silent = [nid for nid in (c.get("node_id") for c in enabled)
+              if nid and nid not in running]
+    if silent:
+        logger.error("Rebuild failed; these cameras have no worker: %s",
+                     ", ".join(silent))
+        for node_id in silent:
+            hub.report(node_id, Fault.CAMERA_DOWN)
+    elif not running:
+        hub.report(CONTROL_SOURCE, Fault.NO_SERVER)
+    else:
+        logger.error(
+            "Rebuild failed after every camera started: remote commands "
+            "(live view) are unavailable until the next 重新連線")
+
+
 def _rebuild_engines(controller, hub=None) -> bool:
     """Rebuild every engine in-process from the controller's CURRENT config.
     Returns True when the rebuild succeeded. Never raises.
 
     apply() is stop_engines() + start_engines(), and stop_engines() ends in
     hub.clear_all() -- which resets _seen_any_report and drops the hub back to
-    STARTING. If start_engines() then raises (a camera that will not open, a
-    server URL the control channel cannot use -- and the control channel is
-    built LAST, so it never gets built at all), NOTHING is left alive to report
-    a fault. The hub sits on STARTING for the rest of the process: a grey tray
-    reading 啟動中 / 正在連線並開啟攝影機，請稍候。 forever, with no toast,
-    because tick() never announces a healthy state.
+    STARTING. If start_engines() then raises (a malformed config the engine
+    factory cannot use, a thread that will not start -- and the control channel
+    is built LAST, so it may never get built at all), the hub can be left with
+    nothing alive to report a fault: it sits on STARTING for the rest of the
+    process, a grey tray reading 啟動中 / 正在連線並開啟攝影機，請稍候。 forever,
+    with no toast either, because tick() never announces a healthy state.
 
     That is precisely the silent lie this phase exists to remove -- and the
     guard reaches it by pressing 重新連線, the button they press to FIX things.
     So: retry once (the same best-effort recovery the OPEN_SETTINGS error path
     has always used -- apply() stops first, so a retry cleans up any partial
     engine set instead of stacking a second one on top of it), and if that
-    fails too, tell the hub, so the light stops claiming the app is still
-    starting up.
+    fails too, tell the hub what is true (see _report_rebuild_failure).
     """
     for attempt in (1, 2):
         try:
@@ -184,14 +249,14 @@ def _rebuild_engines(controller, hub=None) -> bool:
         except Exception:
             logger.exception("Engine rebuild failed (attempt %d)", attempt)
     if hub is not None:
-        # Nothing is running and nothing will report. CONTROL_SOURCE is the
-        # honest owner: start_engines() builds the control channel last, so a
-        # failed rebuild always leaves it down. NO_SERVER is the state whose
-        # text says what the guard can actually observe -- 畫面目前無法上傳 --
-        # and outranks CAMERA_DOWN, so a later camera fault cannot mask it.
-        # _camera_display_names() already drops this key before any text
-        # reaches the guard.
-        hub.report(CONTROL_SOURCE, Fault.NO_SERVER)
+        try:
+            _report_rebuild_failure(controller, hub)
+        except Exception:
+            # "Never raises" is load-bearing: startup calls this, and an
+            # exception leaving main() there sends the traceback to a sys.stderr
+            # that is None in the windowed build -- the guard watches the tray
+            # icon appear and vanish with no log line and no dialog.
+            logger.exception("Could not report the failed rebuild to the hub")
     return False
 
 

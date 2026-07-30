@@ -42,9 +42,14 @@ class Health(Enum):
 
 CONTROL_SOURCE = "__control__"
 
-# A fault must persist this long before it is announced. A failing uplink
+# A fault must be PRESENT this long before it is announced. A failing uplink
 # reports at ~1Hz and transient blips are routine; toasting every one of them
 # trains the operator to ignore all notifications.
+#
+# Present, not "held without interruption": the same window doubles as the
+# measure of a recovery, so an episode of trouble ends only after the app has
+# been healthy for this long. See _track_dwell_locked -- a flapping uplink used
+# to reset a consecutive-time clock forever and was never announced at all.
 NOTIFY_DEBOUNCE_SECONDS = 30.0
 
 # Worst first. PAUSED is handled separately (it outranks everything). BAD_KEY
@@ -76,6 +81,45 @@ class StatusHub:
         self._seen_any_report = False
         self._state_since = clock()
         self._notified = Health.STARTING
+        # The announcement clock CANNOT be _state_since. _recompute_locked()
+        # resets that on every transition, so an uplink that flaps -- down 5s,
+        # up 5s, down 5s, faster than the window -- reset it forever and the
+        # guard was never told a thing, however many hours the site had been
+        # unusable. A flapping uplink is one of the commonest site conditions
+        # there is, and it produced total silence (finding #7).
+        #
+        # So the window is served by how long the fault has ACTUALLY been
+        # present in this episode, summed across the gaps.
+        #
+        # Be precise about what that does and does not weaken. It is strictly
+        # EASIER to satisfy than "30 CONSECUTIVE seconds" -- deliberately, since
+        # consecutive-30 is the rule that produced the silence: a flap whose
+        # longest unbroken stretch is 5s reaches 30s cumulative and is announced,
+        # where consecutive-30 never fires at all. What it is strictly harder
+        # than is the obvious wrong fix, "30 seconds have elapsed since the
+        # trouble started", which counts the healthy gaps and would toast after
+        # two seconds of real downtime spread across a 31-second span.
+        #
+        # The standing rule -- never announce a blip shorter than
+        # NOTIFY_DEBOUNCE_SECONDS -- survives on its own terms and needs no
+        # comparison to consecutive-30: a toast cannot fire until the fault has
+        # been PRESENT for the full window, so a fault present for less than
+        # that can never be announced, however its downtime is distributed.
+        #
+        # _degraded_state is the fault-state the tally belongs to (it is always
+        # identical to _state while _state is unhealthy, because entering a
+        # fault state always claims it). _degraded_dwell is the downtime banked
+        # in EARLIER stretches only -- the stretch running right now is
+        # _clock() - _state_since, and tick() adds the two.
+        self._degraded_state = None
+        self._degraded_dwell = 0.0
+        # When the current unbroken run of healthy states began; None while a
+        # fault is live. STARTING counts, so the app boots inside a healthy run.
+        # A healthy run that lasts a whole window ENDS the episode and zeroes the
+        # tally -- without that the tally becomes a lifetime total, and a 25s
+        # outage this morning would make a 25s outage this afternoon (a blip,
+        # which must stay silent) toast five seconds in.
+        self._healthy_since = clock()
 
     # --- public API -------------------------------------------------------
 
@@ -112,11 +156,19 @@ class StatusHub:
 
     def tick(self) -> None:
         """Called from the main dispatch loop. Announces a degraded state once
-        it has been stable for the debounce window."""
+        the fault behind it has been PRESENT for the debounce window.
+
+        "Present for" is cumulative, not consecutive: a fault that comes and
+        goes faster than the window used to reset the clock on every transition
+        and was therefore never announced at all (finding #7). The sum can only
+        reach the window after the fault has genuinely been there that long, so
+        a blip still cannot toast. See _track_dwell_locked.
+        """
         with self._lock:
             if self._state in _HEALTHY or self._state is self._notified:
                 return
-            if self._clock() - self._state_since >= NOTIFY_DEBOUNCE_SECONDS:
+            dwell = self._degraded_dwell + (self._clock() - self._state_since)
+            if dwell >= NOTIFY_DEBOUNCE_SECONDS:
                 self._notified = self._state
                 self._on_notify(self._state)
 
@@ -130,12 +182,58 @@ class StatusHub:
                 return _FAULT_TO_HEALTH[fault]
         return Health.RUNNING if self._seen_any_report else Health.STARTING
 
+    def _track_dwell_locked(self, new, now) -> None:
+        """Carry the cumulative-downtime tally across one state transition.
+
+        Called with the OLD state still in self._state, before the assignment.
+
+        What the guard gets out of it: a server that flaps is announced after 30
+        seconds of real downtime instead of never (finding #7), and none of the
+        three shapes of blip that must stay silent becomes audible --
+
+          * a short outage that clears: the tally stops growing the moment the
+            fault goes, and tick() returns early while the state is healthy;
+          * the same fault returning after a full window of good uploads: a new
+            episode, tally zeroed;
+          * a DIFFERENT fault that has only just begun: a different episode,
+            tally zeroed. Without that last rule a freshly-begun CAMERA_DOWN
+            would inherit the seconds a server outage had banked and toast at
+            once, which was a review finding in its own right.
+
+        Deliberately conservative where it cannot be sure: a fault that
+        alternates with a DIFFERENT fault (rather than with health) faster than
+        the window still zeroes the tally each time and so is still not
+        announced. Announcing it would mean pooling unlike faults into one
+        window, which is exactly what re-opens the "new fault bypasses the
+        debounce" hole. The tray light still moves and the log still has both
+        faults; this only concerns the toast.
+        """
+        if self._degraded_state is not None and self._state is self._degraded_state:
+            # Bank the stretch that is ending. Only time spent WITH the fault
+            # counts -- the healthy gaps of a flap contribute nothing, which is
+            # what makes the window a downtime measure rather than a wall-clock
+            # one. max() because an injected clock is not guaranteed monotonic.
+            self._degraded_dwell += max(0.0, now - self._state_since)
+        if new in _HEALTHY:
+            if self._healthy_since is None:
+                self._healthy_since = now
+            return
+        recovered_for_a_full_window = (
+            self._healthy_since is not None
+            and now - self._healthy_since >= NOTIFY_DEBOUNCE_SECONDS)
+        if new is not self._degraded_state or recovered_for_a_full_window:
+            self._degraded_state = new
+            self._degraded_dwell = 0.0
+        self._healthy_since = None
+
     def _recompute_locked(self) -> None:
         new = self._compute_locked()
         if new is self._state:
             return
+        now = self._clock()
+        self._track_dwell_locked(new, now)
         self._state = new
-        self._state_since = self._clock()
+        self._state_since = now
         self._on_change(new)
         # PAUSED is in _HEALTHY (uploads are intentionally stopped, so no fault
         # can be "occurring"), but it is NOT a recovery: it is the guard's own
