@@ -341,3 +341,89 @@ def test_stabilize_flag_false_skips_orb_entirely():
     # Detection still runs; a flat frame simply does not trigger.
     if result:
         assert result.triggered is False
+
+# ============================================================
+# 穩定化與解析度：2026-07-31 review 發現的兩個缺陷
+# ============================================================
+
+def _textured_scene(seed=7):
+    """有大量 ORB 角點的靜態場景；平坦影像測不出對齊。"""
+    rng = np.random.default_rng(seed)
+    img = np.full((900, 1600, 3), 110, dtype=np.uint8)
+    for _ in range(220):
+        x, y = int(rng.integers(20, 1560)), int(rng.integers(20, 860))
+        w, h = int(rng.integers(12, 60)), int(rng.integers(12, 60))
+        shade = int(rng.integers(40, 230))
+        cv2.rectangle(img, (x, y), (x + w, y + h), (shade, shade, shade), -1)
+    return img
+
+
+def _interior(a):
+    """裁掉 warpAffine 補的黑邊，否則黑邊會主導平均值。"""
+    return a[80:640, 120:1160]
+
+
+def test_stabilization_reduces_misalignment_instead_of_doubling_it():
+    """對齊必須讓當前幀更接近前一幀，而不是更遠。
+
+    這條斷言存在的原因：`M = estimateAffinePartial2D(src=前一幀, dst=當前幀)`
+    求出的是「前一幀 → 當前幀」的變換，卻被套用在**當前幀**上，等於把位移再加一次。
+    量測（8px 位移）：未對齊 4.34、照原本寫法對齊 8.53、把變換反過來 0.04——
+    也就是整條管線最貴的一段，效果比完全不做還差一倍。
+
+    斷言寫成「必須明顯優於未對齊」而非某個固定數值，因為重點是方向對不對。
+    """
+    scene = _textured_scene()
+    shift = 8
+    g0 = cv2.cvtColor(scene[40:760, 60:1340].copy(), cv2.COLOR_BGR2GRAY)
+    g1 = cv2.cvtColor(scene[40:760, 60 + shift:1340 + shift].copy(), cv2.COLOR_BGR2GRAY)
+
+    detector = VisualDetector(VISUAL_CONFIG, fps=15)
+    detector._stabilize(g0)          # 建立前一幀特徵快取
+    aligned = detector._stabilize(g1)
+
+    unaligned_err = float(cv2.absdiff(_interior(g0), _interior(g1)).mean())
+    aligned_err = float(cv2.absdiff(_interior(g0), _interior(aligned)).mean())
+
+    assert aligned_err < unaligned_err * 0.5, (
+        f"對齊後誤差 {aligned_err:.2f} 未明顯低於未對齊 {unaligned_err:.2f}；"
+        "若接近兩倍，代表仿射變換方向反了"
+    )
+
+
+def test_stabilization_is_a_no_op_on_a_perfectly_still_camera():
+    """靜止畫面不該被對齊動到——否則穩定化本身就是雜訊來源。"""
+    scene = _textured_scene()
+    g = cv2.cvtColor(scene[40:760, 60:1340].copy(), cv2.COLOR_BGR2GRAY)
+
+    detector = VisualDetector(VISUAL_CONFIG, fps=15)
+    detector._stabilize(g)
+    aligned = detector._stabilize(g)
+
+    assert float(cv2.absdiff(_interior(g), _interior(aligned)).mean()) < 0.5
+
+
+@pytest.mark.parametrize("detect_scale", [1.0, 0.5])
+def test_a_camera_that_is_not_720p_does_not_crash(detect_scale):
+    """偵測管線把 ROI 遮罩固定建在 1280x720 畫布上，但 camera.resolution 是可設定的。
+
+    detect_scale != 1.0 時每幀都會被縮到工作畫布，尺寸自然一致；detect_scale == 1.0
+    時原本會跳過縮放，於是 1080p 節點在 `_apply_roi` 的 bitwise_and 直接拋
+    `cv::binary_op` 尺寸斷言。兩條路徑的解析度語意必須一致。
+    """
+    frame = np.full((1080, 1920, 3), 128, dtype=np.uint8)
+    detector = VisualDetector({**VISUAL_CONFIG, "detect_scale": detect_scale}, fps=15)
+    for _ in range(20):
+        detector.analyze(frame)     # 不得拋出
+
+
+@pytest.mark.parametrize("detect_scale", [1.0, 0.5])
+def test_the_working_canvas_matches_the_roi_mask_whatever_comes_in(detect_scale):
+    """上面那條的直接成因：工作影像與遮罩尺寸必須永遠相同。"""
+    detector = VisualDetector({**VISUAL_CONFIG, "detect_scale": detect_scale}, fps=15)
+    for shape in ((1080, 1920, 3), (720, 1280, 3), (480, 640, 3)):
+        work = detector._to_work_size(np.full(shape, 128, dtype=np.uint8))
+        assert work.shape[:2] == detector._roi_mask.shape, (
+            f"{shape} 在 detect_scale={detect_scale} 下縮出 {work.shape[:2]}，"
+            f"與遮罩 {detector._roi_mask.shape} 不符"
+        )

@@ -167,6 +167,23 @@ class VisualDetector:
     # ============================================================
     # 步驟 [2] 防震對齊
     # ============================================================
+    def _to_work_size(self, frame: np.ndarray) -> np.ndarray:
+        """把任何進來的幀縮到偵測工作畫布，讓它與預生成的 ROI 遮罩尺寸永遠一致。
+
+        無條件執行，包含 detect_scale == 1.0。原本 1.0 會跳過縮放，於是兩條路徑的
+        解析度語意不同：ROI 遮罩固定建在 1280x720 畫布上，但 camera.resolution 是
+        可設定的，所以 1080p 節點在 detect_scale=1.0 下會直接在 `_apply_roi` 的
+        bitwise_and 拋出 `cv::binary_op` 尺寸斷言，而 detect_scale=0.5 卻正常。
+        「不降採樣」不該順帶改變支援的攝像頭解析度。
+
+        已經是目標尺寸就原樣返回，避免對 720p 節點多做一次無意義的 resize。
+        """
+        if frame.shape[1] == self._work_w and frame.shape[0] == self._work_h:
+            return frame
+        return cv2.resize(
+            frame, (self._work_w, self._work_h), interpolation=cv2.INTER_AREA
+        )
+
     def _stabilize(self, gray: np.ndarray) -> np.ndarray:
         """
         步驟 [2]：防震對齊。
@@ -215,8 +232,16 @@ class VisualDetector:
                 -1, 1, 2
             )
 
-            # 計算仿射變換
-            M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+            # 計算仿射變換：dst→src，也就是「當前幀 → 前一幀」。
+            #
+            # 這裡原本寫成 (src_pts, dst_pts)，求出的是「前一幀 → 當前幀」，卻套用在
+            # **當前幀**上，等於把位移再往前加一次。實測 8px 位移下的平均絕對差：
+            # 未對齊 4.34、原本寫法 8.53、方向反過來 0.04——整條管線最貴的一段，
+            # 效果比完全不做還差一倍，而且從 2026-07-26 起就是這樣。
+            #
+            # src_pts 取自前一幀、dst_pts 取自當前幀（見上方 queryIdx/trainIdx），
+            # 所以要把當前幀搬回前一幀的座標系，參數順序必須是 (dst, src)。
+            M, _ = cv2.estimateAffinePartial2D(dst_pts, src_pts)
 
             if M is None:
                 return gray
@@ -449,11 +474,8 @@ class VisualDetector:
             VisualResult 或 None（異常幀）
         """
         # 偵測降採樣：只縮偵測用的工作副本（重新綁定區域變數 frame）；呼叫端傳入的
-        # 原始 frame（供緩衝／快照）不受影響。縮到工作畫布尺寸，與 ROI 遮罩一致。
-        if self._detect_scale != 1.0:
-            frame = cv2.resize(
-                frame, (self._work_w, self._work_h), interpolation=cv2.INTER_AREA
-            )
+        # 原始 frame（供緩衝／快照）不受影響。
+        frame = self._to_work_size(frame)
 
         # [1] 灰度轉換
         gray = self._to_gray(frame)
