@@ -521,8 +521,7 @@ def test_the_uplink_domain_outranks_the_camera_domain():
     survived the ENTIRE suite, because every test happened to put the worse fault
     last.
     """
-    from webcam_client.push_engine import _worse
-    from webcam_client.status import Fault, _PRECEDENCE
+    from webcam_client.status import Fault, _PRECEDENCE, worse_fault as _worse
 
     assert _PRECEDENCE.index(Fault.NO_SERVER) < _PRECEDENCE.index(Fault.CAMERA_DOWN)
     assert _PRECEDENCE.index(Fault.BAD_KEY) < _PRECEDENCE.index(Fault.CAMERA_DOWN)

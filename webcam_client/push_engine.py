@@ -9,22 +9,17 @@ import httpx
 
 from .camera_manager import open_camera, compute_motion, adaptive_fps
 from .hls_encoder import HlsEncoder
-# _PRECEDENCE is the hub's own worst-first fault ordering, imported READ-ONLY.
-# _publish() below merges this engine's two fault domains with it, so the engine
-# and the hub can never disagree about which of two live problems the guard
-# should be told about. A private copy of the ordering would drift the first time
-# a fault was added. control_channel.py imports it for the same reason.
-from .status import Fault, _PRECEDENCE
+# worse_fault() is the hub's own worst-first fault comparison, imported
+# READ-ONLY. _publish() below merges this engine's two fault domains through
+# it, so the engine and the hub can never disagree about which of two live
+# problems the guard should be told about. This module and control_channel.py
+# used to each carry a byte-identical private copy of this rule -- exactly the
+# drift risk a single shared rule is supposed to prevent, since a private copy
+# could go stale the moment status.py's _PRECEDENCE changed. Promoted to
+# status.py so there is only one rule for both modules to keep in sync with.
+from .status import Fault, worse_fault
 
 logger = logging.getLogger("webcam_client.push_engine")
-
-_RANK = {fault: i for i, fault in enumerate(_PRECEDENCE)}
-_RANK_NONE = len(_PRECEDENCE)          # Fault.NONE is not in _PRECEDENCE
-
-
-def _worse(a: Fault, b: Fault) -> Fault:
-    """Return whichever of the two faults the operator should hear about."""
-    return a if _RANK.get(a, _RANK_NONE) <= _RANK.get(b, _RANK_NONE) else b
 
 # How long a camera may deliver nothing before the operator is told.
 #
@@ -120,7 +115,7 @@ class PushEngine(threading.Thread):
         them to check a USB cable when the server is unreachable -- and the
         uplink verdict would be lost entirely.
         """
-        fault = _worse(self._camera_fault, self._uplink_fault)
+        fault = worse_fault(self._camera_fault, self._uplink_fault)
         if fault is self._last_fault:
             return
         self._last_fault = fault

@@ -74,6 +74,48 @@ def test_precedence_no_server_beats_camera_down():
     assert hub.state is Health.NO_SERVER
 
 
+def test_worse_fault_ranks_by_precedence_position():
+    """worse_fault() is the promoted helper control_channel.py and
+    push_engine.py both import read-only -- they used to each carry a
+    byte-identical private copy, which is exactly the drift risk the single
+    _PRECEDENCE tuple exists to prevent (a private copy could go stale the
+    moment _PRECEDENCE changed, and the two modules would silently disagree
+    about which of two live faults matters more to the guard).
+
+    Expectations here are derived from _PRECEDENCE's OWN order via
+    `.index()`, not from hardcoded fault names, so a future reordering of
+    _PRECEDENCE moves this test's expectations with it instead of leaving
+    them to silently go stale.
+    """
+    from webcam_client.status import worse_fault, _PRECEDENCE
+
+    all_faults = (Fault.NONE,) + _PRECEDENCE
+
+    def rank(fault):
+        # Mirrors _PRECEDENCE-relative ranking, not a hardcoded value: NONE is
+        # not in _PRECEDENCE at all, so it must sort after every real fault.
+        return _PRECEDENCE.index(fault) if fault in _PRECEDENCE else len(_PRECEDENCE)
+
+    # Every ordered pair, both operand orders -- 16 pairs for today's 4 faults.
+    for a in all_faults:
+        for b in all_faults:
+            expected = a if rank(a) <= rank(b) else b
+            assert worse_fault(a, b) is expected, (
+                f"worse_fault({a}, {b}) should be {expected} per _PRECEDENCE's "
+                f"own order, got {worse_fault(a, b)}")
+
+    # Fault.NONE ranks LAST against every real fault, in both operand orders --
+    # pinned explicitly, not just as a side effect of the loop above.
+    for fault in _PRECEDENCE:
+        assert worse_fault(fault, Fault.NONE) is fault
+        assert worse_fault(Fault.NONE, fault) is fault
+    assert worse_fault(Fault.NONE, Fault.NONE) is Fault.NONE
+
+    # Ties return the first argument.
+    for fault in all_faults:
+        assert worse_fault(fault, fault) is fault
+
+
 def test_paused_outranks_every_fault():
     """Uploads are intentionally stopped while paused, so no fault can be
     occurring -- showing a red 'no server' light then would be a lie."""
@@ -185,8 +227,10 @@ def test_callbacks_are_optional():
 # its own. Every other mapping is pinned by a precedence test that happens to
 # exercise it; CAMERA_DOWN is only ever seen LOSING a precedence contest, so
 # _FAULT_TO_HEALTH[Fault.CAMERA_DOWN] could be wired to any state at all and
-# the suite would stay green. push_engine now reports it from two places, so
-# pin the mapping in isolation.
+# the suite would stay green. push_engine's camera domain now reports it from
+# THREE sites (push_engine.py: the camera failing to open, the sustained-bad-
+# read counter, and the crashed-worker except arm), so pin the mapping in
+# isolation.
 # --------------------------------------------------------------------------
 
 def test_camera_down_alone_maps_to_the_camera_down_health():

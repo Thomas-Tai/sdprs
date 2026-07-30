@@ -6,27 +6,23 @@ from typing import Callable, Dict, Optional
 
 import httpx
 
-# _PRECEDENCE is the hub's own worst-first fault ordering. It is imported
-# READ-ONLY and deliberately not re-declared here: a private copy could drift,
-# and then the channel and the hub would disagree about which of two faults
-# matters more to the guard.
-from .status import Fault, _PRECEDENCE
+# worse_fault() is the hub's own worst-first fault comparison. It is imported
+# READ-ONLY and deliberately not re-declared here: this module and
+# push_engine.py used to each carry a byte-identical private copy of it, which
+# is exactly the drift risk a single shared rule is supposed to prevent -- a
+# private copy could go stale the moment status.py's _PRECEDENCE changed, and
+# this channel and the hub would then silently disagree about which of two
+# live faults matters more to the guard. Promoted to status.py so there is
+# only one rule for both modules to keep in sync with.
+from .status import Fault, worse_fault
 
 logger = logging.getLogger("webcam_client.control")
-
-_RANK = {fault: i for i, fault in enumerate(_PRECEDENCE)}
-_RANK_NONE = len(_PRECEDENCE)          # Fault.NONE is not in _PRECEDENCE
 
 # One node's penalty schedule: its first failure costs a second, each further
 # consecutive failure doubles, and it stops at half a minute. PER NODE -- see
 # ControlChannel._back_off for what a shared counter did to the healthy cameras.
 _BACKOFF_START = 1.0
 _BACKOFF_CEILING = 30.0
-
-
-def _worse(a: Fault, b: Fault) -> Fault:
-    """Return whichever of the two faults the operator should hear about."""
-    return a if _RANK.get(a, _RANK_NONE) <= _RANK.get(b, _RANK_NONE) else b
 
 
 class ControlChannel(threading.Thread):
@@ -235,7 +231,7 @@ class ControlChannel(threading.Thread):
                     # ConnectError left the client's own connect=3.0 timeout
                     # (below) falling into the bare `except Exception` arm, which
                     # never reports to the hub (Task 3 review finding 1).
-                    worst = _worse(worst, Fault.NO_SERVER)
+                    worst = worse_fault(worst, Fault.NO_SERVER)
                     polled_any = True
                     # NAME THE NODE. On a multi-camera site this line used to say
                     # only "transport failure", so the technician reading the log
@@ -289,7 +285,7 @@ class ControlChannel(threading.Thread):
 
                 if polled_any:
                     for node_id in self._node_ids:
-                        worst = _worse(worst, self._node_faults.get(node_id, Fault.NONE))
+                        worst = worse_fault(worst, self._node_faults.get(node_id, Fault.NONE))
                     self._report(worst)
                     # No backoff reset here any more. It used to need whole-cycle
                     # knowledge (every node's latest verdict good) because ONE

@@ -65,6 +65,29 @@ _FAULT_TO_HEALTH = {
 
 _HEALTHY = (Health.RUNNING, Health.PAUSED, Health.STARTING)
 
+_RANK = {fault: i for i, fault in enumerate(_PRECEDENCE)}
+_RANK_NONE = len(_PRECEDENCE)          # Fault.NONE is not in _PRECEDENCE
+
+
+def worse_fault(a: Fault, b: Fault) -> Fault:
+    """Return whichever of two faults the operator should hear about.
+
+    Ranks by position in _PRECEDENCE, worst first; Fault.NONE is not in
+    _PRECEDENCE and therefore always ranks last. Ties return `a`.
+
+    Promoted here from control_channel.py and push_engine.py, which each
+    arrived at this rule separately -- control_channel needs it to fold a
+    whole poll cycle's per-node verdicts down to one, push_engine needs it to
+    merge its camera-fault and uplink-fault domains -- and ended up carrying a
+    byte-identical private copy apiece. Two copies of a rule that decides what
+    a guard is told is exactly the drift risk the single _PRECEDENCE tuple
+    above exists to prevent: a private copy could go stale the moment
+    _PRECEDENCE changed, and the two modules would then silently disagree
+    about which of two live problems matters more to the guard. One function,
+    imported read-only by both, makes that impossible.
+    """
+    return a if _RANK.get(a, _RANK_NONE) <= _RANK.get(b, _RANK_NONE) else b
+
 
 class StatusHub:
     def __init__(self, *,
