@@ -146,7 +146,48 @@ def test_scan_releases_every_capture_it_opened_including_the_early_break():
 
 
 def test_scan_releases_the_capture_when_the_device_raises():
+    # The capture is released whatever the driver does. This used to also
+    # assert the exception PROPAGATED; it no longer does -- see the two tests
+    # below for why that changed. The release guarantee is the part that had to
+    # survive, so it is still asserted here.
     cap = _FakeCapture(ok=True, raise_on_read=True)
-    with pytest.raises(RuntimeError):
-        scan_cameras(max_index=1, capture_factory=lambda i: cap)
+    cams = scan_cameras(max_index=1, capture_factory=lambda i: cap)
+    assert cams == []
     assert cap.release_calls == 1
+
+
+def test_one_exploding_driver_does_not_cost_the_guard_the_working_cameras():
+    """A flaky virtual-camera driver raising mid-sweep used to unwind the whole
+    call, and the wizard's `except Exception -> cams = []` turned that into
+    找不到攝影機 while two working cameras sat plugged in. The guard would then
+    be told to check USB cables that were never the problem."""
+    caps = {}
+
+    def factory(index):
+        cap = _FakeCapture(ok=True, raise_on_read=(index == 1))
+        caps[index] = cap
+        return cap
+
+    cams = scan_cameras(max_index=3, stop_after_misses=3, capture_factory=factory)
+
+    assert [c["device_index"] for c in cams] == [0, 2], \
+        "the working cameras either side of the bad one must survive"
+    assert all(c.release_calls == 1 for c in caps.values()), \
+        "every capture is released, including the one that raised"
+
+
+def test_a_device_that_cannot_even_be_opened_counts_as_a_miss():
+    """Distinct from the above: here the FACTORY raises, so there is no capture
+    object to release and no isOpened() to consult. It must count as a miss --
+    treating it as a hit would append a camera with no device behind it."""
+    opened = []
+
+    def factory(index):
+        opened.append(index)
+        if index == 0:
+            raise OSError("device is being used by another application")
+        return _FakeCapture(ok=True)
+
+    cams = scan_cameras(max_index=2, stop_after_misses=3, capture_factory=factory)
+    assert [c["device_index"] for c in cams] == [1]
+    assert opened == [0, 1]

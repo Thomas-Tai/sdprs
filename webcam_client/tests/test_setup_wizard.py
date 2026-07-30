@@ -172,7 +172,12 @@ def test_scan_cameras_async_runs_off_the_calling_thread(monkeypatch):
     from webcam_client.gui import setup_wizard as sw
     seen = {}
 
-    def fake_scan(max_index=10):
+    # **kwargs, not a fixed signature: scan_cameras grew stop_after_misses and
+    # this fake did not, so the call raised TypeError -- which the worker's
+    # blanket `except Exception -> cams = []` turned into a silent "no cameras
+    # found". A fake narrower than the real thing does not fail as a mismatch,
+    # it fails as the product's own worst behaviour.
+    def fake_scan(max_index=10, **kwargs):
         seen["thread"] = _t.current_thread()
         return [{"device_index": 0, "width": 640, "height": 480}]
 

@@ -1,9 +1,14 @@
 # sdprs/webcam_client/gui/wizard/__init__.py
 """Setup wizard, split by concern.
 
-``connection`` — URL/identity helpers + the registration POST (no Tk, no threads)
-``scanning``   — the blocking DSHOW probe and thumbnail grab, off the Tk thread
-``window``     — the Tk rendering
+``flow``       — which of the three sections is unlocked (pure: no Tk, no I/O)
+``connection`` — URL/identity helpers, the connection probe, and registration
+``scanning``   — the blocking DSHOW probe and thumbnail prep, off the Tk thread
+``window``     — the Tk rendering, and nothing else
+
+The split is what makes the wizard testable: every rule worth pinning ended up
+in ``flow`` or ``connection``, which need no display, and ``window`` is the thin
+remainder that a bench pass covers.
 
 This package is the real home; ``gui/setup_wizard.py`` is a transitional façade
 that re-exports everything below and will be deleted once the new modules carry
@@ -11,11 +16,16 @@ their own tests.
 """
 from .connection import (
     normalize_server_url,
+    probe_connection,
     register_cameras,
+    register_cameras_async,
+    test_connection_async,
     _client_identity_changed,
     _build_cameras_for_registration,
 )
-from .scanning import _scan_cameras_async, _load_thumbnail_async
+from .flow import MODE_EDIT, MODE_FIRST_RUN, WizardFlow
+from .scanning import (_load_thumbnail_async, _prepare_thumbnail_async,
+                       _scan_cameras_async)
 from .window import run_setup_wizard, _camera_rows_from_config
 
 # Underscored names are listed deliberately: the façade re-exports this package
@@ -23,11 +33,18 @@ from .window import run_setup_wizard, _camera_rows_from_config
 # helpers by name. Dropping them here silently breaks ``setup_wizard.*``.
 __all__ = [
     "run_setup_wizard",
+    "WizardFlow",
+    "MODE_FIRST_RUN",
+    "MODE_EDIT",
     "normalize_server_url",
+    "probe_connection",
     "register_cameras",
+    "register_cameras_async",
+    "test_connection_async",
     "_camera_rows_from_config",
     "_client_identity_changed",
     "_build_cameras_for_registration",
     "_scan_cameras_async",
     "_load_thumbnail_async",
+    "_prepare_thumbnail_async",
 ]

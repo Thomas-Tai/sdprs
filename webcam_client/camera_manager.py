@@ -47,7 +47,19 @@ def scan_cameras(
     found: List[dict] = []
     consecutive_misses = 0
     for i in range(max_index):
-        cap = _open(i)
+        # One bad device must not cost the guard the good ones. A flaky virtual
+        # camera driver raising mid-sweep used to unwind the whole call, and the
+        # wizard's `except Exception -> cams = []` turned that into 找不到攝影機
+        # while two working cameras sat plugged in. Per-device now: log it,
+        # count it as a miss, keep going.
+        try:
+            cap = _open(i)
+        except Exception as e:
+            logger.warning(f"camera scan: device {i} could not be opened: {e}")
+            consecutive_misses += 1
+            if consecutive_misses >= stop_after_misses:
+                break
+            continue
         try:
             if not cap.isOpened():
                 consecutive_misses += 1
@@ -70,6 +82,11 @@ def scan_cameras(
                     "frame": frame if ok else None,
                 }
             )
+        except Exception as e:
+            logger.warning(f"camera scan: device {i} failed mid-probe: {e}")
+            consecutive_misses += 1
+            if consecutive_misses >= stop_after_misses:
+                break
         finally:
             cap.release()
     return found
