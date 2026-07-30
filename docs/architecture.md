@@ -243,7 +243,6 @@ sdprs/
 |   |-- deploy_sync.sh               # rsync 增量部署（開發用；SDPRS_* 環境變數）
 |   |-- gen_qrcode.sh                # WiFi/伺服器 QR Code 生成
 |   |-- backup_from_zeabur.sh        # 從 Zeabur 拉取備份（每日 cron）
-|   |-- micropython_esp32.bin        # ESP32 MicroPython 韌體（同 firmware/，供 setup_esp32.sh 就近取用）
 |   +-- restore_to_zeabur.sh         # 從備份還原到 Zeabur PostgreSQL
 |
 |-- storage/                         # ===== 執行時期本地事件儲存（根層） =====
@@ -267,7 +266,11 @@ sdprs/
 - `edge_glass/utils/event_capture.py` 為非同步編碼工作管線（`capture.async_encode` 預設 OFF）。
 - `edge_glass/config.zeabur.yaml` 為雲端變體。
 - `edge_pump/tests/` 與 `edge_pump/conftest.py` 於 2026-07-13 合併補齊。
-- `firmware/micropython_esp32.bin` 為權威快取；`scripts/micropython_esp32.bin` 為歷史殘留（見腳本 §deploy 待清）。
+- `firmware/micropython_esp32.bin` 為唯一權威快取。`setup_esp32.sh:86,90` 只讀
+  `$PROJECT_ROOT/firmware/`。`scripts/micropython_esp32.bin`（舊版建置，MD5
+  `356b3a28…`，與 firmware/ 的 `75bf224b…` 內容不同）已於 2026-07-30 刪除；
+  本文件原本同時聲稱它「同 firmware/，供 setup_esp32.sh 就近取用」又稱它是
+  歷史殘留，兩句互相矛盾，前者是錯的。
 
 ---
 
