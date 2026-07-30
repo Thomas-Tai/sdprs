@@ -412,6 +412,193 @@ def test_bad_read_threshold_is_about_three_seconds():
     assert 2.0 <= delay <= 5.0, f"read-failure grace period is {delay}s"
 
 
+def test_a_camera_coming_back_does_not_claim_the_upload_works(monkeypatch):
+    """The guard re-seats a USB cable while the SERVER is also down.
+
+    PushEngine watches two independent things -- is there a picture, and do
+    snapshots reach the server -- but reported both through ONE slot, so
+    whichever spoke last erased the other. The sequence on a real site:
+
+      1. frames fine, uploads failing   -> NO_SERVER reported. Correct.
+      2. guard pulls the USB cable      -> sustained bad reads. The read path
+         `continue`s before _push_snapshot, so the uplink verdict is frozen.
+      3. guard plugs the cable back in  -> the recovery arm fired Fault.NONE,
+         the hub dropped this source, health went RUNNING, and because recovery
+         toasts are deliberately NOT debounced the guard was toasted 監控中 at
+         once -- while NOTHING was uploading. About a second later the next
+         failed push re-reported NO_SERVER, which ALSO reset the hub's
+         _state_since, so the real fault had to sit through another full 30s
+         debounce before it could be announced.
+
+    Clearing the camera domain must never speak for the uplink domain.
+    """
+    import numpy as np
+    from webcam_client import push_engine as pe
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # The server is down for the whole test: every push raises.
+    request = httpx.Request("POST", "https://example.com/api/webcam/webcam_01/snapshot")
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "server error", request=request, response=httpx.Response(500, request=request)
+    )
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    calls = {"n": 0}
+
+    def reads():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return True, frame                       # step 1: push, and it fails
+        if calls["n"] <= 1 + pe.BAD_READ_LIMIT:
+            return False, None                       # step 2: cable pulled
+        engine._stop_event.set()
+        return True, frame                           # step 3: cable back in
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: reads()
+
+    monkeypatch.setattr(pe.time, "sleep", lambda *_a, **_k: None)
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch("webcam_client.push_engine.httpx.Client", return_value=mock_client):
+        engine.run()
+
+    assert Fault.NONE not in seen, (
+        f"the camera came back but the uplink is still down -- reporting NONE "
+        f"toasts the guard 監控中 while nothing uploads; got {seen}")
+    assert seen == [Fault.NO_SERVER], (
+        f"one honest verdict: the uplink fault outranks the camera fault and "
+        f"survives the camera's recovery; got {seen}")
+
+
+def test_a_successful_upload_does_not_clear_a_dead_camera():
+    """The other direction of the same split, pinned structurally.
+
+    Not reachable through run() today -- the bad-read arm `continue`s before
+    _push_snapshot, so no upload succeeds while this camera has no picture. It is
+    pinned anyway because the INDEPENDENCE is the design, not a side effect of
+    that control flow: any future change that pushes a cached or black frame
+    while the camera is down would otherwise silently start reporting 監控中 for
+    a camera the guard can see is dark.
+    """
+    import numpy as np
+    from webcam_client.status import Fault
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    seen = []
+    engine = PushEngine(config, "https://example.com", "sk-test", on_fault=seen.append)
+
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()          # a clean 200
+    engine._client = mock_client
+
+    engine._report_camera(Fault.CAMERA_DOWN)
+    assert seen == [Fault.CAMERA_DOWN]
+
+    engine._push_snapshot(np.zeros((480, 640, 3), dtype=np.uint8))
+
+    assert seen == [Fault.CAMERA_DOWN], (
+        f"the upload works, but this camera still has no picture -- a successful "
+        f"push must not clear the camera domain; got {seen}")
+    assert engine._uplink_fault is Fault.NONE, "the uplink domain DID clear"
+
+
+def test_the_uplink_domain_outranks_the_camera_domain():
+    """_publish() merges the two domains with the hub's own _PRECEDENCE, and the
+    merge is only correct if an uplink fault genuinely outranks a camera fault.
+    That premise is asserted here rather than left in a comment: reordering
+    _PRECEDENCE would otherwise invert the merge with the whole suite still green,
+    and the guard would be told to check a USB cable during a server outage.
+
+    Both operand orders are checked on purpose. In the sibling control channel a
+    `_worse` reduced to `lambda a, b: b` -- ignoring the ordering entirely --
+    survived the ENTIRE suite, because every test happened to put the worse fault
+    last.
+    """
+    from webcam_client.push_engine import _worse
+    from webcam_client.status import Fault, _PRECEDENCE
+
+    assert _PRECEDENCE.index(Fault.NO_SERVER) < _PRECEDENCE.index(Fault.CAMERA_DOWN)
+    assert _PRECEDENCE.index(Fault.BAD_KEY) < _PRECEDENCE.index(Fault.CAMERA_DOWN)
+
+    for uplink in (Fault.NO_SERVER, Fault.BAD_KEY):
+        assert _worse(Fault.CAMERA_DOWN, uplink) is uplink
+        assert _worse(uplink, Fault.CAMERA_DOWN) is uplink
+
+    # NONE is not in _PRECEDENCE at all, so it must rank last in both orders.
+    assert _worse(Fault.CAMERA_DOWN, Fault.NONE) is Fault.CAMERA_DOWN
+    assert _worse(Fault.NONE, Fault.CAMERA_DOWN) is Fault.CAMERA_DOWN
+    assert _worse(Fault.NONE, Fault.NONE) is Fault.NONE
+
+
+def test_shutdown_stops_the_encoder_under_the_stream_lock():
+    """set_streaming() is called from the ControlChannel thread (app_controller
+    dispatches stream_start / stream_stop from there) and mutates _streaming /
+    _encoder under _stream_lock. run()'s teardown used to stop the encoder with
+    NO lock held, so a stream_start arriving during shutdown could interleave:
+    free an encoder mid-construction, or install one after the teardown had
+    passed, leaving an orphaned ffmpeg on the guard's PC until reboot.
+    """
+    import numpy as np
+
+    config = {"node_id": "webcam_01", "device_index": 0, "resolution": [640, 480]}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    held = []
+
+    def probe():
+        # _stream_lock is a plain threading.Lock, which is NOT reentrant, so a
+        # SUCCESSFUL acquire from inside the call proves the caller did not hold
+        # it. This is the same structural technique test_status.py uses to prove
+        # the hub notifies under its own lock.
+        got = engine._stream_lock.acquire(blocking=False)
+        if got:
+            engine._stream_lock.release()
+        held.append(not got)
+
+    def read_once():
+        engine._stop_event.set()
+        return True, frame
+
+    fake_cap = MagicMock()
+    fake_cap.read.side_effect = lambda: read_once()
+
+    with patch("webcam_client.push_engine.open_camera", return_value=fake_cap), \
+         patch.object(engine, "_push_snapshot"), \
+         patch.object(engine, "_stop_encoder", side_effect=probe):
+        engine.run()
+
+    assert held, "the teardown never stopped the encoder at all"
+    assert all(held), "the encoder was torn down without holding _stream_lock"
+    assert engine._streaming is False, "shutdown must leave _streaming False"
+
+
+def test_set_streaming_refuses_to_start_an_encoder_after_stop():
+    """A stream_start that lands after stop() would start an ffmpeg nobody is
+    left to stop -- run()'s teardown has already passed -- so the child process
+    outlives the engine and keeps running on the guard's PC until reboot.
+
+    Unrequested extension of the locking fix above: the lock closes the race, but
+    the orphan is reachable without any race at all once the engine has stopped.
+    """
+    config = {"node_id": "webcam_01", "device_index": 0}
+    engine = PushEngine(config, "https://example.com", "sk-test")
+
+    engine.stop()
+    with patch.object(engine, "_start_encoder") as mock_start:
+        engine.set_streaming(True)
+
+    assert not mock_start.called, "no encoder may be started once the engine stops"
+    assert engine._streaming is False
+
+
 def test_classify_maps_401_and_403_to_bad_key():
     """These are the two the guard can act on: 'call the administrator'."""
     from webcam_client.push_engine import _classify

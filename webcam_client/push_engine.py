@@ -9,9 +9,22 @@ import httpx
 
 from .camera_manager import open_camera, compute_motion, adaptive_fps
 from .hls_encoder import HlsEncoder
-from .status import Fault
+# _PRECEDENCE is the hub's own worst-first fault ordering, imported READ-ONLY.
+# _publish() below merges this engine's two fault domains with it, so the engine
+# and the hub can never disagree about which of two live problems the guard
+# should be told about. A private copy of the ordering would drift the first time
+# a fault was added. control_channel.py imports it for the same reason.
+from .status import Fault, _PRECEDENCE
 
 logger = logging.getLogger("webcam_client.push_engine")
+
+_RANK = {fault: i for i, fault in enumerate(_PRECEDENCE)}
+_RANK_NONE = len(_PRECEDENCE)          # Fault.NONE is not in _PRECEDENCE
+
+
+def _worse(a: Fault, b: Fault) -> Fault:
+    """Return whichever of the two faults the operator should hear about."""
+    return a if _RANK.get(a, _RANK_NONE) <= _RANK.get(b, _RANK_NONE) else b
 
 # How long a camera may deliver nothing before the operator is told.
 #
@@ -61,12 +74,53 @@ class PushEngine(threading.Thread):
         self._encoder: Optional[HlsEncoder] = None
         self._client: Optional[httpx.Client] = None
 
-        # Dedup locally: a failing poll runs continuously, and calling the hub
+        # TWO fault domains, deliberately separate -- see _publish().
+        #
+        # This engine watches two independent things: is there a PICTURE (the
+        # camera opens, cap.read() delivers frames, the loop is alive) and do
+        # snapshots REACH THE SERVER. They fail independently, and they used to
+        # share one slot, so whichever spoke last erased the other. The reachable
+        # consequence, with a pulled USB cable AND a down server: the read path
+        # `continue`s before _push_snapshot, freezing the uplink verdict; the
+        # guard re-seats the cable; the recovery arm fired Fault.NONE; the hub
+        # dropped this source and went RUNNING; and because recovery toasts are
+        # deliberately NOT debounced the guard was told 監控中 while nothing was
+        # uploading at all. The next failed push then re-reported NO_SERVER,
+        # resetting the hub's _state_since, so the REAL fault had to sit through
+        # another full 30s debounce before it could be announced.
+        self._camera_fault = Fault.NONE
+        self._uplink_fault = Fault.NONE
+
+        # Dedup locally: a failing push runs continuously, and calling the hub
         # every cycle would swamp it. Report only on change.
         self._on_fault = on_fault
         self._last_fault = None
 
-    def _report(self, fault: Fault) -> None:
+    # Both domains are written from THIS engine's run() thread only -- the read
+    # loop, its except arm, and _push_snapshot are all on it -- so the pair needs
+    # no lock. set_streaming() is the only method another thread calls, and it
+    # touches neither slot.
+
+    def _report_camera(self, fault: Fault) -> None:
+        """Is there a picture? CAMERA_DOWN, or NONE once frames return."""
+        self._camera_fault = fault
+        self._publish()
+
+    def _report_uplink(self, fault: Fault) -> None:
+        """Do snapshots reach the server? NO_SERVER / BAD_KEY, or NONE."""
+        self._uplink_fault = fault
+        self._publish()
+
+    def _publish(self) -> None:
+        """Send the hub the worse of the two domains, deduped.
+
+        The hub holds ONE fault per source and this engine is one source, so a
+        merge is required rather than optional: reporting the camera domain while
+        an uplink fault is live would DOWNGRADE what the guard is told -- sending
+        them to check a USB cable when the server is unreachable -- and the
+        uplink verdict would be lost entirely.
+        """
+        fault = _worse(self._camera_fault, self._uplink_fault)
         if fault is self._last_fault:
             return
         self._last_fault = fault
@@ -85,6 +139,17 @@ class PushEngine(threading.Thread):
 
     def set_streaming(self, enabled: bool) -> None:
         with self._stream_lock:
+            if enabled and self._stop_event.is_set():
+                # A stream_start landing after this engine has been told to stop.
+                # run()'s teardown has already passed here (or is about to), so an
+                # encoder started now has no owner left to stop it: the ffmpeg
+                # child outlives the engine and keeps running on the guard's PC
+                # until the machine is rebooted. Refusing means the guard's live
+                # view simply does not open for a camera that is shutting down --
+                # which is the truthful outcome.
+                logger.info("Ignoring stream_start for %s: the engine is stopping",
+                            self._node_id)
+                return
             if enabled == self._streaming:
                 return
             self._streaming = enabled
@@ -117,7 +182,7 @@ class PushEngine(threading.Thread):
         cap = open_camera(self._cam_config.get("device_index", 0), *self._resolution)
         if cap is None:
             logger.error(f"Cannot open camera {self._cam_config.get('device_index')}")
-            self._report(Fault.CAMERA_DOWN)
+            self._report_camera(Fault.CAMERA_DOWN)
             # Close the client on the way out. This early return sits BETWEEN
             # the client's creation and the try/finally below, so it used to
             # leak the connection pool every time. Dormant until this phase --
@@ -141,8 +206,8 @@ class PushEngine(threading.Thread):
                 if not ret:
                     # A camera that stopped delivering frames is the ONLY signal
                     # we get for a pulled USB cable: _push_snapshot is never
-                    # reached from here, so without this the engine's last
-                    # report (Fault.NONE) would stand forever. _report dedups,
+                    # reached from here, so without this the camera domain's last
+                    # value (Fault.NONE) would stand forever. _publish dedups,
                     # so re-asserting it every iteration is a pointer compare.
                     bad_reads += 1
                     if bad_reads == BAD_READ_LIMIT:
@@ -150,16 +215,17 @@ class PushEngine(threading.Thread):
                             "Camera %s delivered no frame for %.1fs",
                             self._node_id, BAD_READ_LIMIT * BAD_READ_SLEEP)
                     if bad_reads >= BAD_READ_LIMIT:
-                        self._report(Fault.CAMERA_DOWN)
+                        self._report_camera(Fault.CAMERA_DOWN)
                     time.sleep(BAD_READ_SLEEP)
                     continue
 
                 if bad_reads >= BAD_READ_LIMIT:
-                    # Cable plugged back in: clear our own CAMERA_DOWN at once.
-                    # Only clear what we actually reported -- an unconditional
-                    # NONE here would fight _push_snapshot's fault at ~1Hz.
+                    # Cable plugged back in: clear the CAMERA domain only. There
+                    # IS a picture again; whether it reaches the server is not
+                    # this arm's business, and claiming otherwise is what toasted
+                    # the guard 監控中 while the uplink was still down.
                     logger.info("Camera %s is delivering frames again", self._node_id)
-                    self._report(Fault.NONE)
+                    self._report_camera(Fault.NONE)
                 bad_reads = 0
 
                 motion = compute_motion(frame, prev_frame, self._motion_threshold)
@@ -219,11 +285,27 @@ class PushEngine(threading.Thread):
             # then press 重新連線, then call the administrator -- is exactly the
             # right instruction, since 重新連線 is what rebuilds this dead thread.
             # NO_SERVER would send the guard to a network that is fine.
+            #
+            # It belongs to the CAMERA domain for the same reason: what the guard
+            # can observe is "this camera has no picture". A live uplink fault is
+            # not cleared by this -- _publish keeps the worse of the two, so a
+            # crash during a server outage still reads 無法連線到伺服器.
             logger.exception("Push engine for %s stopped unexpectedly", self._node_id)
-            self._report(Fault.CAMERA_DOWN)
+            self._report_camera(Fault.CAMERA_DOWN)
         finally:
             cap.release()
-            self._stop_encoder()
+            # Under _stream_lock: set_streaming() runs on the ControlChannel
+            # thread (app_controller._on_command dispatches stream_start /
+            # stream_stop from there) and mutates these same two attributes under
+            # this lock. Unguarded, a stream_start landing during shutdown could
+            # interleave with this teardown -- freeing an encoder mid-construction,
+            # or installing one AFTER this line, which then has no owner left to
+            # stop it and leaves an orphaned ffmpeg running on the guard's PC
+            # until the machine is rebooted. _streaming is cleared too so the
+            # engine's state matches the fact that nothing is being encoded.
+            with self._stream_lock:
+                self._streaming = False
+                self._stop_encoder()
             if self._client:
                 self._client.close()
 
@@ -243,10 +325,13 @@ class PushEngine(threading.Thread):
             # The technician still gets the real status code, in the log file.
             # The OPERATOR only ever sees the plain-language string this Fault
             # maps to -- see strings.py.
-            self._report(_classify(e))
+            self._report_uplink(_classify(e))
             logger.warning(f"Snapshot push to {self._node_id} failed: {e}")
         else:
-            self._report(Fault.NONE)
+            # Clears the UPLINK domain only: a successful push proves the server
+            # is reachable and the key is accepted, and says nothing about
+            # whether this camera still has a picture.
+            self._report_uplink(Fault.NONE)
 
     def _upload_segments(self) -> None:
         if not self._encoder:
