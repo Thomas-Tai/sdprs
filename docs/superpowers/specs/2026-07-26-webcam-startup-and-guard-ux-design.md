@@ -521,9 +521,31 @@ StartingUp / Running / Paused / NoServer / BadKey / CameraDown
 
 ## 9. 明確非目標（YAGNI）
 
-不改 onedir；不做配對碼（pairing code）機制；不新增任何 server 端 API；
+不改 onedir；不做配對碼（pairing code）機制；**server 端只新增一支無副作用的身分
+探測 API（`GET /api/webcam/ping`），除此之外不新增任何 server 端 API**；
 不做多鏡頭即時預覽面板；不動 DPAPI 憑證儲存機制；不做多語系（僅繁中）；
 不做自動更新機制。
+
+> **2026-07-30 修訂說明——為何要開這個例外**
+>
+> 本節原本寫「不新增任何 server 端 API」，但這與 §7.2 的 U4（「測試連線」只驗證身分，
+> **不註冊攝影機**）直接衝突：現有四支吃 client API key 的路由，每一支都帶有讓它無法
+> 充當測試按鈕的副作用——
+>
+> - `POST /webcam/cameras`：會註冊攝影機，正是 U4 明文禁止的行為。
+> - `PUT /webcam/{node_id}/hls/{filename}`：成功即寫入檔案；且首次設定時尚無已註冊
+>   的攝影機，擁有權檢查會直接 403。
+> - `POST /webcam/{node_id}/snapshot`：寫入 snapshot buffer 並呼叫 `touch_webcam_upload`。
+> - `GET /webcam/{node_id}/commands`：佇列是單一消費者 FIFO，測試連線會把 client 自己
+>   在等的 `stream_start` 指令搶走。
+>
+> 另外，首次啟動時 client 手上是**零台**已註冊攝影機，凡是做擁有權檢查的路由一律 403，
+> 保全無從分辨「密碼打錯」還是「還沒註冊攝影機」；而 `GET /api/health` 是公開端點，
+> 密碼打錯照樣回 200，只能驗證連線位址、驗不了連線密碼。
+>
+> 因此開放**且僅開放**一支 `GET /api/webcam/ping`：以 client API key 認證，回傳
+> `{"ok": true}`，不碰任何資料表、佇列或緩衝區，也不記錄送進來的 API key。此例外到此為止，
+> 不得再以「順手」為由擴充其他 server 端 API，也不得在這支路由裡加上狀態更新。
 
 ---
 

@@ -4,6 +4,7 @@ SDPRS Central Server - Webcam Router API Tests (Task 3)
 Smart Disaster Prevention Response System
 
 Tests for:
+- GET  /api/webcam/ping (side-effect-free connection test)
 - POST /api/webcam/cameras (register cameras)
 - PUT  /api/webcam/{node_id}/hls/{filename} (upload HLS segment/playlist)
 - GET  /api/webcam/{node_id}/hls/{filename} (serve HLS file)
@@ -374,3 +375,69 @@ async def test_stream_stop_releases_lease_immediately(authed_client):
 
     cmd = await hls_service.dequeue_command(cam, timeout=0.5)
     assert cmd is not None and cmd["command"] == "stream_stop"
+
+
+# ===== GET /api/webcam/ping — guard-facing connection test ==================
+#
+# The Windows client's setup window has a 「測試連線」button a security guard
+# presses to confirm they typed the right server URL + API key. Every other
+# key-authenticated route has a disqualifying side effect (registers cameras /
+# writes a buffer / dequeues the client's own command), and at first run the
+# client owns zero cameras so the ownership-checked routes 403 regardless of
+# whether the key is correct. These tests pin the contract.
+
+
+@pytest.mark.anyio
+async def test_ping_accepts_valid_api_key(authed_client):
+    """A valid client API key returns 200 {"ok": true} with no registration."""
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Ping PC"})
+    assert resp.status_code == 201
+    api_key = resp.json()["api_key"]
+
+    resp = await authed_client.get("/api/webcam/ping", headers={"X-API-Key": api_key})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+@pytest.mark.anyio
+async def test_ping_registers_nothing(authed_client):
+    """The point of the whole endpoint (spec §7.2 U4): 只驗證身分，不註冊攝影機.
+
+    Asserted against the DB rather than the response body, because the failure
+    this guards against is a later "helpful" addition inside the route -- a
+    status touch, an auto-registration -- that would still return {"ok": true}.
+    A guard pressing 測試連線 three times must not mint three dashboard tiles.
+    """
+    from central_server.database import get_webcam_cameras
+
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Ping PC"})
+    client_node_id = resp.json()["node_id"]
+    api_key = resp.json()["api_key"]
+
+    for _ in range(3):
+        assert (await authed_client.get(
+            "/api/webcam/ping", headers={"X-API-Key": api_key})).status_code == 200
+
+    assert get_webcam_cameras(client_node_id) == []
+
+
+@pytest.mark.anyio
+async def test_ping_requires_api_key(authed_client):
+    """No X-API-Key header at all must be rejected with 401."""
+    resp = await authed_client.get("/api/webcam/ping")
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_ping_rejects_wrong_api_key(authed_client):
+    """A mistyped 連線密碼 is the case the guard actually hits: an unknown key
+    must 401, never 200, so the setup window can say the password is wrong."""
+    # Mint a real key so the table is non-empty, then present a different one.
+    resp = await authed_client.post("/api/nodes/webcam", json={"name": "Ping PC"})
+    assert resp.status_code == 201
+
+    resp = await authed_client.get(
+        "/api/webcam/ping",
+        headers={"X-API-Key": "not-a-real-key-000000000000000000"},
+    )
+    assert resp.status_code == 401

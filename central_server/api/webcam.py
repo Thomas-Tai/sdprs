@@ -6,6 +6,7 @@ Smart Disaster Prevention Response System
 Endpoints the webcam *client PC* talks to (camera registration, HLS segment
 upload) plus the dashboard-facing stream control / HLS serve endpoints:
 
+- GET  /api/webcam/ping                         - side-effect-free auth probe (client API key)
 - POST /api/webcam/cameras                     - register cameras (client API key)
 - POST /api/webcam/{node_id}/snapshot           - 1Hz JPEG ingest (client API key)
 - PUT  /api/webcam/{node_id}/hls/{filename}     - upload HLS segment/playlist (client API key)
@@ -36,6 +37,31 @@ router = APIRouter(prefix="/webcam", tags=["webcam"])
 
 class CameraRegistration(BaseModel):
     cameras: List[Dict[str, Any]] = Field(..., min_length=1, max_length=10)
+
+
+@router.get("/ping")
+async def ping(
+    client_node_id: str = Depends(verify_webcam_api_key),
+) -> Dict[str, bool]:
+    """Connection test for the Windows client's setup window (spec §7.2 U4).
+
+    A security guard presses 「測試連線」 to confirm they typed the right server
+    URL and API key. This endpoint exists ONLY to answer "is this key valid?"
+    and MUST stay side-effect-free: no table write, no queue, no buffer, no
+    status update, no `touch_webcam_upload`. The dependency's own key lookup is
+    the only DB access. Every other key-authenticated route was disqualified
+    for a side effect (registering cameras, writing the snapshot buffer, or
+    dequeuing the command the client itself is waiting for), which is why this
+    route had to exist at all — do not "helpfully" add work to it.
+
+    Deliberately takes no node_id: at first run the client owns zero cameras,
+    so any ownership check would 403 even when the key is correct.
+
+    Never log the submitted key (not even a prefix) — logging_setup.py masks
+    API keys precisely so a guard's password cannot reach a support log file.
+    """
+    logger.debug("webcam ping ok for client %s", client_node_id)
+    return {"ok": True}
 
 
 @router.post("/cameras", status_code=201)
