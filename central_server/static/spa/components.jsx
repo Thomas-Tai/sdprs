@@ -724,7 +724,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             <div id="logout-confirm-title" className="text-sm font-semibold text-ink-primary mb-3">確定要登出嗎？</div>
             <div className="flex justify-end gap-2">
               <button ref={logoutCancelBtnRef} type="button" onClick={() => setLogoutConfirmOpen(false)} className="px-3 h-8 rounded text-sm text-ink-secondary hover:bg-surface-overlay">取消</button>
-              <button type="button" onClick={() => { window.location.href = '/logout'; }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
+              <button type="button" onClick={() => { fetch('/logout', { method: 'POST', credentials: 'same-origin' }).finally(() => { window.location.href = '/login'; }); }} className="px-3 h-8 rounded text-sm bg-sev-critical text-white font-medium hover:bg-red-700">登出</button>
             </div>
           </div>
         </div>

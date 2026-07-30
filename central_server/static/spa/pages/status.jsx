@@ -601,7 +601,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
         </table>
       </div>
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowAddModal(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { if (!createdKey) setShowAddModal(false); }}>
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">新增 Webcam Client</h3>
             {!createdKey ? (
@@ -665,7 +665,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           operator has time to actually copy the fresh key before it's gone
           for good. */}
       {revokedKey && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setRevokedKey(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">API Key 已重新產生</h3>
             <p className="text-xs text-sev-warn font-bold mb-2">⚠ 新 Key 僅顯示一次，請立即複製，並更新 {revokedKey.name || revokedKey.nodeId} 的用戶端設定</p>

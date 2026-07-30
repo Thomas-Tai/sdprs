@@ -162,7 +162,7 @@ const stateMeta = {
   pending: { label: '待處理', cls: 'bg-sev-critical/15 text-sev-critical border-sev-critical/30' },
   acknowledged: { label: '已認領', cls: 'bg-sev-info/15 text-sev-info border-sev-info/30' },
   resolved: { label: '已解決', cls: 'bg-sev-ok/15 text-sev-ok border-sev-ok/30' },
-  snoozed: { label: '已延期', cls: 'bg-ink-dim/15 text-ink-muted border-ink-dim/30' },
+  snoozed: { label: '通知已靜音', cls: 'bg-ink-dim/15 text-ink-muted border-ink-dim/30' },
 };
 
 // Detector health (camera nodes only) — maps the server-provided visual/audio

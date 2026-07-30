@@ -557,16 +557,21 @@ async def login(request: Request):
 
 @app.post("/api/session/extend")
 async def extend_session(request: Request):
-    """Item 18: refresh the session timer by re-stamping login_at.
+    """Item 18 / SEC-001: slide the session cookie WITHIN the absolute 24h cap.
 
-    Starlette's SessionMiddleware re-emits the cookie on every response when
-    the session contents change, so just touching the dict resets max_age.
+    login_at is the fixed anchor set once at login and is NEVER moved here — an
+    expired session (older than the cap, or with no anchor) is cleared and
+    refused rather than resurrected. Touching a non-anchor key (last_active)
+    makes SessionMiddleware re-emit the cookie (sliding inactivity timeout)
+    without resetting the absolute clock.
     """
+    from .auth import _session_expired
     user = request.session.get("user")
-    if not user:
+    if not user or _session_expired(request):
+        request.session.clear()
         raise HTTPException(status_code=401, detail="Not authenticated")
-    request.session["login_at"] = utcnow().isoformat()
-    return {"ok": True, "login_at": request.session["login_at"]}
+    request.session["last_active"] = utcnow().isoformat()
+    return {"ok": True, "login_at": request.session.get("login_at")}
 
 
 @app.post("/logout")

@@ -1008,12 +1008,14 @@ async def snooze_node(
     body: SnoozeRequest,
     user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Item 17: Store snooze on the node row AND push to edge via MQTT.
+    """Item 17 / DATA-001: Store the snooze window on the node row and push it
+    to the edge via MQTT.
 
-    The server-side DB flag is used by event_service.py when processing
-    incoming audio-only alerts. The MQTT push allows edge nodes to
-    suppress audio triggers locally (requires edge firmware update to
-    subscribe and process sdprs/edge/{node_id}/cmd/snooze topic).
+    HONEST-STATE NOTE (DATA-001): this is an operator-facing "mute
+    notifications" hint only. The server does NOT suppress or drop alerts based
+    on snoozed_until -- create_alert() inserts every alert unconditionally --
+    and edge firmware does not yet consume the MQTT snooze topic. Do not
+    describe this as alert suppression until that enforcement is actually built.
     """
     from datetime import timedelta as _td
     from ..database import set_node_snooze

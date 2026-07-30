@@ -947,7 +947,7 @@ function App({ initialError = null }) {
         throw e;
       }
       setMuteState(prev => ({ ...prev, nodes: prev.nodes.includes(a.node) ? prev.nodes : [...prev.nodes, a.node] }));
-      showToast(`${a.node} 已延期 ${mins} 分鐘`, 'warn');
+      showToast(`${a.node} 通知已靜音 ${mins} 分鐘`, 'warn');
       await refresh();
     } finally {
       alertBusyRef.current = false;

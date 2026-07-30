@@ -557,10 +557,11 @@ class MQTTService:
         Returns:
             True if command was sent successfully
 
-        NOTE: This method exists but the edge-side firmware stop-condition is not
-        implemented yet. Until edge nodes subscribe and process this topic, the
-        server-side snooze flag is checked only when processing incoming alerts
-        (event_service.py). Full edge-side suppression requires firmware update.
+        NOTE (DATA-001): neither side enforces this yet. The edge firmware does
+        not subscribe to the snooze topic, and the server does NOT check
+        snoozed_until when creating alerts (create_alert inserts
+        unconditionally). Snooze is an operator-facing "mute notifications"
+        hint only until edge-side suppression is actually built.
         """
         topic = topic_cmd(node_id, "snooze")
         payload = {

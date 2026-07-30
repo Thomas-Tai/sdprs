@@ -1046,7 +1046,109 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------------------------------- DATA-001: honest snooze chip --
+// Node snooze suppresses NO alerts (create_alert inserts unconditionally), so
+// the status chip must not claim alerts are 'deferred' (已延期). Honest degrade:
+// it reads '通知已靜音' (notifications muted).
+const TEST_DATA_SNOOZE_LABEL = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    A('DATA-001 snoozed status chip label is honest (通知已靜音, not 已延期)',
+      stateMeta.snoozed.label === '通知已靜音',
+      stateMeta && stateMeta.snoozed && stateMeta.snoozed.label);
+  } catch (e) {
+    results.push({ name: 'DATA-001 snooze-label suite threw', pass: false, detail: String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// ------------------------------------------- AUTH-001: logout POST, not GET --
+// The logout confirm must POST /logout (the route is POST-only; a GET nav 405s
+// and leaves the session alive on a shared console), then land on /login.
+const TEST_AUTH_LOGOUT = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    window.SDPRS_USER = 'op';
+    const fetchCalls = [];
+    window.fetch = (url, opts) => { fetchCalls.push({ url: String(url), opts: opts || {} }); return Promise.resolve({ ok: true, status: 200 }); };
+    const noop = () => {};
+    const props = { unackCount: 0, muted: false, setMuted: noop, theme: 'dark', setTheme: noop,
+      onOpenShortcuts: noop, page: 'monitor', setPage: noop, onOpenMuteDrawer: noop, audioReplayIn: 0,
+      muteState: { nodes: [], sources: [], global: false }, operators: [], staleAckCount: 0,
+      onOpenCmdK: noop, focusMode: false, onToggleFocus: noop };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusStrip, props)));
+    await settle();
+    const logoutOpen = Array.from(container.querySelectorAll('button')).find(b => (b.title || '').indexOf('登出') !== -1);
+    A('AUTH-001 logout affordance renders', !!logoutOpen);
+    click(logoutOpen); await settle();
+    const confirmBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === '登出');
+    A('AUTH-001 confirm dialog exposes a 登出 button', !!confirmBtn);
+    click(confirmBtn); await settle();
+    const logoutFetch = fetchCalls.find(c => c.url.indexOf('/logout') !== -1);
+    A('AUTH-001 logout POSTs to /logout (not a GET navigation)',
+      !!logoutFetch && String(logoutFetch.opts.method).toUpperCase() === 'POST', JSON.stringify(fetchCalls));
+    A('AUTH-001 logout sends same-origin credentials',
+      !!logoutFetch && logoutFetch.opts.credentials === 'same-origin', JSON.stringify(fetchCalls));
+  } catch (e) {
+    results.push({ name: 'AUTH-001 logout suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// --------------------------------- OPS-001: backdrop must not destroy a key --
+// The create + revoke modals show an API key EXACTLY ONCE. A stray backdrop
+// click must not dismiss them while the key is displayed (createdKey/revokedKey
+// set); the explicit 關閉 button still closes. Pre-key backdrop dismiss stays.
+const TEST_OPS_KEY_BACKDROP = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const createResult = { node_id: 'webcam_zz99', api_key: 'sk-webcam-OPS001-CREATE-KEY' };
+    const revokeResult = { api_key: 'sk-webcam-OPS001-REVOKE-KEY' };
+    window.SDPRS_API = {
+      createWebcamClient: () => Promise.resolve(createResult),
+      revokeWebcamKey: () => Promise.resolve(revokeResult),
+    };
+    const webcamNode = { id: 'webcam_ab12', clientId: 'webcam_c11e', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, { nodes: [webcamNode], onSelectNode: () => {}, onRefresh: () => {} })));
+    await settle();
+
+    // create modal: reveal the key, then click the backdrop
+    click(byText('button', '+ 新增 Webcam Client')); await settle();
+    setInput(container.querySelector('input[placeholder="輸入名稱..."]'), '櫃台電腦'); await settle();
+    click(byText('button', '建立')); await settle();
+    A('OPS-001 created key is shown before the backdrop click', container.textContent.indexOf('sk-webcam-OPS001-CREATE-KEY') !== -1);
+    let backdrop = container.querySelector('.fixed.inset-0');
+    A('OPS-001 create modal backdrop present', !!backdrop);
+    click(backdrop); await settle();
+    A('OPS-001 backdrop click does NOT destroy the shown-once created key', container.textContent.indexOf('sk-webcam-OPS001-CREATE-KEY') !== -1);
+    click(byText('button', '關閉')); await settle();
+    A('OPS-001 explicit 關閉 still dismisses the created-key modal', container.textContent.indexOf('sk-webcam-OPS001-CREATE-KEY') === -1);
+
+    // revoke modal: same shown-once contract
+    window.confirm = () => true;
+    const revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
+    A('OPS-001 revoke affordance present', !!revokeBtn);
+    click(revokeBtn); await settle();
+    A('OPS-001 rotated key is shown before the backdrop click', container.textContent.indexOf('sk-webcam-OPS001-REVOKE-KEY') !== -1);
+    backdrop = container.querySelector('.fixed.inset-0');
+    click(backdrop); await settle();
+    A('OPS-001 backdrop click does NOT destroy the shown-once rotated key', container.textContent.indexOf('sk-webcam-OPS001-REVOKE-KEY') !== -1);
+  } catch (e) {
+    results.push({ name: 'OPS-001 key-backdrop suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
+  { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
+  { name: 'AUTH-001 logout POST         components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_AUTH_LOGOUT },
+  { name: 'OPS-001 key backdrop guard   status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_KEY_BACKDROP },
   { name: 'MSP-F6 / MSP-F5 / API-F9   pumps.jsx',    deps: ['icons.jsx', 'data.jsx'], target: 'pages/pumps.jsx', test: TEST_PUMPS },
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
   { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },

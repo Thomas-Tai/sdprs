@@ -137,6 +137,27 @@ def verify_node_id(node_id: str) -> None:
 
 # ===== Session Authentication =====
 
+# SEC-001: absolute session lifetime. ``login_at`` is stamped once at login and
+# is the fixed anchor; a session older than this cap (or missing the anchor
+# entirely) is treated as expired regardless of activity. /api/session/extend
+# may slide the cookie within this cap but must never move ``login_at``.
+SESSION_MAX_AGE_SECONDS = 86400  # 24 hours
+
+
+def _session_expired(request: Request) -> bool:
+    """True when the session has no ``login_at`` anchor or is older than the cap."""
+    login_at = request.session.get("login_at")
+    if not login_at:
+        return True
+    from datetime import datetime
+    from .timeutil import utcnow
+    try:
+        age = (utcnow() - datetime.fromisoformat(login_at)).total_seconds()
+    except (ValueError, TypeError):
+        return True
+    return age > SESSION_MAX_AGE_SECONDS
+
+
 async def get_current_user(request: Request) -> str:
     """
     Get the current authenticated user from session.
@@ -154,9 +175,11 @@ async def get_current_user(request: Request) -> str:
     """
     user = request.session.get("user")
     
-    if not user:
-        # For HTML requests, redirect to login
-        # For API requests, return 401
+    if not user or _session_expired(request):
+        # Not authenticated, or the SEC-001 absolute 24h cap is exceeded / the
+        # session has no login_at anchor. Clear it so a stale cookie can't be
+        # reused, then bounce: HTML -> /login redirect, API -> 401.
+        request.session.clear()
         accept = request.headers.get("accept", "")
         if "text/html" in accept:
             raise HTTPException(
