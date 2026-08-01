@@ -186,6 +186,55 @@ class TestCreateAlert:
         assert response.status_code == 422
 
 
+class TestCreateAlertIdempotency:
+    """DATA-006: POST /api/alerts must be idempotent on (node_id, timestamp).
+
+    An edge node on flaky WiFi retries a queued upload after a dropped ACK,
+    replaying the identical (node_id, timestamp) — the capture instant, at
+    microsecond precision (edge_glass event_capture). That used to insert a
+    duplicate event row and double-page the operator. A retry must return the
+    existing alert_id WITHOUT creating a second row or re-broadcasting; two
+    DISTINCT detections (different timestamps) must still both be created so a
+    real alert is never suppressed.
+    """
+
+    @staticmethod
+    def _count_events():
+        import central_server.database as db
+        return len(db.get_events_by_status("PENDING_VIDEO", 1000))
+
+    def test_retry_returns_same_id_no_duplicate_row(self, client, api_headers, sample_alert):
+        r1 = client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        r2 = client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["alert_id"] == r2.json()["alert_id"]
+        assert self._count_events() == 1
+
+    def test_distinct_timestamps_create_distinct_alerts(self, client, api_headers, sample_alert):
+        a = dict(sample_alert, timestamp="2026-03-03T12:00:00.111111")
+        b = dict(sample_alert, timestamp="2026-03-03T12:00:00.222222")
+        r1 = client.post("/api/alerts", json=a, headers=api_headers)
+        r2 = client.post("/api/alerts", json=b, headers=api_headers)
+        assert r1.json()["alert_id"] != r2.json()["alert_id"]
+        assert self._count_events() == 2
+
+    def test_retry_does_not_rebroadcast(self, client, api_headers, sample_alert, monkeypatch):
+        import central_server.api.alerts as alerts_mod
+        calls = []
+
+        async def fake_broadcast(msg):
+            calls.append(msg)
+
+        monkeypatch.setattr(alerts_mod.ws_manager, "broadcast", fake_broadcast)
+
+        client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        # Only the first (real) creation broadcasts new_alert; the retry must not
+        # re-page the operator.
+        new_alert_broadcasts = [m for m in calls if m.get("type") == "new_alert"]
+        assert len(new_alert_broadcasts) == 1, calls
+
+
 class TestUploadVideo:
     """Tests for PUT /api/alerts/{alert_id}/video endpoint."""
     

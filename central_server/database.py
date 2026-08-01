@@ -590,6 +590,33 @@ def get_event(alert_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def find_event_by_node_and_timestamp(node_id: str, timestamp: str) -> Optional[Dict[str, Any]]:
+    """DATA-006: return the most recent event with this exact (node_id,
+    timestamp), or None. Used to make POST /api/alerts idempotent.
+
+    An edge node retrying an upload after a dropped ACK replays the SAME queued
+    row (same capture instant, at microsecond precision — see edge_glass
+    event_capture / edge_glass_main, which enqueue
+    ``datetime.fromtimestamp(event.timestamp).isoformat()``), so an exact match
+    is a retry, not a distinct event. Two genuinely distinct detections have
+    different microsecond timestamps and are NOT collapsed here, so a real alert
+    is never suppressed."""
+    if _backend == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT * FROM events WHERE node_id = :node_id AND timestamp = :ts "
+            "ORDER BY id DESC LIMIT 1",
+            {"node_id": node_id, "ts": timestamp},
+        )
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT * FROM events WHERE node_id = ? AND timestamp = ? ORDER BY id DESC LIMIT 1",
+        (node_id, timestamp),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
 def update_event_status(
     alert_id: int,
     status: str,

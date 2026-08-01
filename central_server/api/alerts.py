@@ -174,8 +174,31 @@ async def create_alert(
     # No-op (allow all) when ALLOWED_NODE_IDS is empty -> backward compatible.
     verify_node_id(alert.node_id)
 
+    # DATA-006: idempotency. An edge node on flaky WiFi retries a queued upload
+    # after a dropped ACK, replaying the identical (node_id, timestamp) — the
+    # capture instant at microsecond precision (edge_glass event_capture). That
+    # used to insert a duplicate row AND re-broadcast new_alert, double-paging
+    # the operator for one physical event. If an event with this exact
+    # (node_id, timestamp) already exists, return it instead of inserting again
+    # (and skip the re-broadcast). Two DISTINCT detections have different
+    # microsecond timestamps, so a real alert is never suppressed. (There is a
+    # narrow TOCTOU window for two truly concurrent identical POSTs, but edge
+    # retries are sequential — a timeout apart — so this collapses the real
+    # duplicate case; the worst case degrades to today's behaviour.)
+    from ..database import find_event_by_node_and_timestamp
+    existing = find_event_by_node_and_timestamp(alert.node_id, alert.timestamp)
+    if existing is not None:
+        logger.info(
+            f"Duplicate alert suppressed (idempotent retry): node={alert.node_id} "
+            f"timestamp={alert.timestamp} -> existing alert_id={existing['id']}"
+        )
+        return AlertResponse(
+            alert_id=existing["id"],
+            status=existing.get("status") or "PENDING_VIDEO",
+        )
+
     logger.info(f"Creating alert from node {alert.node_id}")
-    
+
     # Insert event into database
     try:
         alert_id = insert_event(
