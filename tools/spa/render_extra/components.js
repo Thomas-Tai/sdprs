@@ -549,4 +549,22 @@ module.exports = [
       A('COMP-017 the panel still renders the node heading', container.textContent.indexOf('PUMP-01') !== -1, container.textContent.slice(0, 200));
     `,
   },
+  {
+    name: 'COMP-019 TweakToggle label text is clickable (bigger hit area than the 32x18 switch)',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      let calls = [];
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweakToggle, {
+        label: '深色模式', value: false, onChange: (v) => calls.push(v),
+      })));
+      await settle();
+      const label = byText('span', '深色模式');
+      A('COMP-019 setup: the label span renders', !!label);
+      click(label);
+      await settle();
+      A('COMP-019 clicking the label text toggles the control, not just the tiny switch',
+        calls.length === 1 && calls[0] === true, JSON.stringify(calls));
+    `,
+  },
 ];

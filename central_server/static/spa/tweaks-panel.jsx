@@ -495,9 +495,16 @@ function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', on
 }
 
 function TweakToggle({ label, value, onChange }) {
+  // COMP-019: the visual label was a plain, non-interactive <span> — only
+  // the 32x18px switch itself was clickable, a tiny target on a touch
+  // console. Making the label row clickable too (mirroring the native
+  // <label>-toggles-its-control pattern) gives the whole row a real hit
+  // area without changing the switch's own size/markup.
   return (
     <div className="twk-row twk-row-h">
-      <div className="twk-lbl"><span>{label}</span></div>
+      <div className="twk-lbl" onClick={() => onChange(!value)} style={{ cursor: 'pointer' }}>
+        <span>{label}</span>
+      </div>
       {/* COMP-006: role="switch" with no accessible name announced as a bare
           "switch". */}
       <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
