@@ -1746,13 +1746,18 @@ function App({ initialError = null }) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="session-expiry-title"
+      aria-describedby="session-expiry-desc"
       className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
     >
       <div className="bg-surface-elevated border border-border-strong rounded-lg p-6 max-w-sm w-full shadow-2xl">
         <h2 id="session-expiry-title" className="text-lg font-semibold text-ink-primary mb-2">
           連線階段已逾時
         </h2>
-        <p className="text-sm text-ink-secondary mb-4">
+        {/* SHELL-015: aria-labelledby alone only announces the title — a
+            screen-reader user got no description of WHY the dialog is up or
+            what pressing the one button does. aria-describedby wires this
+            paragraph in as the dialog's accessible description. */}
+        <p id="session-expiry-desc" className="text-sm text-ink-secondary mb-4">
           您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
         </p>
         {/* `bg-brand-primary` used to be this button's background — a token
