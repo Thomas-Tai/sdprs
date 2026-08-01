@@ -737,4 +737,39 @@ module.exports = [
         JSON.stringify(calls) + ' typeof=' + typeof calls[0]);
     `,
   },
+  {
+    name: 'COMP-025 useTweaks rejects a persisted value whose type no longer matches its default',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // A schema drift across a deploy, or a hand-edited/corrupted
+      // localStorage entry, can leave a persisted tweak with the WRONG
+      // runtime type for its key (a string where a number is expected, a
+      // string where a boolean is expected). Without validation this
+      // silently overwrote the default, breaking any numeric/boolean
+      // consumer of that tweak.
+      window.localStorage.setItem('sdprs.tweaks', JSON.stringify({
+        fontSize: 'huge',      // should be a number
+        dark: 'yes',           // should be a boolean
+        density: 'compact',    // correctly typed — must still pass through
+        palette: 'not-an-array', // should be an array
+      }));
+      const Harness = () => {
+        const [t] = window.useTweaks({ fontSize: 16, dark: false, density: 'regular', palette: ['#000', '#fff'] });
+        window.__gotTweaks = t;
+        return null;
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(Harness)));
+      await settle();
+      const t = window.__gotTweaks;
+      A('COMP-025 a type-mismatched persisted fontSize (string) is rejected, default kept',
+        t.fontSize === 16, JSON.stringify(t));
+      A('COMP-025 a type-mismatched persisted dark flag (string) is rejected, default kept',
+        t.dark === false, JSON.stringify(t));
+      A('COMP-025 a type-mismatched persisted palette (string, not array) is rejected, default kept',
+        Array.isArray(t.palette) && t.palette.length === 2, JSON.stringify(t));
+      A('COMP-025 a correctly-typed persisted value is still accepted (no over-rejection)',
+        t.density === 'compact', JSON.stringify(t));
+    `,
+  },
 ];

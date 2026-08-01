@@ -235,12 +235,30 @@ const __TWEAKS_TRIGGER_STYLE = `
 // localStorage (`sdprs.tweaks`, atomic JSON object) AND echoes to the host
 // (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
 const __TWEAKS_LS_KEY = 'sdprs.tweaks';
+// COMP-025: is `val`'s runtime SHAPE (not exact value) the same kind of
+// thing as `def`? Arrays need their own check (typeof [] === 'object', same
+// as a plain object) — everything else is a plain typeof match.
+const __twkSameShape = (def, val) =>
+  Array.isArray(def) ? Array.isArray(val) : (typeof val === typeof def && !Array.isArray(val));
 const __readTweaks = (defaults) => {
   try {
     const raw = localStorage.getItem(__TWEAKS_LS_KEY);
     if (!raw) return { ...defaults };
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...parsed };
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const merged = { ...defaults, ...parsed };
+      // A persisted value whose TYPE no longer matches this build's default
+      // (schema drift across a deploy, a hand-edited localStorage entry, or
+      // a corrupted write) used to silently overwrite the default — a
+      // numeric/boolean/array consumer could receive the wrong shape
+      // entirely with no error. Revert any KNOWN key (one that exists in
+      // `defaults`) whose persisted shape doesn't match back to its
+      // default; unrecognized keys pass through unchanged, same as before.
+      for (const key of Object.keys(defaults)) {
+        if (!__twkSameShape(defaults[key], merged[key])) merged[key] = defaults[key];
+      }
+      return merged;
+    }
   } catch (_) { /* corrupt / unavailable — fall back to defaults */ }
   return { ...defaults };
 };
