@@ -1741,7 +1741,17 @@ function App({ initialError = null }) {
           page, defeating the skip link's purpose. tabIndex={-1} makes it
           focusable programmatically (not part of the normal Tab order)
           without changing anything about mouse/pointer interaction. */}
-      <main id="main-content" tabIndex={-1} className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100dvh-88px)] overflow-hidden">
+      {/* SHELL-026: `<main>`'s top offset below was a constant `mt-12` (=
+          StatusStrip's h-12), regardless of whether the warning banner above
+          is showing. The banner is `fixed` (not part of normal document
+          flow) at `top-12`, so whenever dataWarnings is non-empty it sat
+          permanently on top of the first ~28px of page content instead of
+          pushing it down — a standing overlay for as long as any loader stays
+          degraded, not just a transient notice. Growing main's offset (and
+          shrinking its calculated height by the same amount) while the
+          banner is up makes room for it instead of covering content with it.
+          ~32px is the banner's own rendered height (py-1.5 + text-xs/icon). */}
+      <main id="main-content" tabIndex={-1} className={"ml-0 md:ml-56 mb-10 overflow-hidden " + (dataWarnings.length > 0 ? "mt-20 h-[calc(100dvh-120px)]" : "mt-12 h-[calc(100dvh-88px)]")}>
         {renderPage()}
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
