@@ -415,4 +415,28 @@ module.exports = [
         heights.every(h => /^\\d+(\\.\\d+)?px$/.test(h)), heights.join(','));
     `,
   },
+  {
+    name: 'COMP-012 StatusStrip mute-drawer trigger uses aria-haspopup, not aria-pressed',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // This button OPENS a drawer overlay (a disclosure interaction) — it
+      // does not itself toggle a persistent state the way the theme/focus
+      // buttons do. aria-pressed tells assistive tech "activating ME flips
+      // MY own boolean state", which is the wrong contract for a trigger
+      // whose activation opens a whole separate dialog.
+      const noop = () => {};
+      const props = { unackCount: 0, muted: false, theme: 'dark', setTheme: noop,
+        onOpenShortcuts: noop, setPage: noop, onOpenMuteDrawer: noop, audioReplayIn: 0,
+        muteState: { nodes: ['CAM-1'], sources: [], global: false }, operators: [], staleAckCount: 0,
+        onOpenCmdK: noop, focusMode: false, onToggleFocus: noop };
+      ReactDOM.flushSync(() => root.render(React.createElement(window.StatusStrip, props)));
+      await settle();
+      const trigger = Array.from(container.querySelectorAll('button')).find(b => (b.title || '').indexOf('音效 (M)') === 0);
+      A('COMP-012 setup: the mute-drawer trigger button renders', !!trigger);
+      A('COMP-012 the trigger advertises a popup (aria-haspopup), not a self-toggle (aria-pressed)',
+        !!trigger && trigger.getAttribute('aria-haspopup') === 'dialog' && trigger.getAttribute('aria-pressed') === null,
+        trigger && ('aria-haspopup=' + trigger.getAttribute('aria-haspopup') + ' aria-pressed=' + trigger.getAttribute('aria-pressed')));
+    `,
+  },
 ];

@@ -717,7 +717,13 @@ const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShor
           type="button"
           onClick={onOpenMuteDrawer}
           title={`音效 (M) — ${activeMutes} 個來源已抑制`}
-          aria-pressed={activeMutes > 0}
+          // COMP-012: this button OPENS the MuteDrawer overlay (role="dialog")
+          // — it does not toggle its own state, so aria-pressed (which tells
+          // assistive tech "activating me flips MY boolean state") was the
+          // wrong contract. aria-haspopup announces "activating me opens a
+          // dialog"; the active-mute count is still conveyed by the visible
+          // badge + aria-label below.
+          aria-haspopup="dialog"
           aria-label={
             muted
               ? `開啟音效抽屜（目前全域靜音，${activeMutes} 個來源已抑制）`
