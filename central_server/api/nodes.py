@@ -987,6 +987,18 @@ async def pump_command(
     mqtt_svc = get_mqtt_service()
     if mqtt_svc is None:
         raise HTTPException(status_code=503, detail="MQTT service not available")
+
+    # DATA-008: an actuating ON command to an offline node would be published to
+    # the broker and acked as queued:true, but no device is there to run it —
+    # the operator is told the pump is starting while the station floods. Mirror
+    # stream start (api/stream.py), which 503s a non-ONLINE node. OFF and AUTO
+    # are the safe/release direction and, like stream stop, are still forwarded
+    # even when the node is offline (stopping/releasing must always be possible).
+    if body.action == "ON":
+        node_state = mqtt_svc.get_node_state(node_id)
+        if not node_state or node_state.get("status") != "ONLINE":
+            raise HTTPException(status_code=503, detail=f"Node {node_id} is offline")
+
     ok = mqtt_svc.send_pump_command(node_id, body.action, body.duration_s)
     if not ok:
         raise HTTPException(status_code=502,
@@ -1021,9 +1033,13 @@ async def snooze_node(
     from ..database import set_node_snooze
     from ..services.mqtt_service import get_mqtt_service
 
+    # DATA-009: snooze is an operator action on an EXISTING node. A typo'd or
+    # stale node_id used to silently upsert a phantom "glass"/"OFFLINE" node
+    # into the fleet — a node of a wrong, arbitrary type no device announced.
+    # Match the sibling write endpoints (PATCH /api/nodes/{id}, POST
+    # /api/nodes/{id}/pump), which 404 on an unknown node.
     if db_get_node(node_id) is None:
-        from ..database import upsert_node as _upsert
-        _upsert(node_id, "glass", "OFFLINE", None)
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
 
     until = (utcnow() + _td(minutes=body.minutes)).isoformat()
     ok = set_node_snooze(node_id, until, body.reason)

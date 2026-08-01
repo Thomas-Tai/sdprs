@@ -90,6 +90,30 @@ def test_throttle_locks_after_max_attempts(client):
     assert r.status_code == 429
 
 
+def test_lockout_includes_retry_after_countdown(client):
+    """AUTH-006: a bare "try later" leaves the operator guessing (and hammering
+    the form, refreshing the lock). The 429 must carry a Retry-After header and
+    surface the remaining seconds in the rendered page."""
+    main_mod._login_attempts.clear()
+    get_settings.cache_clear()
+    n = get_settings().LOGIN_MAX_ATTEMPTS
+    window = get_settings().LOGIN_LOCKOUT_SECONDS
+
+    for _ in range(n):
+        _post_login(client, GOOD_USER, "wrong")
+
+    r = _post_login(client, GOOD_USER, "wrong")
+    assert r.status_code == 429
+
+    ra = r.headers.get("retry-after")
+    assert ra is not None, dict(r.headers)
+    ra_int = int(ra)
+    # Right after a burst the oldest failure is ~now, so the wait is ~window.
+    assert 1 <= ra_int <= window, ra_int
+    # The same countdown must appear in the page body, not only the header.
+    assert str(ra_int) in r.text
+
+
 def test_success_clears_throttle(client):
     main_mod._login_attempts.clear()
     get_settings.cache_clear()

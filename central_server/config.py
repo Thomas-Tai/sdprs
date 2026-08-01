@@ -250,10 +250,29 @@ def get_settings() -> Settings:
     Uses lru_cache to ensure Settings is only created once.
     """
     settings = Settings()
+
+    # SEC-003: fail closed on the session-cookie Secure attribute. main.py wires
+    # SessionMiddleware https_only=COOKIE_SECURE, which defaulted to a flat
+    # False, and the Zeabur production config never sets it — so the live HTTPS
+    # deployment was shipping a session cookie with NO Secure attribute. Treat a
+    # set DATABASE_URL (the codebase's cloud / PostgreSQL = HTTPS signal) as
+    # HTTPS and default COOKIE_SECURE on, UNLESS the operator set it explicitly.
+    # An explicit env value always wins — including a deliberate `false` for the
+    # rare PostgreSQL-over-plain-HTTP dev box (where a Secure cookie would just
+    # fail login, an obvious fail-closed error rather than a silent leak).
+    if settings.DATABASE_URL and os.environ.get("COOKIE_SECURE") is None and not settings.COOKIE_SECURE:
+        settings.COOKIE_SECURE = True
+        logger.warning(
+            "COOKIE_SECURE defaulted to True for the cloud/PostgreSQL deployment "
+            "(assumed HTTPS). Set COOKIE_SECURE=false explicitly if this instance "
+            "is served over plain HTTP."
+        )
+
     db_mode = "PostgreSQL" if settings.DATABASE_URL else "SQLite"
     logger.info(
         f"Configuration loaded - MQTT_BROKER={settings.MQTT_BROKER}, "
-        f"DB_MODE={db_mode}, MQTT_USE_TLS={settings.MQTT_USE_TLS}"
+        f"DB_MODE={db_mode}, MQTT_USE_TLS={settings.MQTT_USE_TLS}, "
+        f"COOKIE_SECURE={settings.COOKIE_SECURE}"
     )
     return settings
 

@@ -112,3 +112,47 @@ def test_heartbeat_without_health_fields_stores_none(monkeypatch):
     st = svc.node_states["glass_node_02"]
     assert st["visual_health"] is None
     assert st["audio_health"] is None
+
+
+def test_heartbeat_preserves_established_pump_type(monkeypatch):
+    """DATA-007: a heartbeat is a generic liveness signal and must NOT downgrade
+    an already-known pump to "glass". The in-memory type drives the offline
+    timeout loop (30s pump vs 90s glass) and critical-vs-warning logging, so a
+    heartbeat that flipped a pump to glass would delay dead-pump detection 3x
+    and mute its CRITICAL log. The DB upsert must likewise carry the preserved
+    type, not the hardcoded "glass"."""
+    svc = make_service()
+    upserts = []
+    monkeypatch.setattr(
+        "central_server.services.mqtt_service.upsert_node",
+        lambda node_id, node_type, status, metadata=None:
+            upserts.append((node_id, node_type, status)),
+    )
+
+    # Node already established as a pump in memory (prior pump_status).
+    svc.node_states["pump_node_01"] = {"type": "pump", "status": "ONLINE"}
+
+    svc._handle_heartbeat(
+        "pump_node_01", json.dumps({"node_id": "pump_node_01", "cpu_temp": 40.0})
+    )
+
+    assert svc.node_states["pump_node_01"]["type"] == "pump"
+    assert upserts == [("pump_node_01", "pump", "ONLINE")], upserts
+
+
+def test_heartbeat_new_node_defaults_to_glass(monkeypatch):
+    """A genuinely new node's first contact is a heartbeat; glass stays the
+    correct default (cameras are the common case). Preserving an existing type
+    must not break the new-node path."""
+    svc = make_service()
+    upserts = []
+    monkeypatch.setattr(
+        "central_server.services.mqtt_service.upsert_node",
+        lambda node_id, node_type, status, metadata=None:
+            upserts.append((node_id, node_type, status)),
+    )
+    svc._handle_heartbeat(
+        "glass_node_09", json.dumps({"node_id": "glass_node_09", "cpu_temp": 44.0})
+    )
+    assert svc.node_states["glass_node_09"]["type"] == "glass"
+    assert upserts == [("glass_node_09", "glass", "ONLINE")], upserts

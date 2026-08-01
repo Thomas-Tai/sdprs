@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from ..services.audit_service import list_actions
-from ..timeutil import utcnow
 
 logger = logging.getLogger("api.audit")
 
@@ -79,8 +78,13 @@ async def export_audit_csv(
 
     Encoding: UTF-8 with BOM so Excel opens Traditional-Chinese details
     correctly out of the box; media type declares charset=utf-8 explicitly.
-    Content-Disposition names the file audit_YYYYMMDD.csv; X-Content-Type-Options
-    nosniff prevents Excel/IE MIME-sniff overrides.
+    Content-Disposition is a bare `attachment` with NO server-imposed filename
+    (DATA-003): a `filename=` param overrides the SPA anchor's `download`
+    attribute, which already carries the operator's LOCAL date (api.jsx SHL-16).
+    The server only knows UTC, and a UTC-stamped name is off-by-one-day for the
+    Macau (UTC+8) 00:00-08:00 night shift, so it must defer to the client.
+    Direct (non-SPA) hits fall back to the URL basename export.csv.
+    X-Content-Type-Options nosniff prevents Excel/IE MIME-sniff overrides.
     """
     user = _require_session(request)
     from ..config import get_settings
@@ -136,12 +140,15 @@ async def export_audit_csv(
             details_str,
         ])
 
-    filename = f"audit_{utcnow().strftime('%Y%m%d')}.csv"
+    # DATA-003: bare `attachment`, no server-imposed filename. A `filename=`
+    # param would override the SPA anchor's `download` attribute, which already
+    # carries the operator's LOCAL date (api.jsx SHL-16) — the server only knows
+    # UTC, which is off-by-one-day for the Macau (UTC+8) night shift.
     return Response(
         content=buf.getvalue(),
         media_type="text/csv; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": "attachment",
             "X-Content-Type-Options": "nosniff",
         },
     )
