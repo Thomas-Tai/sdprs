@@ -444,6 +444,15 @@ function App({ initialError = null }) {
       const safePage = window.sanitizePage(nextPage);
       if (safePage === prevPageRef.current) return;
       skipNextUrlPushRef.current = true;
+      // SHELL-006: without this, a BROWSER Back/Forward navigation also fell
+      // through to the pageHistory push effect below (it isn't guarded by
+      // anything else — only goBack() sets this ref), silently pushing onto
+      // the app-internal Alt+← stack too. The operator's next Alt+← then
+      // "undid" a navigation they made with the browser's own Back button,
+      // not one they made in-app — two independent back-stacks bleeding into
+      // each other. Browser history already tracks this transition; the
+      // Alt+← stack should only record in-app navigations (setPage/goBack).
+      skipNextHistoryPushRef.current = true;
       setPageRaw(safePage);
     };
     window.addEventListener('popstate', onPopState);
