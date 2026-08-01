@@ -1487,6 +1487,17 @@ function App({ initialError = null }) {
     const onKey = (e) => {
       if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Escape') {
+        // SHELL-017: the session-expiry modal is rendered UNCONDITIONALLY
+        // (outside the wallMode branch) and is documented as "non-dismissible
+        // ... no Escape handler by design" (see its JSX below) — the main
+        // shortcut handler's own Escape branch already honours that
+        // (`if (sessionExpired) return;`). This SEPARATE wall-mode listener
+        // didn't, so Escape could still exit wall mode — swapping the
+        // background from WallView to the normal shell — while the blocking
+        // modal was up, which is exactly the escape hatch it's meant to deny.
+        // Ref (not state) so this effect doesn't need sessionExpired in its
+        // deps, matching the codebase's own F4 idiom elsewhere in this file.
+        if (sessionExpiredRef.current) return;
         e.preventDefault();
         onExitWallMode();
       }
