@@ -282,6 +282,16 @@ function useTweaks(defaults) {
 function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
   const [open, setOpen] = React.useState(false);
   const dragRef = React.useRef(null);
+  // COMP-020: element that had focus right before the panel opened, so it
+  // can be restored on close. Captured synchronously at the moment of
+  // activation (the trigger's onClick, and the postMessage handler below) —
+  // NOT in a later effect keyed on `open`: the trigger button is UNMOUNTED
+  // the instant `open` flips true (this component renders either the
+  // trigger OR the panel, never both), so by the time a post-commit effect
+  // could read document.activeElement the browser has already reverted
+  // focus to <body> on its own. Capturing it at the activation call site is
+  // the only point it is still the real element.
+  const lastFocusedRef = React.useRef(null);
   // Auto-inject a rail toggle when a <deck-stage> is on the page. The
   // toggle drives the deck's per-viewer _railVisible via window message;
   // state is mirrored from the same localStorage key the deck reads so
@@ -357,7 +367,12 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     const onMsg = (e) => {
       if (e.origin !== window.location.origin) return;
       const t = e?.data?.type;
-      if (t === '__activate_edit_mode') setOpen(true);
+      if (t === '__activate_edit_mode') {
+        // COMP-020: capture focus before this host-driven open, same as the
+        // trigger's own onClick below.
+        lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
+        setOpen(true);
+      }
       else if (t === '__deactivate_edit_mode') setOpen(false);
     };
     window.addEventListener('message', onMsg);
@@ -371,6 +386,34 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     // G5: match inbound origin gate — see set_keys post for rationale.
     window.parent.postMessage({ type: '__edit_mode_dismissed' }, window.location.origin);
   };
+
+  // COMP-020: this panel previously had no dialog role, no Escape
+  // dismissal, and never moved focus — a keyboard/screen-reader operator
+  // who tabbed into it had no signal they'd entered a settings surface and
+  // no keyboard way out except tabbing past every control to reach the
+  // small ✕ button. On open, move focus onto the panel itself (labelled via
+  // role="dialog"/aria-label); Escape closes it; on close, focus returns to
+  // whatever was focused before it opened.
+  React.useEffect(() => {
+    if (!open) return;
+    const panel = dragRef.current;
+    if (panel) { try { panel.focus(); } catch (_) {} }
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        dismiss();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      const el = lastFocusedRef.current;
+      lastFocusedRef.current = null;
+      if (el && typeof el.focus === 'function') {
+        try { el.focus(); } catch (_) {}
+      }
+    };
+  }, [open]);
 
   const onDragStart = (e) => {
     const panel = dragRef.current;
@@ -417,7 +460,11 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
         <style>{__TWEAKS_TRIGGER_STYLE}</style>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            // COMP-020: capture focus before this click-driven open too.
+            lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
+            setOpen(true);
+          }}
           className="twk-trigger"
           aria-label="開啟顯示設定"
           title="顯示設定（主題／密度／4K 牆面模式）"
@@ -434,7 +481,12 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
   return (
     <>
       <style>{__TWEAKS_STYLE}</style>
+      {/* COMP-020: no backdrop blocks the rest of the page (this is a
+          floating, non-blocking settings panel, unlike the app's true
+          modals), so aria-modal is deliberately omitted — role + label give
+          it an identity without falsely claiming the background is inert. */}
       <div ref={dragRef} className="twk-panel" data-noncommentable=""
+           role="dialog" aria-label={title} tabIndex={-1}
            style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
         <div className="twk-hd" onMouseDown={onDragStart}>
           <b>{title}</b>

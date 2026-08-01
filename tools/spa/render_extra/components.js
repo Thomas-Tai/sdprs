@@ -567,4 +567,48 @@ module.exports = [
         calls.length === 1 && calls[0] === true, JSON.stringify(calls));
     `,
   },
+  {
+    name: 'COMP-020 TweaksPanel gets a dialog role, Escape-to-close, and focus management',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweaksPanel, { title: '設定' },
+        React.createElement('div', null, 'content'))));
+      await settle();
+
+      // Open via the same postMessage protocol an embedding host uses
+      // (__activate_edit_mode). An EXTERNAL element (not the panel's own
+      // trigger button, which unmounts the instant the panel opens) holds
+      // focus beforehand, so the focus-restore assertion below is
+      // unambiguous regardless of what happens to the in-panel trigger.
+      const outside = document.createElement('button');
+      outside.textContent = 'outside page element';
+      document.body.appendChild(outside);
+      outside.focus();
+      A('COMP-020 setup: an external element has focus before the panel opens', document.activeElement === outside);
+
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: '__activate_edit_mode' }, origin: window.location.origin,
+      }));
+      await settle();
+
+      // '.twk-panel' exists whether or not the role/aria fix has landed, so
+      // "is the panel open" is asserted independently of the attributes
+      // under test — otherwise a missing role="dialog" would make the
+      // later "Escape closes it" check trivially true for the wrong reason.
+      const panel = container.querySelector('.twk-panel');
+      A('COMP-020 setup: postMessage(__activate_edit_mode) opens the panel', !!panel);
+      A('COMP-020 open panel exposes role="dialog"', !!panel && panel.getAttribute('role') === 'dialog', panel && panel.getAttribute('role'));
+      A('COMP-020 open panel has an accessible name matching its title', !!panel && panel.getAttribute('aria-label') === '設定', panel && panel.getAttribute('aria-label'));
+      A('COMP-020 focus moves into the panel on open', !!panel && panel.contains(document.activeElement), document.activeElement && document.activeElement.tagName);
+
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await settle();
+      A('COMP-020 Escape closes the panel', !container.querySelector('.twk-panel'));
+      A('COMP-020 focus is restored to the pre-open element after Escape-close',
+        document.activeElement === outside, document.activeElement && document.activeElement.tagName);
+
+      document.body.removeChild(outside);
+    `,
+  },
 ];
