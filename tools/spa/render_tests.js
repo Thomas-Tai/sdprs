@@ -1604,6 +1604,44 @@ const SUITES = [
   { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },
 ];
 
+// ---- modular extra suites (parallel-authored; one file per owner) ----------
+// The dashboard-audit remediation lane is TDD'd across many parallel worktree
+// agents. To keep this monolithic file free of merge collisions, each owner
+// drops its suites into its OWN file under render_extra/ instead of editing the
+// SUITES array above. Each render_extra/<owner>.js does:
+//
+//     module.exports = [ { name, deps, target, body }, ... ];
+//
+// where `body` is test-logic SOURCE (a string; a normal template literal in
+// that file is fine — backticks are safe there, unlike the inline TEST_ strings
+// in this file). The body runs with the same helpers the inline PRELUDE exposes
+// (A, settle, tick, click, container, root, byText, setInput, React, ReactDOM)
+// plus the target file's internals. The loader wraps every body in the standard
+// async + PRELUDE + try/catch shell, exactly like the inline suites, so an
+// uncaught throw is reported as a failing assertion rather than crashing the run.
+(function loadExtraSuites() {
+  const dir = path.join(__dirname, 'render_extra');
+  let files;
+  try { files = fs.readdirSync(dir); }
+  catch (e) { return; } // dir absent → no extra suites, nothing to do
+  for (const f of files.filter(n => n.endsWith('.js')).sort()) {
+    let mod;
+    try { mod = require(path.join(dir, f)); }
+    catch (e) { console.error('render_extra/' + f + ' failed to load: ' + (e && e.stack || e)); process.exit(1); }
+    const suites = Array.isArray(mod) ? mod : (typeof mod === 'function' ? mod() : []);
+    for (const s of suites) {
+      const label = s.name || f;
+      const shell =
+        'window.__TEST_PROMISE = (async () => {\n' + PRELUDE + '\ntry {\n' +
+        s.body + '\n} catch (e) {\n' +
+        '  results.push({ name: ' + JSON.stringify(label + ' threw') +
+        ", pass: false, detail: (e && e.stack) ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });\n" +
+        '}\nwindow.__TEST_RESULT = results;\n})();\n';
+      SUITES.push({ name: label, deps: s.deps || [], target: s.target, test: shell });
+    }
+  }
+})();
+
 (async () => {
   let pass = 0, fail = 0;
   for (const s of SUITES) {
