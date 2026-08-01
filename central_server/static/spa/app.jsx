@@ -1670,16 +1670,21 @@ function App({ initialError = null }) {
         <window.TweakSection label="檢視模式" />
         <window.TweakToggle label="4K 牆面模式" value={tweaks.wallMode} onChange={(v) => setTweak('wallMode', v)}/>
         <window.TweakSection label="跳轉頁面" />
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:4}}>
+        {/* SHELL-002: these buttons used to hardcode light-theme-only inline
+            colors (`#1e40af` active / `#29261b` inactive on a near-black
+            `rgba(0,0,0,.04)` fill) — in the default DARK theme that's near-
+            black text on a near-black background, ~1.2:1 contrast (fails WCAG
+            1.4.3). Switching to the shared surface/ink/sev-info tokens (same
+            idiom NavRail's density toggle uses just above in components.jsx)
+            makes this react to the theme instead of assuming one. */}
+        <div className="grid grid-cols-3 gap-1">
           {(window.NAV_ITEMS ?? []).map(item => (
-            <button key={item.id} onClick={() => setPage(item.id)}
-              style={{
-                fontSize:11,padding:'5px 4px',borderRadius:6,
-                border:'1px solid '+(page===item.id?'rgba(59,130,246,.5)':'rgba(0,0,0,.12)'),
-                background:page===item.id?'rgba(59,130,246,.15)':'rgba(0,0,0,.04)',
-                color:page===item.id?'#1e40af':'#29261b',
-                cursor:'pointer',
-              }}>
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setPage(item.id)}
+              className={`text-[11px] px-1 py-1.5 rounded-md border transition-colors ${page === item.id ? 'border-sev-info/50 bg-surface-overlay text-ink-primary' : 'border-border-subtle bg-surface-base text-ink-secondary hover:text-ink-primary'}`}
+            >
               {item.label}
             </button>
           ))}
