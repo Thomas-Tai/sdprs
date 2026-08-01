@@ -1926,26 +1926,35 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
   const alertRate = window.ALERT_RATE ?? [];
   return (
     <div className="h-full w-full overflow-hidden bg-black text-ink-primary flex flex-col">
-      {/* Top status strip — bigger */}
-      <div className="h-16 bg-surface-panel border-b-2 border-border-strong flex items-center px-6 gap-4 flex-shrink-0">
-        <div className="flex items-center gap-3">
+      {/* Top status strip — bigger.
+          SHELL-021: this row assumes it always has 4K-worth of horizontal
+          room. Below that (a smaller NOC monitor, or this same view resized/
+          projected at a lower resolution) the unguarded flex children could
+          shrink into overlapping/illegible text, and WallView's root is
+          `overflow-hidden` — so anything that didn't fit was invisibly
+          clipped, not scrollable. flex-shrink-0 + whitespace-nowrap on each
+          cluster keeps them intact; overflow-x-auto on the row means a
+          genuinely-too-narrow display gets a scrollbar instead of silently
+          losing the clock/weather off the right edge. */}
+      <div className="h-16 bg-surface-panel border-b-2 border-border-strong flex items-center px-6 gap-4 flex-shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-3 flex-shrink-0">
           <div className={`w-10 h-10 rounded ${unackCount > 0 ? 'bg-sev-critical/15 text-sev-critical' : 'bg-sev-ok/15 text-sev-ok'} flex items-center justify-center`}>
             <Icon.ShieldAlert size={22} strokeWidth={2}/>
           </div>
-          <div>
+          <div className="whitespace-nowrap">
             <div className="text-xl font-bold tracking-wider">SDPRS</div>
             <div className="text-[10px] font-mono text-ink-muted -mt-0.5">NOC WALL · v2.4</div>
           </div>
         </div>
-        <div className="w-px h-10 bg-border-subtle"></div>
-        <WallLivePill/>
+        <div className="w-px h-10 bg-border-subtle flex-shrink-0"></div>
+        <span className="flex-shrink-0"><WallLivePill/></span>
         {unackCount > 0 && (
-          <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink">
+          <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink flex-shrink-0 whitespace-nowrap">
             <Icon.Bell size={16}/> 未認領 {unackCount}
           </div>
         )}
         <div className="flex-1"></div>
-        <div className="flex items-center gap-4 text-base">
+        <div className="flex items-center gap-4 text-base flex-shrink-0 whitespace-nowrap">
           {weather.typhoon && (
             <>
               <span className="flex items-center gap-2 text-sev-warn font-bold"><Icon.Typhoon size={20}/> 颱風 {weather.typhoon.name} · {weather.typhoon.level}</span>
@@ -1965,8 +1974,8 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
           <span className="text-ink-dim">|</span>
           <span className="font-mono tnum text-sev-info">{weather.rain?.day ?? '—'} mm/24h</span>
         </div>
-        <div className="w-px h-10 bg-border-subtle"></div>
-        <WallClock/>
+        <div className="w-px h-10 bg-border-subtle flex-shrink-0"></div>
+        <span className="flex-shrink-0"><WallClock/></span>
       </div>
 
       {(dataWarnings ?? []).length > 0 && (
