@@ -1716,10 +1716,15 @@ function App({ initialError = null }) {
             makes this react to the theme instead of assuming one. */}
         <div className="grid grid-cols-3 gap-1">
           {(window.NAV_ITEMS ?? []).map(item => (
+            /* SHELL-014: these are toggle-style buttons (one "pressed" per
+               group, like the density toggle right above them in NavRail,
+               which already carries aria-pressed) but had no pressed state
+               exposed to assistive tech at all. */
             <button
               key={item.id}
               type="button"
               onClick={() => setPage(item.id)}
+              aria-pressed={page === item.id}
               className={`text-[11px] px-1 py-1.5 rounded-md border transition-colors ${page === item.id ? 'border-sev-info/50 bg-surface-overlay text-ink-primary' : 'border-border-subtle bg-surface-base text-ink-secondary hover:text-ink-primary'}`}
             >
               {item.label}
