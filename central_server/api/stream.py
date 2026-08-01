@@ -277,7 +277,7 @@ async def stream_health(user: str = Depends(get_current_user)):
                 path = lm.group(1)
         if not path:
             continue
-        node = nodes.setdefault(path, {"viewers": 0, "dropped": 0, "bitrate_kbps": 0})
+        node = nodes.setdefault(path, {"viewers": 0, "dropped": 0, "bitrate_kbps": None})
         if name in ("rtsp_session_bytes_received", "rtsp_bytes_received_total"):
             bytes_now[path] = value
         elif name in ("frames_dropped_total", "rtsp_session_frames_dropped"):
@@ -287,13 +287,24 @@ async def stream_health(user: str = Depends(get_current_user)):
             node["viewers"] += int(value)
 
     # Compute kbps via first derivative.
+    #
+    # DATA-026: a first-derivative needs TWO samples. If this path has no prior
+    # reading in THIS process — the very first scrape, or a request landing on a
+    # fresh worker under a multi-worker deploy where the per-process
+    # `stream_health._cache` doesn't carry the previous reading — report null
+    # (unknown) rather than a fabricated 0 that reads as a measured "no traffic".
+    # The SPA maps bitrate_kbps==null -> "—" (StreamHealthCell, OPS-002). The
+    # per-process cache is a single-worker assumption (like the login throttle);
+    # a real multi-worker fix would need a shared store.
     prev = cache.get("bytes", {})
     prev_ts = cache.get("ts", now_ts)
     dt = max(0.001, now_ts - prev_ts)
     for path, b in bytes_now.items():
-        prev_b = prev.get(path, b)
-        delta_bits = max(0.0, (b - prev_b) * 8.0)
-        nodes[path]["bitrate_kbps"] = int(delta_bits / dt / 1000)
+        if path in prev:
+            delta_bits = max(0.0, (b - prev[path]) * 8.0)
+            nodes[path]["bitrate_kbps"] = int(delta_bits / dt / 1000)
+        else:
+            nodes[path]["bitrate_kbps"] = None
     stream_health._cache = {"bytes": bytes_now, "ts": now_ts}
 
     return {"enabled": True, "reachable": True, "nodes": nodes}
