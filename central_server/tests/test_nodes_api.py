@@ -624,6 +624,10 @@ def test_pump_command_on_publishes_and_audits(client, monkeypatch):
     calls = {"mqtt": [], "log": []}
 
     class _FakeMqtt:
+        def get_node_state(self, node_id):
+            # DATA-008: ON now checks the node is ONLINE before publishing.
+            return {"type": "pump", "status": "ONLINE"}
+
         def send_pump_command(self, node_id, action, duration_s):
             calls["mqtt"].append((node_id, action, duration_s))
             return True
@@ -770,6 +774,107 @@ def test_pump_command_missing_node_returns_404(client, monkeypatch):
     response = client.post("/api/nodes/does-not-exist/pump",
                            json={"action": "OFF"})
     assert response.status_code == 404
+
+
+# --- DATA-008: pump ON to an offline node must 503 (mirror stream start),
+#     while OFF/AUTO (safe/release direction) still forward like stream stop.
+def test_pump_command_on_offline_node_returns_503(client, monkeypatch):
+    """DATA-008: an ON command to an OFFLINE pump must 503 — not report
+    queued=True. Publishing an actuating command no device is present to run,
+    then telling the operator it's queued, hides a dead pump during a flood.
+    Mirrors stream start (api/stream.py), which 503s a non-ONLINE node. The
+    MQTT publish must NOT happen."""
+    sent = []
+
+    class _FakeMqtt:
+        def get_node_state(self, node_id):
+            return {"type": "pump", "status": "OFFLINE"}
+
+        def send_pump_command(self, node_id, action, duration_s):
+            sent.append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    # pump_node_02 exists in db_rows as a pump (passes 404 + type checks) but
+    # is reported OFFLINE by the live MQTT state.
+    response = client.post("/api/nodes/pump_node_02/pump",
+                           json={"action": "ON", "duration_s": 15})
+    assert response.status_code == 503
+    assert "offline" in response.json()["detail"].lower()
+    assert sent == [], f"ON must not publish to an offline node: {sent}"
+
+
+def test_pump_command_on_never_seen_node_returns_503(client, monkeypatch):
+    """DATA-008 corollary: get_node_state is None (node in DB but never
+    announced over MQTT) is also 'offline' for an actuating ON."""
+    sent = []
+
+    class _FakeMqtt:
+        def get_node_state(self, node_id):
+            return None
+
+        def send_pump_command(self, node_id, action, duration_s):
+            sent.append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.post("/api/nodes/pump_node_02/pump",
+                           json={"action": "ON", "duration_s": 15})
+    assert response.status_code == 503
+    assert sent == []
+
+
+def test_pump_command_off_offline_node_still_forwarded(client, monkeypatch):
+    """DATA-008 boundary: OFF is the safe/stopping direction and, like stream
+    stop (api/stream.py), must still reach the edge even when the node is
+    offline. Do NOT over-gate — stopping a pump must always be possible."""
+    sent = []
+
+    class _FakeMqtt:
+        def get_node_state(self, node_id):
+            return {"type": "pump", "status": "OFFLINE"}
+
+        def send_pump_command(self, node_id, action, duration_s):
+            sent.append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.post("/api/nodes/pump_node_02/pump", json={"action": "OFF"})
+    assert response.status_code == 200
+    assert response.json()["action"] == "OFF"
+    assert sent == [("pump_node_02", "OFF", None)]
+
+
+def test_pump_command_auto_offline_node_still_forwarded(client, monkeypatch):
+    """DATA-008 boundary: AUTO (release a manual hold, MSP-F6) is also a safe
+    direction — must reach an offline node so a stuck hold can always be
+    released."""
+    sent = []
+
+    class _FakeMqtt:
+        def get_node_state(self, node_id):
+            return {"type": "pump", "status": "OFFLINE"}
+
+        def send_pump_command(self, node_id, action, duration_s):
+            sent.append((node_id, action, duration_s))
+            return True
+
+    monkeypatch.setattr(nodes_api, "get_mqtt_service", lambda: _FakeMqtt())
+    import central_server.services.audit_service as audit_service_module
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    response = client.post("/api/nodes/pump_node_02/pump", json={"action": "AUTO"})
+    assert response.status_code == 200
+    assert sent == [("pump_node_02", "AUTO", None)]
 
 
 if __name__ == "__main__":

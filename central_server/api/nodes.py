@@ -987,6 +987,18 @@ async def pump_command(
     mqtt_svc = get_mqtt_service()
     if mqtt_svc is None:
         raise HTTPException(status_code=503, detail="MQTT service not available")
+
+    # DATA-008: an actuating ON command to an offline node would be published to
+    # the broker and acked as queued:true, but no device is there to run it —
+    # the operator is told the pump is starting while the station floods. Mirror
+    # stream start (api/stream.py), which 503s a non-ONLINE node. OFF and AUTO
+    # are the safe/release direction and, like stream stop, are still forwarded
+    # even when the node is offline (stopping/releasing must always be possible).
+    if body.action == "ON":
+        node_state = mqtt_svc.get_node_state(node_id)
+        if not node_state or node_state.get("status") != "ONLINE":
+            raise HTTPException(status_code=503, detail=f"Node {node_id} is offline")
+
     ok = mqtt_svc.send_pump_command(node_id, body.action, body.duration_s)
     if not ok:
         raise HTTPException(status_code=502,
