@@ -1758,16 +1758,22 @@ function WallSnapshot(props) {
   return <Impl {...props}/>;
 }
 
-function WallView({ alerts, nodes, unackCount, dataWarnings }) {
+function WallLivePill() {
   const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
-  // C1: ticking wall clock — updates every second so the NOC display shows
-  // real time instead of a frozen mount-time snapshot.
-  const [wallClock, setWallClock] = useStateA(() => Date.now());
+  return <window.Pill tone={liveState} dot pulse={liveState==='ok'} className="!h-8 !text-sm !px-3">{window.liveClockLabel(liveSec)}</window.Pill>;
+}
+
+function WallClock() {
+  const [now, setNow] = useStateA(() => Date.now());
   useEffectA(() => {
-    const id = setInterval(() => setWallClock(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  return <div className="font-mono tnum text-base text-ink-secondary">{new Date(now).toLocaleTimeString('zh-TW', { hour12: false })}</div>;
+}
+
+function WallView({ alerts, nodes, unackCount, dataWarnings }) {
   const sorted = [...(nodes ?? [])].sort((a, b) => {
     const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
     // Unknown/new status codes shouldn't NaN-sort themselves to random positions.
@@ -1790,7 +1796,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
           </div>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
-        <window.Pill tone={liveState} dot pulse={liveState==='ok'} className="!h-8 !text-sm !px-3">{window.liveClockLabel(liveSec)}</window.Pill>
+        <WallLivePill/>
         {unackCount > 0 && (
           <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink">
             <Icon.Bell size={16}/> 未認領 {unackCount}
@@ -1818,7 +1824,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
           <span className="font-mono tnum text-sev-info">{weather.rain?.day ?? '—'} mm/24h</span>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
-        <div className="font-mono tnum text-base text-ink-secondary">{new Date(wallClock).toLocaleTimeString('zh-TW', { hour12: false })}</div>
+        <WallClock/>
       </div>
 
       {(dataWarnings ?? []).length > 0 && (
