@@ -482,4 +482,48 @@ module.exports = [
       A('COMP-014 a changed height prop is still detected as unequal (regression guard)', diffHeight === false, diffHeight);
     `,
   },
+  {
+    name: 'COMP-015 AudioController overlap-guard does not advance its timestamp while muted',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // Minimal AudioContext double so beep() takes its real code path
+      // instead of short-circuiting on "no AudioContext in jsdom". Counts
+      // oscillators created — playCritical() creates exactly 3 per firing,
+      // playWarning() exactly 2 — so a count proves whether a beep actually
+      // happened, without needing real sound output.
+      function FakeGain() { return { gain: { value: 0, setValueAtTime(){}, linearRampToValueAtTime(){} }, connect(){} }; }
+      function FakeOsc() { return { type: '', frequency: { value: 0 }, connect(){}, start(){}, stop(){} }; }
+      function FakeAudioContext() {
+        this.currentTime = 0;
+        this.destination = {};
+      }
+      FakeAudioContext.prototype.createGain = function () { return FakeGain(); };
+      FakeAudioContext.prototype.createOscillator = function () { window.__oscCount = (window.__oscCount || 0) + 1; return FakeOsc(); };
+      FakeAudioContext.prototype.resume = function () { return Promise.resolve(); };
+      window.AudioContext = FakeAudioContext;
+      window.__oscCount = 0;
+
+      const ctrl = window.SDPRS_AUDIO;
+      A('COMP-015 setup: AudioController is published', !!ctrl);
+
+      // Alerts keep arriving while the operator has muted audio — none of
+      // these should produce sound (muted) AND none should count toward the
+      // overlap guard (they never actually played).
+      ctrl.setMuted(true);
+      ctrl.playCritical();
+      A('COMP-015 setup: no oscillator is created while muted', window.__oscCount === 0, window.__oscCount);
+
+      // The operator unmutes and a genuine new critical alert fires
+      // immediately after. This must actually beep — the overlap guard
+      // exists to stop DOUBLE beeps for the SAME real alert burst, not to
+      // swallow the first real beep after a mute period.
+      ctrl.setMuted(false);
+      ctrl.playCritical();
+      A('COMP-015 the first unmuted playCritical right after a muted call actually beeps',
+        window.__oscCount === 3, window.__oscCount);
+
+      delete window.AudioContext;
+    `,
+  },
 ];

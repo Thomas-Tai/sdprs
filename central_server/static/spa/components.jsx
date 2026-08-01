@@ -144,13 +144,23 @@ const AudioController = (() => {
       notify();
     },
     isArmed: () => armed,
+    // COMP-015: both guards used to stamp lastCriticalTime/lastWarningTime
+    // BEFORE checking `muted` — beep() itself no-ops while muted, but the
+    // timestamp still advanced on every call. A burst of alerts arriving
+    // during a muted period silently "used up" the overlap window, so the
+    // very FIRST real alert tone after the operator unmuted got swallowed
+    // by this guard (which exists to stop double-beeps within one real
+    // burst, not to suppress the first sound after a mute period ends).
+    // Checking `muted` first means a muted call never touches the timestamp.
     playCritical: () => {
+      if (muted) return;
       const now = Date.now();
       if (now - lastCriticalTime < 1000) return;
       lastCriticalTime = now;
       beep(880, 0.25); beep(660, 0.25, 'sine', 0.30); beep(880, 0.40, 'sine', 0.60);
     },
     playWarning: () => {
+      if (muted) return;
       const now = Date.now();
       if (now - lastWarningTime < 600) return;
       lastWarningTime = now;
