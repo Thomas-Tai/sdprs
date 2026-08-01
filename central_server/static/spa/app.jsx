@@ -10,6 +10,11 @@ const DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "blue"
 }/*EDITMODE-END*/;
 
+const _FAILURE_LABELS = {
+  nodes: '節點資料', alerts: '警報', history: '歷史紀錄',
+  rate: '警報頻率', weather: '天氣資訊', handover: '交接備註', audit: '稽核紀錄',
+};
+
 // H-1: cross-login state carrier. Session-expiry redirect encodes {page,
 // selectedId, hadDraft} into `?sdprs_state=<base64>` on the post-login target
 // URL; on the fresh mount we decode, seed initial state, and strip the query
@@ -1016,13 +1021,6 @@ function App({ initialError = null }) {
     }
   }, [showToast]);
 
-  // Partial data-load failures — loadInitial() stores which loaders failed on
-  // window.__SDPRS_LOAD_FAILURES; surface them as a warning banner so the
-  // operator knows which feeds are stale or unavailable.
-  const _FAILURE_LABELS = {
-    nodes: '節點資料', alerts: '警報', history: '歷史紀錄',
-    rate: '警報頻率', weather: '天氣資訊', handover: '交接備註', audit: '稽核紀錄',
-  };
   // SHL-10: mount-then-load. The initial data fetch used to sit in front of
   // ReactDOM.render(), so the operator stared at index.html's (motionless —
   // see SHL-7) boot spinner until all SEVEN loaders settled; each carries a
@@ -1559,7 +1557,7 @@ function App({ initialError = null }) {
             <div className="text-xl tracking-widest">SDPRS · 正在載入即時資料…</div>
           </div>
         ) : (
-          <WallView alerts={alerts} nodes={nodes} unackCount={unackCount}/>
+          <WallView alerts={alerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
         )}
       </ErrorBoundary>
       {/* SHL-2: the exit. Deliberately rendered OUTSIDE the ErrorBoundary
@@ -1760,7 +1758,7 @@ function WallSnapshot(props) {
   return <Impl {...props}/>;
 }
 
-function WallView({ alerts, nodes, unackCount }) {
+function WallView({ alerts, nodes, unackCount, dataWarnings }) {
   const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
   // C1: ticking wall clock — updates every second so the NOC display shows
@@ -1822,6 +1820,13 @@ function WallView({ alerts, nodes, unackCount }) {
         <div className="w-px h-10 bg-border-subtle"></div>
         <div className="font-mono tnum text-base text-ink-secondary">{new Date(wallClock).toLocaleTimeString('zh-TW', { hour12: false })}</div>
       </div>
+
+      {(dataWarnings ?? []).length > 0 && (
+        <div className="bg-sev-warn/15 border-b border-sev-warn/40 px-6 py-1.5 text-sm text-sev-warn font-semibold flex items-center gap-2 flex-shrink-0" role="alert">
+          <Icon.AlertCircle size={16} className="flex-shrink-0"/>
+          <span>{dataWarnings.map(k => _FAILURE_LABELS[k] || k).join('、')} 無法載入 — 顯示快取資料</span>
+        </div>
+      )}
 
       {/* Body: 3-column wall layout */}
       <div className="flex-1 grid grid-cols-[2fr_1fr_1fr] gap-3 p-3 min-h-0">
