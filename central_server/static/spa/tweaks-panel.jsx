@@ -847,7 +847,16 @@ function TweakColor({ label, value, options, onChange }) {
     return (
       <div className="twk-row twk-row-h">
         <div className="twk-lbl"><span>{label}</span></div>
-        <input type="color" className="twk-swatch" value={value}
+        {/* COMP-027: an undefined/null `value` here is React's own signal
+            for "this input is uncontrolled" — the DOM's native default
+            (#000000) fills in, but the component then depends on the
+            browser's own uncontrolled-input semantics rather than always
+            being driven by React, which is fragile in general (React warns
+            "changing an uncontrolled input to be controlled" the moment a
+            real value shows up in a dev build) and easy to reintroduce a
+            real bug into with a future edit. Always pass a concrete hex
+            string so this input is controlled from its very first render. */}
+        <input type="color" className="twk-swatch" value={value || '#000000'}
                onChange={(e) => onChange(e.target.value)} />
       </div>
     );
