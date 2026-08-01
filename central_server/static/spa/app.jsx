@@ -1530,8 +1530,16 @@ function App({ initialError = null }) {
         setBooting(false);
       }
     };
+    // SHELL-019: this (and every other full-bleed root below — the wall-mode
+    // wrapper, its booting placeholder, the main shell root, and WallView's
+    // own root) used to be `h-screen w-screen`, i.e. a hardcoded 100vh/100vw —
+    // exactly the unit #root's own CMP-F18 fix moved away from (100vh excludes
+    // mobile browser chrome; 100vw includes the desktop scrollbar gutter).
+    // Every one of these mounts directly (or one level deep) under #root,
+    // which is already sized in 100dvh/100%, so `h-full w-full` is both
+    // correct and consistent — no need to redeclare a competing viewport unit.
     bootstrapErrorUI = (
-      <div className="h-screen w-screen flex items-center justify-center bg-surface-base text-ink-primary p-6">
+      <div className="h-full w-full flex items-center justify-center bg-surface-base text-ink-primary p-6">
         <div className="max-w-md text-center space-y-4">
           <div className="text-2xl font-bold text-sev-critical">無法載入初始資料</div>
           <div className="text-sm text-ink-secondary">
@@ -1553,7 +1561,7 @@ function App({ initialError = null }) {
 
   return (<LiveClockProvider registerReset={registerClockReset}>
   {bootstrapError ? bootstrapErrorUI : tweaks.wallMode ? (
-    <div className="relative h-screen w-screen bg-black">
+    <div className="relative h-full w-full bg-black">
       {/* SHL-17: WallView was the one view rendered OUTSIDE an ErrorBoundary,
           so a render-time throw in it (a malformed node, a missing
           SnapshotImage) blanked the whole 4K display to a white screen with
@@ -1565,7 +1573,7 @@ function App({ initialError = null }) {
           // Same honesty rule as renderPage(): a wall showing zero unacked
           // alerts and an empty node grid is an all-clear the console has not
           // earned yet — and this one is being read across a room.
-          <div className="h-screen w-screen flex flex-col items-center justify-center gap-4 bg-black text-ink-muted" role="status">
+          <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-black text-ink-muted" role="status">
             <span className="w-12 h-12 rounded-full border-4 border-border-subtle border-t-sev-info animate-spin" aria-hidden="true"></span>
             <div className="text-xl tracking-widest">SDPRS · 正在載入即時資料…</div>
           </div>
@@ -1589,7 +1597,7 @@ function App({ initialError = null }) {
       </button>
     </div>
   ) : (
-    <div className="h-screen w-screen overflow-hidden text-ink-primary">
+    <div className="h-full w-full overflow-hidden text-ink-primary">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:bg-sev-info focus:text-white focus:px-4 focus:py-2 focus:rounded">
         跳至主要內容
       </a>
@@ -1627,7 +1635,14 @@ function App({ initialError = null }) {
           <button onClick={() => setDataWarnings([])} className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
         </div>
       )}
-      <main id="main-content" className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
+      {/* SHELL-003: #root (styles.css, CMP-F18) migrated to 100dvh so the
+          mobile-chrome-safe *visible* viewport is what everything sizes
+          against — but this calc() still subtracted from the old 100vh, which
+          on a phone/tablet used as a walkaround console overshoots the real
+          viewport by the browser-chrome height. The bottom 50-90px of the
+          content area (and anything docked there) was then below the fold and
+          unreachable. 100dvh here keeps it in sync with #root's own unit. */}
+      <main id="main-content" className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100dvh-88px)] overflow-hidden">
         {renderPage()}
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
@@ -1801,7 +1816,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
   const handoverPin = window.HANDOVER?.pinned ?? null;
   const alertRate = window.ALERT_RATE ?? [];
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black text-ink-primary flex flex-col">
+    <div className="h-full w-full overflow-hidden bg-black text-ink-primary flex flex-col">
       {/* Top status strip — bigger */}
       <div className="h-16 bg-surface-panel border-b-2 border-border-strong flex items-center px-6 gap-4 flex-shrink-0">
         <div className="flex items-center gap-3">
