@@ -315,18 +315,25 @@ async def upload_video(
     node_id = event["node_id"]
     event_timestamp = event["timestamp"]
     
-    # Parse timestamp and format filename
+    # Parse timestamp and format filename.
+    #
+    # DATA-017: the filename is second-resolution, so two DISTINCT same-node
+    # detections in the same wall-clock second (different microsecond
+    # timestamps, so NOT collapsed by DATA-006 idempotency) produced the SAME
+    # path and the second upload silently clobbered the first clip's evidence.
+    # Suffix the unique alert_id so each event keeps its own file while the
+    # human-readable timestamp prefix is preserved.
     try:
         # Handle ISO format timestamp
         if "T" in event_timestamp:
             dt = datetime.fromisoformat(event_timestamp.replace("Z", "+00:00"))
         else:
             dt = datetime.strptime(event_timestamp, "%Y-%m-%d %H:%M:%S")
-        
-        filename = dt.strftime("%Y-%m-%d_%H-%M-%S") + ".mp4"
+
+        filename = dt.strftime("%Y-%m-%d_%H-%M-%S") + f"_{alert_id}.mp4"
     except (ValueError, TypeError):
         # Fallback to current time if parsing fails
-        filename = utcnow().strftime("%Y-%m-%d_%H-%M-%S") + ".mp4"
+        filename = utcnow().strftime("%Y-%m-%d_%H-%M-%S") + f"_{alert_id}.mp4"
     
     # Build full path
     node_dir = storage_path / "events" / node_id

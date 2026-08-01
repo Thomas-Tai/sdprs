@@ -476,5 +476,59 @@ class TestVideoUploadSizeCap:
         assert len(mp4s) == 1
 
 
+class TestVideoFilenameCollision:
+    """DATA-017: two DISTINCT same-node, same-SECOND alerts must not overwrite
+    each other's MP4. The stored filename was second-resolution (strftime
+    %H-%M-%S), so a second distinct detection in the same wall-clock second
+    reused the path and clobbered the first clip's evidence. Including the
+    unique alert_id in the filename keeps them distinct. (These are DISTINCT
+    events — different microsecond timestamps — so DATA-006 idempotency does not
+    collapse them into one row.)"""
+
+    def test_same_second_distinct_alerts_keep_both_videos(
+        self, test_db, storage_path, api_headers, sample_alert
+    ):
+        from fastapi import FastAPI
+        from starlette.middleware.sessions import SessionMiddleware
+        from central_server.api.alerts import router as alerts_router
+        import central_server.database as db
+
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware, secret_key="test-secret-key-for-testing")
+        app.include_router(alerts_router, prefix="/api")
+        app.state.latest_snapshots = {}
+
+        # Same node, same wall-clock second, different microseconds -> two
+        # DISTINCT events (not deduped by DATA-006).
+        a = dict(sample_alert, timestamp="2026-03-03T12:00:00.100000")
+        b = dict(sample_alert, timestamp="2026-03-03T12:00:00.900000")
+
+        with TestClient(app) as client:
+            id_a = client.post("/api/alerts", json=a, headers=api_headers).json()["alert_id"]
+            id_b = client.post("/api/alerts", json=b, headers=api_headers).json()["alert_id"]
+            assert id_a != id_b
+
+            r_a = client.put(
+                f"/api/alerts/{id_a}/video",
+                files={"file": ("clip.mp4", io.BytesIO(b"AAAA-clip-a"), "video/mp4")},
+                headers=api_headers,
+            )
+            r_b = client.put(
+                f"/api/alerts/{id_b}/video",
+                files={"file": ("clip.mp4", io.BytesIO(b"BBBB-clip-b"), "video/mp4")},
+                headers=api_headers,
+            )
+            assert r_a.status_code == 204 and r_b.status_code == 204
+
+        storage_events = storage_path / "storage" / "events"
+        mp4s = list(storage_events.rglob("*.mp4"))
+        # Both clips must survive on disk (no overwrite).
+        assert len(mp4s) == 2, [p.name for p in mp4s]
+        # And the two events must reference DISTINCT files.
+        pa = db.get_event(id_a)["mp4_path"]
+        pb = db.get_event(id_b)["mp4_path"]
+        assert pa != pb, (pa, pb)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
