@@ -633,4 +633,46 @@ module.exports = [
       A('COMP-021 TweaksPanel z-index is below the logout modal (components.jsx z-[80])', z < 80, z);
     `,
   },
+  {
+    name: 'COMP-022 TweaksPanel drag responds to Pointer Events (touch-capable, not mouse-only)',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // jsdom has no real PointerEvent constructor, so this dispatches a
+      // MouseEvent carrying the pointer* TYPE STRINGS instead — DOM
+      // dispatch/addEventListener match purely on event.type, and React's
+      // delegated listener for onPointerDown is likewise registered by type
+      // name, so this exercises the exact same code path a real touch
+      // pointer (or mouse) would trigger. What is under test is whether the
+      // component LISTENS for pointer events at all (mouse-only code never
+      // reacts to a 'pointermove'/'pointerup' dispatch).
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweaksPanel, { title: '設定' },
+        React.createElement('div', null, 'content'))));
+      await settle();
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: '__activate_edit_mode' }, origin: window.location.origin,
+      }));
+      await settle();
+
+      const panel = container.querySelector('.twk-panel');
+      const header = container.querySelector('.twk-hd');
+      A('COMP-022 setup: the panel and its draggable header render', !!panel && !!header);
+
+      // Panel starts at right:16px/bottom:16px (see offsetRef default).
+      panel.style.right = '16px';
+      panel.style.bottom = '16px';
+
+      const down = new window.MouseEvent('pointerdown', { clientX: 200, clientY: 200, bubbles: true, cancelable: true });
+      header.dispatchEvent(down);
+      const move = new window.MouseEvent('pointermove', { clientX: 170, clientY: 230, bubbles: true, cancelable: true });
+      window.dispatchEvent(move);
+      const up = new window.MouseEvent('pointerup', { clientX: 170, clientY: 230, bubbles: true, cancelable: true });
+      window.dispatchEvent(up);
+      await settle();
+
+      A('COMP-022 a pointerdown+pointermove+pointerup drag sequence actually moves the panel',
+        panel.style.right !== '16px' || panel.style.bottom !== '16px',
+        'right=' + panel.style.right + ' bottom=' + panel.style.bottom);
+    `,
+  },
 ];

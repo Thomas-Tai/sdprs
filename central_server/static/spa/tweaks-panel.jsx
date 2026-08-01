@@ -423,6 +423,12 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     };
   }, [open]);
 
+  // COMP-022: this used to attach mousemove/mouseup only — touch input never
+  // fires those, so the panel was undraggable on a touchscreen console.
+  // Pointer Events unify mouse/touch/pen behind one API; TweakRadio's
+  // segmented control and TweakNumber's scrub-label already use
+  // onPointerDown for exactly this reason (see below in this same file) —
+  // this brings the panel's own drag handle in line with that idiom.
   const onDragStart = (e) => {
     const panel = dragRef.current;
     if (!panel) return;
@@ -438,11 +444,11 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
       clampToViewport();
     };
     const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
     };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   };
 
   if (!open) {
@@ -496,10 +502,10 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
       <div ref={dragRef} className="twk-panel" data-noncommentable=""
            role="dialog" aria-label={title} tabIndex={-1}
            style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
-        <div className="twk-hd" onMouseDown={onDragStart}>
+        <div className="twk-hd" onPointerDown={onDragStart}>
           <b>{title}</b>
           <button className="twk-x" aria-label="Close tweaks"
-                  onMouseDown={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={dismiss}>✕</button>
         </div>
         <div className="twk-body">
