@@ -95,4 +95,41 @@ module.exports = [
       A('SHELL-007 a null/undefined alerts array resolves to null, never throws', window.resolveSelectedId(101, null, null) === null, String(window.resolveSelectedId(101, null, null)));
     `,
   },
+
+  // ---------------------------------- SHELL-027: ageSec sort comparator ----
+  // app.jsx's pickNextUnack sorts a severity tie by \`a.ageSec - b.ageSec\`
+  // (smaller = newer = wins). Since DATA-011, ageSec can be `null` for an
+  // alert with an unparseable timestamp (deliberately "unknown", not "just
+  // now"). `null - 100` coerces null to 0, so an unknown-age alert sorted as
+  // if it were the FRESHEST thing in the queue — the opposite of "unknown,
+  // treat cautiously". data.jsx's own orderWallAlerts had the same hole via
+  // `(a.ageSec || 0)`, which additionally conflates "unknown" with a
+  // legitimate ageSec===0 (brand new). compareAgeSec is the shared, guarded
+  // comparator: unknown ages sort to the END (least urgent), never the front.
+  {
+    name: 'SHELL-027                   data.jsx (compareAgeSec)',
+    target: 'data.jsx',
+    deps: ['icons.jsx'],
+    body: `
+      A('SHELL-027 window.compareAgeSec is published as a function', typeof window.compareAgeSec === 'function', typeof window.compareAgeSec);
+      A('SHELL-027 smaller ageSec (newer) sorts first', window.compareAgeSec(10, 100) < 0, window.compareAgeSec(10, 100));
+      A('SHELL-027 larger ageSec (older) sorts after', window.compareAgeSec(100, 10) > 0, window.compareAgeSec(100, 10));
+      A('SHELL-027 equal ageSec is a tie', window.compareAgeSec(50, 50) === 0, window.compareAgeSec(50, 50));
+      A('SHELL-027 a null ageSec (unknown) sorts AFTER a real one, not before', window.compareAgeSec(null, 10) > 0, window.compareAgeSec(null, 10));
+      A('SHELL-027 a real ageSec sorts BEFORE a null (unknown) one', window.compareAgeSec(10, null) < 0, window.compareAgeSec(10, null));
+      A('SHELL-027 two null ageSecs are a tie (neither poisons the sort with NaN)', window.compareAgeSec(null, null) === 0, window.compareAgeSec(null, null));
+      A('SHELL-027 undefined behaves the same as null', window.compareAgeSec(undefined, 10) > 0 && window.compareAgeSec(10, undefined) < 0, window.compareAgeSec(undefined, 10) + ',' + window.compareAgeSec(10, undefined));
+      A('SHELL-027 a genuinely-fresh ageSec===0 is NOT treated as unknown', window.compareAgeSec(0, 10) < 0, window.compareAgeSec(0, 10));
+      A('SHELL-027 never returns NaN for any of the above', !isNaN(window.compareAgeSec(null, 10)) && !isNaN(window.compareAgeSec(null, null)), window.compareAgeSec(null, 10) + ',' + window.compareAgeSec(null, null));
+
+      // Regression guard: orderWallAlerts' own ageSec tie-break must route
+      // through the same guarded comparator, not its old bare \`|| 0\`.
+      const unknownFirst = [
+        { id: 'known', state: 'pending', sev: 'warn', ageSec: 500 },
+        { id: 'unknown', state: 'pending', sev: 'warn', ageSec: null },
+      ];
+      const ordered = window.orderWallAlerts(unknownFirst);
+      A('SHELL-027 orderWallAlerts keeps a known-age alert ahead of an unknown-age one at the same severity', ordered[0].id === 'known', JSON.stringify(ordered.map(a => a.id)));
+    `,
+  },
 ];

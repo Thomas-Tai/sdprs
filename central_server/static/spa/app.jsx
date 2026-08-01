@@ -875,7 +875,13 @@ function App({ initialError = null }) {
       const rankA = rank[a.sev] ?? 99;
       const rankB = rank[b.sev] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
-      return a.ageSec - b.ageSec; // smaller ageSec = newer
+      // SHELL-027: was a bare `a.ageSec - b.ageSec` — since DATA-011, ageSec
+      // is `null` (unknown timestamp), not 0, for a bad timestamp. Subtraction
+      // coerces null to 0, so an unknown-age alert sorted as the FRESHEST
+      // candidate for N / auto-advance, the opposite of "unknown, don't
+      // assume urgency". compareAgeSec (data.jsx) sorts unknown ages last,
+      // same guarded-fallback idiom as the severity rank two lines up.
+      return window.compareAgeSec(a.ageSec, b.ageSec);
     });
     return sorted[0].id;
   }, []);

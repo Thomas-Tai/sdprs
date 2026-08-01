@@ -352,6 +352,25 @@ function activeAlertCount(alerts) {
 // 12-row slice. Primary: state (pending before acknowledged). Secondary:
 // severity (critical > warn > info). Tertiary: recency (lower ageSec first).
 // Returns a NEW array; does not mutate the input.
+// SHELL-027: shared, NaN/null-safe ageSec comparator. Since DATA-011, ageSec
+// is `null` (not 0) for an alert whose timestamp failed to parse — meaning
+// "unknown", not "just now". A bare `a.ageSec - b.ageSec` coerces null to 0
+// via subtraction, sorting an unknown age as the FRESHEST thing in the queue;
+// `(a.ageSec || 0)` (orderWallAlerts' old form) has the same hole AND also
+// conflates "unknown" with a legitimate ageSec===0 (a genuinely brand-new
+// alert). Treat a non-finite/missing age as "oldest" (Infinity) so it sorts
+// to the end — the conservative direction for something we don't actually
+// know the urgency of — never poisoning the comparison with NaN the way the
+// rest of this file already guards severity-rank fallbacks against.
+function compareAgeSec(a, b) {
+  var av = (typeof a === 'number' && isFinite(a)) ? a : Infinity;
+  var bv = (typeof b === 'number' && isFinite(b)) ? b : Infinity;
+  // Infinity - Infinity is NaN — guard the both-unknown case explicitly so
+  // two unknown-age alerts tie instead of poisoning the sort.
+  if (av === Infinity && bv === Infinity) return 0;
+  return av - bv;
+}
+
 function orderWallAlerts(alerts) {
   var sevRank = { critical: 0, warn: 1, info: 2 };
   return (alerts || []).slice().sort(function (a, b) {
@@ -361,7 +380,7 @@ function orderWallAlerts(alerts) {
     var ra = sevRank[a.sev] != null ? sevRank[a.sev] : 99;
     var rb = sevRank[b.sev] != null ? sevRank[b.sev] : 99;
     if (ra !== rb) return ra - rb;
-    return (a.ageSec || 0) - (b.ageSec || 0);
+    return compareAgeSec(a.ageSec, b.ageSec);
   });
 }
 
@@ -383,6 +402,7 @@ window.wallTileFrozen = wallTileFrozen;
 window.effectiveTheme = effectiveTheme;
 window.activeAlertCount = activeAlertCount;
 window.orderWallAlerts = orderWallAlerts;
+window.compareAgeSec = compareAgeSec;
 window.VALID_PAGES = VALID_PAGES;
 window.sanitizePage = sanitizePage;
 window.describeLoadFailures = describeLoadFailures;
