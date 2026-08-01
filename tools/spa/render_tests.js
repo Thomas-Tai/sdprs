@@ -562,6 +562,15 @@ ${PRELUDE}
 const TEST_MONITOR_LIVE = `
 window.__TEST_PROMISE = (async () => {
 ${PRELUDE}
+  // OPS-003: HlsPlayer now falls back to snapshots when NEITHER hls.js (absent
+  // in jsdom) NOR native HLS is available. Give this jsdom a native-HLS video so
+  // the go-live path actually mounts/keeps the <video> under test (a real Safari
+  // would; Chrome+hls.js would too). Restored below so it can't leak to siblings.
+  const _mproto = window.HTMLMediaElement.prototype;
+  const _origCPT = _mproto.canPlayType, _origPlay = _mproto.play, _origLoad = _mproto.load;
+  _mproto.canPlayType = () => 'maybe';
+  _mproto.play = () => Promise.resolve();
+  _mproto.load = () => {};
   try {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const HEADER_ONLY = '#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n';
@@ -649,6 +658,7 @@ ${PRELUDE}
   } catch (e) {
     results.push({ name: 'monitor live-readiness suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }
+  _mproto.canPlayType = _origCPT; _mproto.play = _origPlay; _mproto.load = _origLoad;
   window.__TEST_RESULT = results;
 })();
 `;
@@ -1312,8 +1322,49 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------- OPS-003: HLS unsupported/failed → fallback -
+// HlsPlayer used `if (!video || typeof Hls === 'undefined') return;` — when the
+// vendored hls.js failed to load (or the platform lacks MSE) it mounted an empty
+// <video> and returned WITHOUT calling onFallback, so the tile showed a black
+// frame under a false ● LIVE forever. It must instead try native HLS, and if
+// that's unavailable too, call onFallback so the tile reverts to snapshots.
+const TEST_OPS_HLS_FALLBACK = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    if (typeof window.Hls !== 'undefined') { try { delete window.Hls; } catch (_) { window.Hls = undefined; } }
+    const proto = window.HTMLMediaElement.prototype;
+    const origCPT = proto.canPlayType, origPlay = proto.play, origLoad = proto.load;
+    proto.play = () => Promise.resolve();
+    proto.load = () => {};
+
+    // (1) neither hls.js nor native HLS → must fall back (no black ● LIVE)
+    proto.canPlayType = () => '';
+    let fell = 0;
+    ReactDOM.flushSync(() => root.render(React.createElement(window.HlsPlayer, { nodeId: 'webcam_x', onFallback: () => { fell++; } })));
+    await settle();
+    A('OPS-003 no hls.js + no native HLS calls onFallback', fell === 1, 'fell=' + fell);
+
+    // (2) native HLS present (Safari-like) → use video.src, do NOT fall back
+    proto.canPlayType = () => 'maybe';
+    let fell2 = 0;
+    ReactDOM.flushSync(() => root.render(React.createElement(window.HlsPlayer, { nodeId: 'webcam_native', onFallback: () => { fell2++; } })));
+    await settle();
+    const vid = container.querySelector('video');
+    A('OPS-003 native-HLS path sets video.src to the playlist', !!vid && vid.getAttribute('src') === '/api/webcam/webcam_native/hls/playlist.m3u8', vid && vid.getAttribute('src'));
+    A('OPS-003 native-HLS path does not fall back', fell2 === 0);
+
+    proto.canPlayType = origCPT; proto.play = origPlay; proto.load = origLoad;
+  } catch (e) {
+    results.push({ name: 'OPS-003 hls-fallback suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
+  { name: 'OPS-003 hls fallback          components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_OPS_HLS_FALLBACK },
   { name: 'FLOW-001 toast queue policy   data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_FLOW_TOAST_QUEUE },
   { name: 'AUTH-003 session restore probe data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_AUTH_SESSION_PROBE },
   { name: 'FLOW-001 toast stack render   components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_FLOW_TOAST_STACK },

@@ -2280,7 +2280,35 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
 
   React.useEffect(() => {
     const video = videoRef.current;
-    if (!video || typeof Hls === 'undefined') return;
+    if (!video) return;
+    const src = `/api/webcam/${nodeId}/hls/playlist.m3u8`;
+
+    // OPS-003: decide the playback path explicitly instead of the old
+    // `typeof Hls === 'undefined' → return`, which mounted an empty <video>
+    // (permanent black frame) and NEVER called onFallback — so the tile kept
+    // claiming ● LIVE over nothing.
+    const hasMse = typeof Hls !== 'undefined' && Hls.isSupported();
+    const hasNative = !!(video.canPlayType && video.canPlayType('application/vnd.apple.mpegurl'));
+
+    if (!hasMse) {
+      // hls.js unavailable/unsupported. Safari & iOS can still play HLS
+      // natively via a plain <video src>. If even that is unavailable there is
+      // no way to render the stream — fall back to snapshot mode so we never
+      // show a black frame under a false ● LIVE.
+      if (hasNative) {
+        video.src = src;
+        const onErr = () => { if (onFallback) onFallback(); };
+        video.addEventListener('error', onErr);
+        video.play().catch(() => {});
+        return () => {
+          video.removeEventListener('error', onErr);
+          video.removeAttribute('src');
+          video.load();
+        };
+      }
+      if (onFallback) onFallback();
+      return;
+    }
 
     const hls = new Hls({
       liveDurationInfinity: true,
@@ -2289,7 +2317,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
     });
     hlsRef.current = hls;
 
-    hls.loadSource(`/api/webcam/${nodeId}/hls/playlist.m3u8`);
+    hls.loadSource(src);
     hls.attachMedia(video);
 
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
