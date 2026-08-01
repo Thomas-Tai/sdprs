@@ -207,6 +207,32 @@ function formatDurationShort(seconds) {
   return `${Math.round(s / 86400)}天`;
 }
 
+// UX-001: shared, date-aware wall-clock formatter. Every timestamp on this
+// dashboard used to render as bare HH:MM:SS (fmtClock), so an event logged at
+// 23:58 and one at 00:03 the NEXT day were indistinguishable in a handover
+// review that spans midnight. fmtTs shows the date ONLY when the instant is
+// not today, so the common (today) case stays terse while cross-midnight /
+// multi-day timelines become unambiguous. Null-safe by contract: null,
+// undefined, and unparseable inputs all render '—' (never "null" / "NaN" /
+// "Invalid Date"). Accepts a Date OR epoch-ms (api.jsx's parseTsMs output) —
+// deliberately NOT a raw wire string, which needs api.jsx's parseTs 'Z'
+// repair first (THE ONE RULE); hand fmtTs an already-parsed instant.
+function fmtTs(value) {
+  if (value == null) return '—';
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  const hms = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+  if (sameDay) return hms;
+  const md = p(d.getMonth() + 1) + '-' + p(d.getDate());
+  if (d.getFullYear() === now.getFullYear()) return md + ' ' + hms;
+  return d.getFullYear() + '-' + md + ' ' + hms;
+}
+
 // FLOW-001: the dashboard used a single toast slot, so a burst of messages
 // overwrote an action-critical failure toast ('認領失敗'/'解決失敗', tone 'warn')
 // in under a second — the operator walked away believing an ack landed when it
@@ -293,6 +319,7 @@ window.alertTypeLabel = alertTypeLabel;
 window.nodeStatusTone = nodeStatusTone;
 window.Z_LAYER = Z_LAYER;
 window.formatDurationShort = formatDurationShort;
+window.fmtTs = fmtTs;
 window.nextToasts = nextToasts;
 window.probeSessionOnce = probeSessionOnce;
 window.liveClockLabel = liveClockLabel;
