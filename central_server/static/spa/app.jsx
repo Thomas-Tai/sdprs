@@ -1656,7 +1656,15 @@ function App({ initialError = null }) {
           viewport by the browser-chrome height. The bottom 50-90px of the
           content area (and anything docked there) was then below the fold and
           unreachable. 100dvh here keeps it in sync with #root's own unit. */}
-      <main id="main-content" className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100dvh-88px)] overflow-hidden">
+      {/* SHELL-013: the skip link above targets #main-content via a bare
+          href="#..." fragment jump — that scrolls the element into view but
+          does NOT move keyboard focus onto a non-interactive <main> (no
+          native tab stop), so a keyboard user who activates the skip link
+          lands nowhere and the very next Tab starts back at the top of the
+          page, defeating the skip link's purpose. tabIndex={-1} makes it
+          focusable programmatically (not part of the normal Tab order)
+          without changing anything about mouse/pointer interaction. */}
+      <main id="main-content" tabIndex={-1} className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100dvh-88px)] overflow-hidden">
         {renderPage()}
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
