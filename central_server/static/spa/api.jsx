@@ -48,13 +48,23 @@
     const t = setTimeout(() => ac.abort(), timeoutMs);
     // Compose the built-in timeout signal with any caller-supplied signal so
     // a page-level AbortController (e.g. cancel-on-navigate) does NOT defeat
-    // the timeout. If the runtime lacks AbortSignal.any (all evergreen
-    // browsers ship it since 2024), fall back to letting the timeout win —
-    // i.e. spread opts BEFORE signal so opts.signal can't override it.
+    // the timeout, and the timeout does NOT defeat the caller's cancel.
     const callerSignal = opts && opts.signal;
-    const signal = (callerSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function')
-      ? AbortSignal.any([ac.signal, callerSignal])
-      : ac.signal;
+    let signal;
+    if (callerSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+      signal = AbortSignal.any([ac.signal, callerSignal]);
+    } else {
+      // DATA-012: runtimes without AbortSignal.any (all evergreen browsers have
+      // shipped it since 2024, but not every embedded webview). The old code
+      // fell back to `ac.signal` alone, silently DROPPING the caller's signal —
+      // a page-level cancel-on-navigate would then never abort the request.
+      // Forward the caller's abort onto our controller by hand so both still win.
+      signal = ac.signal;
+      if (callerSignal) {
+        if (callerSignal.aborted) ac.abort();
+        else callerSignal.addEventListener('abort', () => ac.abort(), { once: true });
+      }
+    }
     let res;
     try {
       res = await fetch(path, { credentials: 'same-origin', ...opts, signal });
