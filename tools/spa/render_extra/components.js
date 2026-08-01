@@ -526,4 +526,27 @@ module.exports = [
       delete window.AudioContext;
     `,
   },
+  {
+    name: 'COMP-017 NodeSidePanel does not crash when openAlerts is omitted',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      const node = {
+        id: 'PUMP-01', name: '測試泵浦', location: '3F · 西側', status: 'online',
+        type: 'pump', heartbeat: 5, upload: 5, level: 40, cycles: 0,
+      };
+      let threw = false;
+      try {
+        // openAlerts DELIBERATELY omitted — the exact contract gap COMP-017
+        // describes (a caller that hasn't loaded/wired the alerts list yet).
+        ReactDOM.flushSync(() => root.render(React.createElement(window.NodeSidePanel, {
+          node, history: [], onClose: () => {}, onJumpAlert: () => {}, onNavigate: () => {},
+          onSelectAlert: () => {}, onUpdateNode: () => Promise.resolve(),
+        })));
+        await settle();
+      } catch (e) { threw = true; }
+      A('COMP-017 NodeSidePanel does not crash when openAlerts is omitted', threw === false);
+      A('COMP-017 the panel still renders the node heading', container.textContent.indexOf('PUMP-01') !== -1, container.textContent.slice(0, 200));
+    `,
+  },
 ];

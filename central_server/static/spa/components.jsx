@@ -1967,7 +1967,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
 
 // ---------- Node Detail Side Panel (from monitor wall / status) ----------
 
-const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSelectAlert, openAlerts, onUpdateNode }) => {
+const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSelectAlert, openAlerts = [], onUpdateNode }) => {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
   const [locationError, setLocationError] = useState(null);
@@ -2036,7 +2036,12 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   }, [node?.id]);
 
   if (!node) return null;
-  const nodeAlerts = openAlerts.filter(a => a.node === node.id);
+  // COMP-017: `openAlerts` had no default and was called unguarded — a
+  // caller that hadn't finished loading/wiring the alerts list (or passed
+  // `null` explicitly) crashed the whole panel on `.filter` of undefined.
+  // The default parameter above covers an omitted prop; Array.isArray here
+  // also covers an explicit null/non-array value.
+  const nodeAlerts = (Array.isArray(openAlerts) ? openAlerts : []).filter(a => a.node === node.id);
   // Prefer prop-supplied history (fresh from caller's useState); fall back to
   // the window global for legacy call sites that haven't been updated yet.
   // See C-8 — direct window reads were non-reactive so panel history looked
