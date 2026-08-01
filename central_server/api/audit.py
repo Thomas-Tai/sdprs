@@ -45,13 +45,18 @@ async def list_audit(
     if user != get_settings().DASHBOARD_USER:
         raise HTTPException(status_code=403, detail="Admin only")
 
+    # DATA-016: echo the *clamped* paging values the query actually used, not the
+    # raw request params. Returning the un-clamped limit (e.g. 1e9) told the SPA
+    # there were more rows to page through than the endpoint would ever serve.
+    eff_limit = min(max(int(limit), 1), 500)
+    eff_offset = max(int(offset), 0)
     rows = list_actions(
-        limit=min(max(int(limit), 1), 500),
-        offset=max(int(offset), 0),
+        limit=eff_limit,
+        offset=eff_offset,
         operator=operator,
         action_type=action_type,
     )
-    return {"rows": rows, "limit": limit, "offset": offset}
+    return {"rows": rows, "limit": eff_limit, "offset": eff_offset}
 
 
 @router.get("/audit/export.csv")
