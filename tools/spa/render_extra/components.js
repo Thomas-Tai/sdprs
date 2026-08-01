@@ -388,4 +388,31 @@ module.exports = [
         !!activeDescendant && !!container.querySelector('#' + activeDescendant), activeDescendant);
     `,
   },
+  {
+    name: 'COMP-010 Sparkline sanitizes non-numeric buckets (no NaNpx bar heights)',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // A malformed/partial rate payload (schema drift, a bucket that failed
+      // to compute upstream) can hand this component null/undefined/NaN/a
+      // stray string instead of a count. Math.max(...data) is poisoned by a
+      // single NaN, so one bad bucket used to blank the ENTIRE sparkline, not
+      // just its own bar.
+      ReactDOM.flushSync(() => root.render(React.createElement(window.Sparkline, {
+        data: [3, null, 5, undefined, NaN, 'x', 2],
+      })));
+      await settle();
+      const bars = Array.from(container.querySelectorAll('.rounded-sm'));
+      A('COMP-010 setup: one bar rendered per bucket', bars.length === 7, bars.length);
+      const heights = bars.map(b => b.style.height);
+      // A "NaNpx" height string is an INVALID CSS length — jsdom (and real
+      // browsers) silently refuse to apply it, so the bar's style.height
+      // reads back as '' rather than the literal text "NaNpx". The
+      // observable symptom is therefore an EMPTY/collapsed bar, not a
+      // string containing "NaN" — assert every bar gets a real, finite,
+      // parseable pixel height instead.
+      A('COMP-010 every bar gets a valid finite pixel height (none collapse to an invalid NaNpx length)',
+        heights.every(h => /^\\d+(\\.\\d+)?px$/.test(h)), heights.join(','));
+    `,
+  },
 ];

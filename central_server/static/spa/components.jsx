@@ -925,17 +925,26 @@ const Sparkline = React.memo(({ data, width = 240, height = 28 }) => {
       </div>
     );
   }
-  const max = Math.max(...data, 1);
-  const avg = data.reduce((a,b)=>a+b,0) / data.length;
-  const cur = data[data.length-1];
+  // COMP-010: a non-numeric bucket (null/undefined/NaN/a stray string from a
+  // malformed rate payload) fed straight into Math.max(...data) and `v / max`
+  // — Math.max is poisoned by a single NaN-coercible argument, so ONE bad
+  // bucket turned `max` (and therefore every bar's height) into NaN. The
+  // resulting "NaNpx" inline style is an invalid CSS length that the browser
+  // silently refuses to apply, so the whole sparkline rendered as collapsed,
+  // heightless bars instead of a labelled placeholder for just the bad
+  // bucket. Sanitize once up front; a bad bucket now reads as a real 0.
+  const nums = data.map(v => (typeof v === 'number' && Number.isFinite(v)) ? v : 0);
+  const max = Math.max(...nums, 1);
+  const avg = nums.reduce((a,b)=>a+b,0) / nums.length;
+  const cur = nums[nums.length-1];
   const surge = avg > 0 && cur > avg * 2;
   return (
     <div className="flex items-end gap-px h-7" style={{ width, height }}>
-      {data.map((v, i) => {
+      {nums.map((v, i) => {
         const h = Math.max(2, (v / max) * (height - 2));
-        const isLast = i === data.length - 1;
+        const isLast = i === nums.length - 1;
         return (
-          <div key={i} className={`flex-1 ${surge && i >= data.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} 則警報`}/>
+          <div key={i} className={`flex-1 ${surge && i >= nums.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} 則警報`}/>
         );
       })}
     </div>
