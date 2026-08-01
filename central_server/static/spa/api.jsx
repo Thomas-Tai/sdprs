@@ -739,7 +739,11 @@
       // 401: session expired (soft-401 flag already set by apiFetch)
       // Keep prior state so audit rows don't disappear mid-shift
       if (msg === 'unauthorized' || status === 401) {
-        return window.AUDIT;
+        const prior = window.AUDIT || [];
+        if (prior.forbidden == null) prior.forbidden = false;
+        if (prior.truncated == null) prior.truncated = false;
+        if (prior.totalAvailable == null) prior.totalAvailable = prior.length;
+        return prior;
       }
 
       // 403: non-admin operator — expected, silence without banner

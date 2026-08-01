@@ -174,6 +174,30 @@ module.exports = [
       A('DATA-025 the rejection is not the raw SyntaxError', !!err && err.name !== 'SyntaxError', err && err.name);
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-021 ----
+  {
+    name: 'DATA-021                    api.jsx (loadAudit 401 keeps metadata)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ${RES_HELPER}
+      // On a 401 the audit loader returns the prior window.AUDIT. On a fresh
+      // mount that is a bare [] — it must still carry the forbidden/truncated/
+      // totalAvailable contract the page renders against.
+      window.AUDIT = [];
+      window.fetch = (path) => {
+        if (String(path).indexOf('/api/audit') === 0) return _res(null, { status: 401 });
+        return _res([]);
+      };
+      const rl = await window.SDPRS_API.refreshLive();
+      const audit = rl.audit;
+      A('DATA-021 401 fallback returns an array', Array.isArray(audit));
+      A('DATA-021 401 fallback carries forbidden=false', !!audit && audit.forbidden === false, audit && String(audit.forbidden));
+      A('DATA-021 401 fallback carries truncated flag', !!audit && typeof audit.truncated === 'boolean', audit && String(audit.truncated));
+      A('DATA-021 401 fallback carries totalAvailable', !!audit && typeof audit.totalAvailable === 'number', audit && String(audit.totalAvailable));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
