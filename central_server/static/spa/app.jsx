@@ -1022,9 +1022,19 @@ function App({ initialError = null }) {
     }
   }, [showToast, alerts, refresh]);
 
+  // SHELL-008: this used to fire markSeen (a POST to the backend) on EVERY
+  // selectedId change unconditionally — arrow-key browsing back over alerts
+  // already viewed earlier this session re-sent the same "seen" write every
+  // single time. Skip when the currently-selected alert is already marked
+  // seen client-side; `alerts` has to be a dep to read that flag fresh, but
+  // the early-return below makes every no-op re-run (e.g. the 20s refresh
+  // replacing `alerts` with a new array reference) cheap.
   useEffectA(() => {
-    if (selectedId) markSeen(selectedId);
-  }, [selectedId, markSeen]);
+    if (!selectedId) return;
+    const sel = alerts.find(a => a.id === selectedId);
+    if (sel && sel.seen) return;
+    markSeen(selectedId);
+  }, [selectedId, alerts, markSeen]);
 
   // Landing on the Alerts page counts as "operator saw the new-alert banner";
   // clear the counter so the pill doesn't linger forever after they navigated in.
