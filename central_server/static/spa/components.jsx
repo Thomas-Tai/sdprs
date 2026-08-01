@@ -1986,10 +1986,19 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
       setLocationError('位置為必填');
       return;
     }
+    // COMP-007: `onUpdateNode?.(...)` evaluates to `undefined` (no call, no
+    // throw) when the prop is missing — `await undefined` resolves
+    // immediately, so saveEdits fell straight into the success path and
+    // closed the editor as if the location had actually been persisted.
+    // Never claim success for a save that never happened.
+    if (typeof onUpdateNode !== 'function') {
+      setLocationError('儲存功能尚未就緒');
+      return;
+    }
     setLocationError(null);
     setSaving(true);
     try {
-      await onUpdateNode?.(node.id, { location: newLocation });
+      await onUpdateNode(node.id, { location: newLocation });
       setEditing(false);
     } catch (e) {
       setLocationError('儲存失敗，請重試');

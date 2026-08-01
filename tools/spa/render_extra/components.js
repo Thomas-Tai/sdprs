@@ -272,4 +272,41 @@ module.exports = [
         !!select && select.getAttribute('aria-label') === '密度', select && select.getAttribute('aria-label'));
     `,
   },
+  {
+    name: 'COMP-007 NodeSidePanel does not fake a successful save when onUpdateNode is missing',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      const node = {
+        id: 'PUMP-01', name: '測試泵浦', location: '3F · 西側', status: 'online',
+        type: 'pump', heartbeat: 5, upload: 5, level: 40, cycles: 0,
+      };
+      // onUpdateNode deliberately OMITTED — the exact contract gap COMP-007
+      // describes: the caller forgot to wire it (or it hasn't loaded yet).
+      ReactDOM.flushSync(() => root.render(React.createElement(window.NodeSidePanel, {
+        node, history: [], onClose: () => {}, onJumpAlert: () => {}, onNavigate: () => {},
+        onSelectAlert: () => {}, openAlerts: [],
+      })));
+      await settle();
+      const editBtn = byText('button', '編輯');
+      A('COMP-007 setup: 編輯 button renders', !!editBtn);
+      click(editBtn);
+      await settle();
+
+      const input = container.querySelector('#node-location-input');
+      A('COMP-007 setup: location editor opens', !!input);
+      setInput(input, '4F · 東側');
+      await settle();
+
+      const saveBtn = byText('button', '儲存');
+      A('COMP-007 setup: 儲存 button renders', !!saveBtn);
+      click(saveBtn);
+      await settle(12);
+
+      A('COMP-007 missing onUpdateNode does NOT silently exit edit mode (fake success)',
+        !!container.querySelector('#node-location-input'), container.textContent);
+      A('COMP-007 missing onUpdateNode surfaces an honest error instead of pretending success',
+        container.textContent.indexOf('尚未就緒') !== -1, container.textContent);
+    `,
+  },
 ];
