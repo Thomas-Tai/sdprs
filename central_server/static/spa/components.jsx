@@ -958,7 +958,21 @@ const Sparkline = React.memo(({ data, width = 240, height = 28 }) => {
       })}
     </div>
   );
-}, (prev, next) => prev.data === next.data && prev.width === next.width && prev.height === next.height);
+}, (prev, next) => {
+  // COMP-014: comparing `data` by reference made this React.memo ineffective
+  // — every ~20s poll (and every WS event) hands Footer a FRESH array
+  // computed from the current alert list, so `prev.data === next.data` was
+  // false on every single render and the memo never once bailed out (pure
+  // overhead, zero benefit). Two arrays with the same bucket VALUES are the
+  // same sparkline; compare contents so an unchanged rate actually skips
+  // the re-render.
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  const a = prev.data, b = next.data;
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+});
 
 const Footer = React.memo(({ data, handover }) => {
   const arr = Array.isArray(data) && data.length ? data : [0];

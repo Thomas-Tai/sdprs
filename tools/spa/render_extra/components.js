@@ -439,4 +439,47 @@ module.exports = [
         trigger && ('aria-haspopup=' + trigger.getAttribute('aria-haspopup') + ' aria-pressed=' + trigger.getAttribute('aria-pressed')));
     `,
   },
+  {
+    name: 'COMP-014 Sparkline memo compares data by content, not just reference',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // React.memo(Component, compare) stores the comparator on the returned
+      // object's own .compare property (plain object, not a hidden internal) —
+      // reachable here without mounting anything, which lets this test prove
+      // the COMPARATOR's behavior directly rather than inferring it indirectly
+      // from render-count side effects.
+      const compare = window.Sparkline && window.Sparkline.compare;
+      A('COMP-014 setup: Sparkline is a React.memo with a custom comparator', typeof compare === 'function');
+
+      // Every ~20s poll (and every WS event) hands this component a FRESH
+      // array computed fresh from the current alert list — reference equality
+      // is therefore false on every single render even when the 16 bucket
+      // VALUES have not changed, so the memo never once bailed out.
+      const same = compare(
+        { data: [1, 2, 3], width: 240, height: 28 },
+        { data: [1, 2, 3], width: 240, height: 28 },
+      );
+      A('COMP-014 two different array REFERENCES with identical VALUES are treated as equal (memo actually bails)',
+        same === true, same);
+
+      const diffValue = compare(
+        { data: [1, 2, 3], width: 240, height: 28 },
+        { data: [1, 2, 9], width: 240, height: 28 },
+      );
+      A('COMP-014 an actual bucket-value change is still detected as unequal', diffValue === false, diffValue);
+
+      const diffLength = compare(
+        { data: [1, 2, 3], width: 240, height: 28 },
+        { data: [1, 2, 3, 4], width: 240, height: 28 },
+      );
+      A('COMP-014 a length change is still detected as unequal', diffLength === false, diffLength);
+
+      const diffHeight = compare(
+        { data: [1, 2, 3], width: 240, height: 28 },
+        { data: [1, 2, 3], width: 240, height: 40 },
+      );
+      A('COMP-014 a changed height prop is still detected as unequal (regression guard)', diffHeight === false, diffHeight);
+    `,
+  },
 ];
