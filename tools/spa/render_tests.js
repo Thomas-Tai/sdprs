@@ -1503,8 +1503,80 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------- WAL-M9: ticker honest count + severity ordering ----------
+// The wall ticker counted acknowledged alerts in the header and sliced
+// newest-12 with no severity sort, so a burst could bury an unacked critical.
+const TEST_WALL_TICKER = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    var aac = window.activeAlertCount;
+    var owa = window.orderWallAlerts;
+    A('WAL-M9 activeAlertCount is exported', typeof aac === 'function');
+    A('WAL-M9 orderWallAlerts is exported', typeof owa === 'function');
+
+    // --- activeAlertCount excludes acknowledged ---
+    var mixed = [
+      { id: 1, state: 'pending', sev: 'critical', ageSec: 10 },
+      { id: 2, state: 'acknowledged', sev: 'warn', ageSec: 20 },
+      { id: 3, state: 'pending', sev: 'info', ageSec: 30 },
+    ];
+    A('WAL-M9 activeAlertCount excludes acknowledged', aac(mixed) === 2, aac(mixed));
+    A('WAL-M9 activeAlertCount of empty is 0', aac([]) === 0);
+
+    // --- orderWallAlerts: unacked critical floats above newer acked rows ---
+    // 13 alerts: 12 newer acknowledged + 1 oldest unacked critical.
+    var alerts = [];
+    for (var i = 0; i < 12; i++) {
+      alerts.push({ id: 'ack' + i, state: 'acknowledged', sev: 'warn', ageSec: 100 - i });
+    }
+    alerts.push({ id: 'crit-old', state: 'pending', sev: 'critical', ageSec: 999 });
+    var ordered = owa(alerts);
+    var top12 = ordered.slice(0, 12);
+    A('WAL-M9 unacked critical survives the 12-row slice', top12.some(function(a) { return a.id === 'crit-old'; }));
+    A('WAL-M9 unacked critical is first (highest priority)', top12[0].id === 'crit-old', top12[0].id);
+
+    // --- ordering: pending before acknowledged ---
+    var two = [
+      { id: 'a1', state: 'acknowledged', sev: 'critical', ageSec: 5 },
+      { id: 'a2', state: 'pending', sev: 'info', ageSec: 50 },
+    ];
+    var o2 = owa(two);
+    A('WAL-M9 pending sorts before acknowledged regardless of severity', o2[0].id === 'a2', o2[0].id);
+
+    // --- ordering: within same state, critical > warn > info ---
+    var sevs = [
+      { id: 's1', state: 'pending', sev: 'info', ageSec: 1 },
+      { id: 's2', state: 'pending', sev: 'critical', ageSec: 2 },
+      { id: 's3', state: 'pending', sev: 'warn', ageSec: 3 },
+    ];
+    var o3 = owa(sevs);
+    A('WAL-M9 within pending: critical first', o3[0].id === 's2', o3[0].id);
+    A('WAL-M9 within pending: warn second', o3[1].id === 's3', o3[1].id);
+    A('WAL-M9 within pending: info last', o3[2].id === 's1', o3[2].id);
+
+    // --- ordering: within same state+severity, recency (lower ageSec first) ---
+    var recency = [
+      { id: 'r1', state: 'pending', sev: 'warn', ageSec: 200 },
+      { id: 'r2', state: 'pending', sev: 'warn', ageSec: 50 },
+    ];
+    var o4 = owa(recency);
+    A('WAL-M9 same state+sev: newer (lower ageSec) first', o4[0].id === 'r2', o4[0].id);
+
+    // --- does not mutate the input ---
+    var orig = [{ id: 'x', state: 'pending', sev: 'info', ageSec: 1 }];
+    owa(orig);
+    A('WAL-M9 orderWallAlerts does not mutate input', orig.length === 1 && orig[0].id === 'x');
+  } catch (e) {
+    results.push({ name: 'WAL-M9 ticker suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'WAL-H5/M8/M10 wall helpers  data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_WALL_DATA_HELPERS },
+  { name: 'WAL-M9 ticker ordering        data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_WALL_TICKER },
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
   { name: 'OPS-003 hls fallback          components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_OPS_HLS_FALLBACK },
   { name: 'OPS-002 stream health bitrate  status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_STREAM_HEALTH },

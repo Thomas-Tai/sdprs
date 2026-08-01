@@ -1875,10 +1875,10 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
         <div className="bg-surface-panel border border-border-subtle rounded flex flex-col min-h-0">
           <div className="px-4 py-2.5 border-b border-border-subtle flex items-center justify-between flex-shrink-0">
             <h2 className="text-base font-bold uppercase tracking-wider">即時警報</h2>
-            <span className="text-xs font-mono text-ink-muted tnum">{alerts.length} 筆</span>
+            <span className="text-xs font-mono text-ink-muted tnum">{window.activeAlertCount(alerts)} 筆</span>
           </div>
           <div className="flex-1 overflow-y-auto scroll-thin">
-            {alerts.slice(0, 12).map(a => {
+            {window.orderWallAlerts(alerts).slice(0, 12).map(a => {
               const m = window.safeSevMeta(a.sev);
               return (
                 <div key={a.id} className={`px-3 py-2 border-b border-border-subtle ${m.bar} ${a.state === 'pending' && a.sev === 'critical' ? 'bg-sev-critical/5' : ''}`}>

@@ -261,6 +261,28 @@ function effectiveTheme(theme, wallMode) {
   return wallMode ? 'dark' : theme;
 }
 
+// WAL-M9: count only unacked (pending) alerts for the wall ticker header.
+function activeAlertCount(alerts) {
+  return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
+}
+
+// WAL-M9: sort wall alerts so unacked + higher severity float up before the
+// 12-row slice. Primary: state (pending before acknowledged). Secondary:
+// severity (critical > warn > info). Tertiary: recency (lower ageSec first).
+// Returns a NEW array; does not mutate the input.
+function orderWallAlerts(alerts) {
+  var sevRank = { critical: 0, warn: 1, info: 2 };
+  return (alerts || []).slice().sort(function (a, b) {
+    var sa = a.state === 'acknowledged' ? 1 : 0;
+    var sb = b.state === 'acknowledged' ? 1 : 0;
+    if (sa !== sb) return sa - sb;
+    var ra = sevRank[a.sev] != null ? sevRank[a.sev] : 99;
+    var rb = sevRank[b.sev] != null ? sevRank[b.sev] : 99;
+    if (ra !== rb) return ra - rb;
+    return (a.ageSec || 0) - (b.ageSec || 0);
+  });
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
   fmtAge, ageColor, sevMeta, alertTypeMap,
@@ -276,3 +298,5 @@ window.probeSessionOnce = probeSessionOnce;
 window.liveClockLabel = liveClockLabel;
 window.wallTileFrozen = wallTileFrozen;
 window.effectiveTheme = effectiveTheme;
+window.activeAlertCount = activeAlertCount;
+window.orderWallAlerts = orderWallAlerts;
