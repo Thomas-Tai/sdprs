@@ -989,6 +989,7 @@ const SHORTCUTS = [
 const ShortcutsModal = ({ open, onClose }) => {
   const [q, setQ] = useState('');
   const dialogRef = useRef(null);
+  const inputRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
   // CMP-F1: hold onClose in a ref so the lifecycle effect below can depend on
@@ -1005,7 +1006,20 @@ const ShortcutsModal = ({ open, onClose }) => {
 
   React.useEffect(() => {
     if (!open) return;
+    // COMP-002: the search input used to carry a native `autoFocus` attribute.
+    // React applies `autoFocus` during the commit/mutation phase, which runs
+    // BEFORE this passive effect — so by the time `document.activeElement` was
+    // read here, it was already the about-to-unmount input, not the element
+    // that had focus before the modal opened. Restoring focus to that captured
+    // (now-detached) input on close is a silent no-op, so focus fell through
+    // to <body> and the operator's next keystrokes hit the global single-key
+    // hotkeys (A = ack!). Capture the REAL previous element first, then focus
+    // the input ourselves via ref — same pattern MuteDrawer/NodeSidePanel
+    // already use for their heading focus.
     lastFocusedRef.current = document.activeElement;
+    if (inputRef.current) {
+      try { inputRef.current.focus(); } catch (_) {}
+    }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
@@ -1049,7 +1063,7 @@ const ShortcutsModal = ({ open, onClose }) => {
           <div className="relative">
             <Icon.Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted"/>
             <input
-              autoFocus
+              ref={inputRef}
               value={q} onChange={e => setQ(e.target.value)}
               placeholder="搜尋捷徑或動作..."
               aria-label="搜尋快捷鍵"
@@ -1681,6 +1695,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
   const paletteRef = useRef(null);
+  const inputRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
   // CMP-F1: stable close handle so the lifecycle effect can depend on `open`.
@@ -1696,7 +1711,18 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   // overlay (F4 / useOverlayTop above).
   React.useEffect(() => {
     if (!open) return;
+    // COMP-002: was relying on the search input's native `autoFocus` attribute
+    // plus reading `document.activeElement` here to remember "what to restore
+    // focus to". React applies `autoFocus` during commit, before this effect
+    // runs, so the captured element was always the palette's OWN (soon to
+    // unmount) input — restoring focus to a detached node on close is a
+    // silent no-op, dropping focus to <body> and sending the operator's next
+    // keystrokes to the global hotkeys. Capture the real trigger first, then
+    // move focus into the palette ourselves.
     lastFocusedRef.current = document.activeElement;
+    if (inputRef.current) {
+      try { inputRef.current.focus(); } catch (_) {}
+    }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
@@ -1788,7 +1814,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
               the listbox actually has results, or a screen reader announces an
               expanded popup over the empty 「找不到符合的項目」 state. */}
           <input
-            autoFocus
+            ref={inputRef}
             value={q}
             onChange={e => { setQ(e.target.value); setHi(0); }}
             onKeyDown={onKey}
