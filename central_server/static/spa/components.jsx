@@ -2395,6 +2395,18 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
   const videoRef = React.useRef(null);
   const hlsRef = React.useRef(null);
   const retryCount = React.useRef(0);
+  // COMP-030: `onFallback` was read from the closure but NOT listed in the
+  // effect's deps ([nodeId] only) — deliberately, since app.jsx recreates
+  // this callback on every render and adding it would tear down/recreate
+  // the whole hls.js session (a fresh mount, a fresh manifest fetch) on
+  // every parent re-render, not just a real node change. But leaving it out
+  // entirely meant the ERROR handler's closure stayed frozen on whatever
+  // onFallback was current AT MOUNT TIME — a stale reference, the same
+  // class of bug useLatestRef (above) exists to close for the overlay
+  // components. Holding it in that same ref keeps the effect keyed on
+  // nodeId alone while every call site below always invokes the CURRENT
+  // onFallback.
+  const onFallbackRef = useLatestRef(onFallback);
 
   React.useEffect(() => {
     const video = videoRef.current;
@@ -2422,7 +2434,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       // show a black frame under a false ● LIVE.
       if (hasNative) {
         video.src = src;
-        const onErr = () => { if (onFallback) onFallback(); };
+        const onErr = () => { if (onFallbackRef.current) onFallbackRef.current(); };
         video.addEventListener('error', onErr);
         video.play().catch(() => {});
         return () => {
@@ -2431,7 +2443,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
           video.load();
         };
       }
-      if (onFallback) onFallback();
+      if (onFallbackRef.current) onFallbackRef.current();
       return;
     }
 
@@ -2456,7 +2468,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
         if (retryCount.current >= 3) {
           hls.destroy();
           hlsRef.current = null;
-          if (onFallback) onFallback();
+          if (onFallbackRef.current) onFallbackRef.current();
         } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           // COMP-005: recoverMediaError() only repairs the MSE/media buffer;
           // it does nothing for a failed network fetch (the manifest 404ing

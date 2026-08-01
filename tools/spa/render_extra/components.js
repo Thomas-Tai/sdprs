@@ -855,4 +855,69 @@ module.exports = [
       window.postMessage = origPostMessage;
     `,
   },
+  {
+    name: 'COMP-030 HlsPlayer fallback invokes the LATEST onFallback, not a stale mount-time closure',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      const instances = [];
+      function FakeHls(opts) {
+        this.opts = opts;
+        this.handlers = {};
+        this.destroyed = false;
+        instances.push(this);
+      }
+      FakeHls.isSupported = () => true;
+      FakeHls.Events = { MANIFEST_PARSED: 'hlsManifestParsed', ERROR: 'hlsError' };
+      FakeHls.ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError', OTHER_ERROR: 'otherError' };
+      FakeHls.prototype.loadSource = function (src) { this.src = src; };
+      FakeHls.prototype.attachMedia = function (video) { this.video = video; };
+      FakeHls.prototype.on = function (evt, cb) { this.handlers[evt] = cb; };
+      FakeHls.prototype.trigger = function (evt, data) { if (this.handlers[evt]) this.handlers[evt](evt, data); };
+      FakeHls.prototype.startLoad = function () {};
+      FakeHls.prototype.recoverMediaError = function () {};
+      FakeHls.prototype.destroy = function () { this.destroyed = true; };
+      window.Hls = FakeHls;
+
+      const proto = window.HTMLMediaElement.prototype;
+      const origPlay = proto.play;
+      proto.play = () => Promise.resolve();
+
+      const fellBackCalls = [];
+      const render = (onFallbackFn) => ReactDOM.flushSync(() => root.render(
+        React.createElement(window.HlsPlayer, { nodeId: 'node-a', onFallback: onFallbackFn })
+      ));
+
+      const onFallback1 = () => fellBackCalls.push('v1 (stale mount-time closure)');
+      render(onFallback1);
+      await settle();
+      A('COMP-030 setup: mounting creates one Hls instance', instances.length === 1, instances.length);
+
+      // Parent re-renders with the SAME nodeId but a brand-new onFallback
+      // function reference — exactly what happens every time app.jsx
+      // re-renders and hands this component a fresh inline callback. The
+      // effect's deps are [nodeId] only, so this must NOT tear down/recreate
+      // the streaming session (that would be its own bug, COMP-004's
+      // territory) — proven via instances.length staying at 1.
+      const onFallback2 = () => fellBackCalls.push('v2 (latest)');
+      render(onFallback2);
+      await settle();
+      A('COMP-030 setup: a same-nodeId re-render does not recreate the Hls session', instances.length === 1, instances.length);
+
+      // Hit the fallback threshold (3 fatal errors) on the ORIGINAL (only)
+      // Hls instance — its ERROR handler closure was captured back at mount
+      // time, when onFallback was still onFallback1.
+      const inst = instances[0];
+      inst.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      inst.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      inst.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      await settle();
+      A('COMP-030 the fallback fires exactly once', fellBackCalls.length === 1, JSON.stringify(fellBackCalls));
+      A('COMP-030 the fallback invokes the LATEST onFallback (v2), not the stale mount-time one (v1)',
+        fellBackCalls[0] === 'v2 (latest)', JSON.stringify(fellBackCalls));
+
+      proto.play = origPlay;
+      delete window.Hls;
+    `,
+  },
 ];
