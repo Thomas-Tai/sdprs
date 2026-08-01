@@ -1021,9 +1021,13 @@ async def snooze_node(
     from ..database import set_node_snooze
     from ..services.mqtt_service import get_mqtt_service
 
+    # DATA-009: snooze is an operator action on an EXISTING node. A typo'd or
+    # stale node_id used to silently upsert a phantom "glass"/"OFFLINE" node
+    # into the fleet — a node of a wrong, arbitrary type no device announced.
+    # Match the sibling write endpoints (PATCH /api/nodes/{id}, POST
+    # /api/nodes/{id}/pump), which 404 on an unknown node.
     if db_get_node(node_id) is None:
-        from ..database import upsert_node as _upsert
-        _upsert(node_id, "glass", "OFFLINE", None)
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
 
     until = (utcnow() + _td(minutes=body.minutes)).isoformat()
     ok = set_node_snooze(node_id, until, body.reason)

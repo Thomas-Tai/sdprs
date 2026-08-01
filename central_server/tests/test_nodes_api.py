@@ -388,6 +388,50 @@ def test_snooze_node(client, monkeypatch):
     assert captured["args"][2] == "typhoon"
 
 
+def test_snooze_unknown_node_returns_404_not_phantom(client, monkeypatch):
+    """DATA-009: POST /api/nodes/{id}/snooze on a node that does NOT exist must
+    return 404 — it must NOT silently auto-create a phantom node.
+
+    The old code did `if db_get_node(node_id) is None: upsert_node(node_id,
+    "glass", "OFFLINE", None)`, so a typo'd node_id (or a stale SPA card) would
+    conjure a fake glass/OFFLINE node into the fleet list — polluting /api/nodes
+    with a node of a wrong, arbitrary type that no device ever announced. The
+    sibling write endpoints (PATCH /api/nodes/{id}, POST /api/nodes/{id}/pump)
+    already 404 on an unknown node; snooze must match. Pins: unknown id -> 404,
+    and upsert_node / set_node_snooze are NEVER called.
+    """
+    import central_server.database as database
+    import central_server.services.mqtt_service as mqtt_service_module
+    import central_server.services.audit_service as audit_service_module
+
+    upsert_calls = []
+    snooze_calls = []
+
+    monkeypatch.setattr(
+        database, "upsert_node",
+        lambda *a, **kw: upsert_calls.append((a, kw)),
+    )
+    monkeypatch.setattr(
+        database, "set_node_snooze",
+        lambda *a, **kw: (snooze_calls.append((a, kw)) or True),
+    )
+    monkeypatch.setattr(mqtt_service_module, "get_mqtt_service", lambda: None)
+    monkeypatch.setattr(audit_service_module, "log_action", lambda *a, **kw: None)
+
+    # db_get_node (patched by the `client` fixture) returns None for this id.
+    response = client.post(
+        "/api/nodes/typo_xyz/snooze",
+        json={"minutes": 30, "reason": "typhoon"},
+    )
+
+    assert response.status_code == 404
+    assert "typo_xyz" in response.json()["detail"]
+    # The phantom-create path must be gone entirely, and no snooze write should
+    # happen for a node that doesn't exist.
+    assert upsert_calls == [], f"upsert_node must not be called: {upsert_calls}"
+    assert snooze_calls == [], f"set_node_snooze must not be called: {snooze_calls}"
+
+
 # =============================================================================
 # Unsnooze endpoint coverage (DELETE /api/nodes/{id}/snooze)
 #
