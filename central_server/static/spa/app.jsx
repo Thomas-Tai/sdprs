@@ -743,6 +743,28 @@ function App({ initialError = null }) {
     return () => clearInterval(id);
   }, [sessionExpired]);
 
+  // AUTH-003: once the blocking expiry modal is up, poll for a restored session.
+  // Multiple tabs share one cookie, so when the operator re-authenticates in ANY
+  // tab the others' cookies become live again — without this probe each tab would
+  // still force its own separate re-login. probeSessionOnce resolves true only on
+  // a live (non-expired) session, so a success means we were logged back in
+  // elsewhere: dismiss the modal, tell the operator, and re-sync the stale data.
+  useEffectA(() => {
+    if (!sessionExpired) return;
+    const api = window.SDPRS_API;
+    if (!(api && typeof api.extendSession === 'function')) return;
+    const PROBE_EVERY_MS = 5000;
+    const id = setInterval(async () => {
+      const restored = await window.probeSessionOnce(() => api.extendSession());
+      if (!restored) return;   // still expired — keep the modal up, keep probing
+      clearInterval(id);
+      setSessionExpired(false);
+      showToast('連線階段已恢復', 'ok');
+      refresh();
+    }, PROBE_EVERY_MS);
+    return () => clearInterval(id);
+  }, [sessionExpired, showToast, refresh]);
+
   // Offline / online detection — toast the operator when connectivity changes
   // and trigger a refresh when the connection comes back so stale data is
   // replaced immediately.

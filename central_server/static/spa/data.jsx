@@ -224,6 +224,22 @@ function nextToasts(list, toast, max = 4) {
   return next;
 }
 
+// AUTH-003: while the blocking session-expiry modal is up, each open tab polls
+// this once per interval. Tabs share one cookie, so when the operator
+// re-authenticates in ANY tab the shared cookie goes live again and
+// extendSession() (which requires a non-expired session) starts resolving —
+// this reports true so the other tabs can self-dismiss their modals instead of
+// forcing a separate re-login in each. Any rejection or throw means still
+// expired, so the modal stays up and the tab keeps probing.
+async function probeSessionOnce(extendSession) {
+  try {
+    await extendSession();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
   fmtAge, ageColor, sevMeta, alertTypeMap,
@@ -235,3 +251,4 @@ window.nodeStatusTone = nodeStatusTone;
 window.Z_LAYER = Z_LAYER;
 window.formatDurationShort = formatDurationShort;
 window.nextToasts = nextToasts;
+window.probeSessionOnce = probeSessionOnce;

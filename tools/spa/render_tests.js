@@ -1291,9 +1291,31 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------- AUTH-003: session-restore probe (pure) ----
+// The blocking expiry modal forced a separate re-login in every open tab even
+// after the operator re-authenticated in one — tabs share a cookie, so the
+// others' sessions were already live again. probeSessionOnce() reports whether
+// extendSession() succeeds (session live) so a tab can self-dismiss its modal.
+const TEST_AUTH_SESSION_PROBE = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const probe = window.probeSessionOnce;
+    A('AUTH-003 probeSessionOnce helper exists', typeof probe === 'function');
+    A('AUTH-003 a live session (extend resolves) reports restored', (await probe(() => Promise.resolve({ ok: true }))) === true);
+    A('AUTH-003 an expired session (extend rejects) reports not-restored', (await probe(() => Promise.reject(new Error('401')))) === false);
+    A('AUTH-003 a throwing extend is treated as not-restored', (await probe(() => { throw new Error('boom'); })) === false);
+  } catch (e) {
+    results.push({ name: 'AUTH-003 session-probe suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
   { name: 'FLOW-001 toast queue policy   data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_FLOW_TOAST_QUEUE },
+  { name: 'AUTH-003 session restore probe data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_AUTH_SESSION_PROBE },
   { name: 'FLOW-001 toast stack render   components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_FLOW_TOAST_STACK },
   { name: 'AUTH-001 logout POST         components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_AUTH_LOGOUT },
   { name: 'OPS-001 key backdrop guard   status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_KEY_BACKDROP },
