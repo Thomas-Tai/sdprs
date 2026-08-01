@@ -304,6 +304,21 @@ function sanitizePage(p) {
   return VALID_PAGES.indexOf(p) !== -1 ? p : 'alerts';
 }
 
+// SHELL-004: app.jsx's boot effect surfaces a partial-load warning banner +
+// toast whenever loadInitial() reports SOME (but not all) loaders rejected
+// via window.__SDPRS_LOAD_FAILURES. The bootstrap-error retry path re-runs
+// loadInitial() but never re-checked that flag — a retry that recovered
+// most-but-not-all loaders rendered as a full, silent success. Both call
+// sites now funnel through this one pure decision so they can't drift again;
+// `labels` is app.jsx's _FAILURE_LABELS map, passed in rather than duplicated
+// here (data.jsx has no reason to know the zh-TW copy for each loader key).
+function describeLoadFailures(failures, labels) {
+  if (!Array.isArray(failures) || failures.length === 0) return null;
+  const labelMap = labels || {};
+  const names = failures.map(k => labelMap[k] || k).join('、');
+  return { warnings: failures.slice(), toastMessage: '部分資料載入失敗: ' + names };
+}
+
 // WAL-M9: count only unacked (pending) alerts for the wall ticker header.
 function activeAlertCount(alerts) {
   return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
@@ -346,3 +361,4 @@ window.activeAlertCount = activeAlertCount;
 window.orderWallAlerts = orderWallAlerts;
 window.VALID_PAGES = VALID_PAGES;
 window.sanitizePage = sanitizePage;
+window.describeLoadFailures = describeLoadFailures;

@@ -1076,12 +1076,13 @@ function App({ initialError = null }) {
           setShiftBannerOpen(true);
         }
         // Partial-failure surface — loadInitial records which loaders rejected
-        // on window.__SDPRS_LOAD_FAILURES.
-        const failures = window.__SDPRS_LOAD_FAILURES;
-        if (failures && failures.length > 0) {
-          setDataWarnings(failures);
-          const labels = failures.map(k => _FAILURE_LABELS[k] || k).join('、');
-          showToast('部分資料載入失敗: ' + labels, 'warn');
+        // on window.__SDPRS_LOAD_FAILURES. SHELL-004: shared with the
+        // bootstrap-error retry path below via describeLoadFailures so the
+        // two can't drift out of sync again.
+        const loadDesc = window.describeLoadFailures(window.__SDPRS_LOAD_FAILURES, _FAILURE_LABELS);
+        if (loadDesc) {
+          setDataWarnings(loadDesc.warnings);
+          showToast(loadDesc.toastMessage, 'warn');
         }
       } catch (e) {
         // Total failure — show the in-app retry UI rather than a bare shell
@@ -1523,6 +1524,17 @@ function App({ initialError = null }) {
         setNodes(window.NODES ?? []);
         setNodeHistory(window.NODE_HISTORY ?? {});
         setSelectedId(window.ALERTS?.[0]?.id ?? null);
+        // SHELL-004: this used to stop here — a retry that recovered
+        // most-but-not-all loaders cleared bootstrapError and rendered the
+        // full app with no indication anything was still missing, which reads
+        // as a complete recovery when it may not be one. Mirror the boot
+        // effect's own partial-failure surface (same describeLoadFailures
+        // helper) so a partial retry still shows the warning banner + toast.
+        const loadDesc = window.describeLoadFailures(window.__SDPRS_LOAD_FAILURES, _FAILURE_LABELS);
+        if (loadDesc) {
+          setDataWarnings(loadDesc.warnings);
+          showToast(loadDesc.toastMessage, 'warn');
+        }
       } catch (e) {
         console.error('[SDPRS] retry loadInitial failed:', e);
         setBootstrapError(e || err);

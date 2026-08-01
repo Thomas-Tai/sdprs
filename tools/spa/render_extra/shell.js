@@ -38,4 +38,31 @@ module.exports = [
       A('SHELL-001 sanitizePage falls back to alerts for an empty string', window.sanitizePage('') === 'alerts', String(window.sanitizePage('')));
     `,
   },
+
+  // ------------------------------------- SHELL-004: partial-load warnings --
+  // app.jsx's boot effect surfaces a warning banner + toast when loadInitial()
+  // reports partial failures via window.__SDPRS_LOAD_FAILURES. The bootstrap-
+  // error retry path re-runs loadInitial() but never read that global back —
+  // a retry that recovered most-but-not-all loaders looked like a full
+  // success, silently. describeLoadFailures is the pure decision shared by
+  // both call sites (extracted so it's testable without mounting app.jsx).
+  {
+    name: 'SHELL-004                   data.jsx (describeLoadFailures)',
+    target: 'data.jsx',
+    deps: ['icons.jsx'],
+    body: `
+      A('SHELL-004 window.describeLoadFailures is published as a function', typeof window.describeLoadFailures === 'function', typeof window.describeLoadFailures);
+      A('SHELL-004 no failures (undefined) => null (nothing to show)', window.describeLoadFailures(undefined, {}) === null);
+      A('SHELL-004 no failures (empty array) => null (nothing to show)', window.describeLoadFailures([], {}) === null);
+      A('SHELL-004 not-an-array (defensive) => null', window.describeLoadFailures('nodes', {}) === null);
+
+      const labels = { nodes: '節點資料', weather: '天氣資訊' };
+      const desc = window.describeLoadFailures(['nodes', 'weather'], labels);
+      A('SHELL-004 partial failures => a result object, not null', !!desc, JSON.stringify(desc));
+      A('SHELL-004 result carries the raw failure keys as warnings', Array.isArray(desc.warnings) && desc.warnings.length === 2 && desc.warnings.indexOf('nodes') !== -1 && desc.warnings.indexOf('weather') !== -1, JSON.stringify(desc && desc.warnings));
+      A('SHELL-004 toastMessage names the failed feeds by their zh-TW label', desc.toastMessage.indexOf('節點資料') !== -1 && desc.toastMessage.indexOf('天氣資訊') !== -1, desc.toastMessage);
+      A('SHELL-004 toastMessage falls back to the raw key for an unlabeled loader', window.describeLoadFailures(['mystery_loader'], labels).toastMessage.indexOf('mystery_loader') !== -1, window.describeLoadFailures(['mystery_loader'], labels).toastMessage);
+      A('SHELL-004 missing labels map (undefined) still returns a usable message, not a throw', window.describeLoadFailures(['nodes'], undefined).toastMessage.indexOf('nodes') !== -1, window.describeLoadFailures(['nodes'], undefined).toastMessage);
+    `,
+  },
 ];
