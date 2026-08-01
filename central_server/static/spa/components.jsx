@@ -444,10 +444,22 @@ const trapTab = (e, container) => {
   if (focusable.length === 0) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
-  if (e.shiftKey && document.activeElement === first) {
+  const active = document.activeElement;
+  // CMP-003: MuteDrawer / NodeSidePanel deliberately focus their own heading
+  // (tabIndex={-1}) on open, for screen-reader announcement — but tabindex=-1
+  // elements are intentionally excluded from FOCUSABLE_SELECTOR (they are not
+  // real tab stops), so the heading is never `first`. A Shift+Tab pressed
+  // before the operator has tabbed anywhere else therefore fell through to
+  // the browser default, which walks to the nearest focusable element BEFORE
+  // the heading in the DOM — i.e. straight out of the modal. Treat "focus is
+  // inside the trap but not part of its focusable set" the same as sitting at
+  // the start boundary.
+  const atStart = active === first ||
+    (container.contains(active) && Array.prototype.indexOf.call(focusable, active) === -1);
+  if (e.shiftKey && atStart) {
     e.preventDefault();
     last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
+  } else if (!e.shiftKey && active === last) {
     e.preventDefault();
     first.focus();
   }

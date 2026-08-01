@@ -58,4 +58,62 @@ module.exports = [
       document.body.removeChild(trigger);
     `,
   },
+  {
+    name: 'COMP-003 MuteDrawer: Shift+Tab from the heading wraps to the last control (does not escape)',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // FOCUSABLE_SELECTOR / trapTab are file-internal (not published to
+      // window) — reachable here because this suite's target IS
+      // components.jsx, so it shares scope with the file under test.
+      let muteState = { nodes: [], sources: [], global: false, lightning: false, volume: 70 };
+      const setMuteState = (fn) => { muteState = typeof fn === 'function' ? fn(muteState) : fn; };
+      ReactDOM.flushSync(() => root.render(React.createElement(window.MuteDrawer, {
+        open: true, onClose: () => {}, muteState, setMuteState, nodes: [],
+      })));
+      await settle();
+      const heading = container.querySelector('h2');
+      A('COMP-003 setup: MuteDrawer heading has initial focus', document.activeElement === heading);
+
+      const focusable = Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
+      const lastEl = focusable[focusable.length - 1];
+      A('COMP-003 setup: at least one real focusable control exists', !!lastEl);
+
+      const ev = new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(ev);
+      await settle();
+      A('COMP-003 MuteDrawer Shift+Tab from the heading wraps to the last control, not out of the modal',
+        document.activeElement === lastEl,
+        document.activeElement && (document.activeElement.tagName + '.' + document.activeElement.className));
+    `,
+  },
+  {
+    name: 'COMP-003 NodeSidePanel: Shift+Tab from the heading wraps to the last control (does not escape)',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      const node = {
+        id: 'PUMP-01', name: '測試泵浦', location: '3F · 西側', status: 'online',
+        type: 'pump', heartbeat: 5, upload: 5, level: 40, cycles: 0,
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(window.NodeSidePanel, {
+        node, history: [], onClose: () => {}, onJumpAlert: () => {}, onNavigate: () => {},
+        onSelectAlert: () => {}, openAlerts: [], onUpdateNode: () => Promise.resolve(),
+      })));
+      await settle();
+      const heading = container.querySelector('h2');
+      A('COMP-003 setup: NodeSidePanel heading has initial focus', document.activeElement === heading);
+
+      const focusable = Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
+      const lastEl = focusable[focusable.length - 1];
+      A('COMP-003 setup: at least one real focusable control exists', !!lastEl);
+
+      const ev = new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(ev);
+      await settle();
+      A('COMP-003 NodeSidePanel Shift+Tab from the heading wraps to the last control, not out of the modal',
+        document.activeElement === lastEl,
+        document.activeElement && (document.activeElement.tagName + '.' + document.activeElement.className));
+    `,
+  },
 ];
