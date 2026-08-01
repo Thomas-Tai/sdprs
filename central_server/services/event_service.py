@@ -166,7 +166,21 @@ def acknowledge_event(
     ``db`` is optional (fetched via get_db() when None under SQLite; ignored
     under PostgreSQL). ``alert_id``/``acknowledged_by`` are keyword-only.
 
-    Returns the updated event dict on success, or None if not found / wrong status.
+    DATA-002 fix (2026-08-01): the UPDATE itself carries ``AND status =
+    'PENDING'`` — mirroring bulk_acknowledge_events — so the atomicity lives
+    in the single UPDATE statement's WHERE clause + rowcount, not in a
+    separate SELECT-then-check. The previous version SELECTed the status,
+    checked it in Python, and only THEN ran an UPDATE matching solely on
+    ``id`` (no status predicate). Two callers who both read PENDING before
+    either committed would both pass that Python check and both UPDATE
+    unconditionally, so whichever committed second silently overwrote the
+    first caller's acknowledged_by/acknowledged_at. Matching on status
+    inside the UPDATE closes the window: only the UPDATE that lands while
+    the row is still PENDING can match any rows at all.
+
+    Returns the updated event dict on success, or None if not found / the
+    row was no longer PENDING by the time the UPDATE ran (caller should
+    treat None as "re-check current status" — typically a 404 or 409).
     """
     if get_backend() == "postgresql":
         return _acknowledge_event_pg(alert_id, acknowledged_by)
@@ -174,17 +188,6 @@ def acknowledge_event(
     if db is None:
         db = get_db()
     cursor = db.cursor()
-    cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
-    row = cursor.fetchone()
-    if not row:
-        logger.warning(f"Event {alert_id} not found")
-        return None
-
-    # Acknowledge is only meaningful for PENDING. PENDING_VIDEO is too early
-    # (no payload to triage); RESOLVED is already past acknowledgement.
-    if row["status"] != "PENDING":
-        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
-        return None
 
     acked_at = utcnow().isoformat()
     cursor.execute("""
@@ -192,9 +195,18 @@ def acknowledge_event(
             status = 'ACKNOWLEDGED',
             acknowledged_by = ?,
             acknowledged_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'PENDING'
     """, (acknowledged_by, acked_at, alert_id))
+    updated = cursor.rowcount
     db.commit()
+
+    if not updated:
+        logger.warning(
+            f"Event {alert_id} acknowledge no-op (not found, or status was "
+            "no longer PENDING when the UPDATE ran)"
+        )
+        return None
+
     logger.info(f"Event {alert_id} acknowledged by {acknowledged_by}")
 
     return {
@@ -205,29 +217,30 @@ def acknowledge_event(
 
 
 def _acknowledge_event_pg(alert_id: int, acknowledged_by: str) -> Optional[Dict[str, Any]]:
-    """PostgreSQL branch of acknowledge_event (throwaway-engine idiom)."""
+    """PostgreSQL branch of acknowledge_event (throwaway-engine idiom).
+
+    DATA-002 fix: same atomic ``WHERE id = :id AND status = 'PENDING'`` +
+    rowcount check as the SQLite branch — see acknowledge_event docstring.
+    """
     import sqlalchemy
     engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
     acked_at = utcnow().isoformat()
     with engine.connect() as conn:
-        row = conn.execute(
-            sqlalchemy.text("SELECT status FROM events WHERE id = :id"),
-            {"id": alert_id},
-        ).mappings().fetchone()
-        if not row:
-            logger.warning(f"Event {alert_id} not found")
-            return None
-        if row["status"] != "PENDING":
-            logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING")
-            return None
-        conn.execute(
+        result = conn.execute(
             sqlalchemy.text(
                 "UPDATE events SET status = 'ACKNOWLEDGED', "
-                "acknowledged_by = :by, acknowledged_at = :at WHERE id = :id"
+                "acknowledged_by = :by, acknowledged_at = :at "
+                "WHERE id = :id AND status = 'PENDING'"
             ),
             {"by": acknowledged_by, "at": acked_at, "id": alert_id},
         )
         conn.commit()
+    if not result.rowcount:
+        logger.warning(
+            f"Event {alert_id} acknowledge no-op (not found, or status was "
+            "no longer PENDING when the UPDATE ran) (PostgreSQL)"
+        )
+        return None
     logger.info(f"Event {alert_id} acknowledged by {acknowledged_by}")
     return {
         "alert_id": alert_id,
@@ -253,8 +266,19 @@ def resolve_event(
         resolved_by: Username who resolved the event (keyword-only)
         notes: Optional resolution notes
 
+    DATA-002 fix (2026-08-01): the UPDATE itself carries ``AND status IN
+    ('PENDING', 'ACKNOWLEDGED')`` — mirroring bulk_resolve_events — so
+    atomicity lives in the UPDATE's WHERE clause + rowcount, not in a
+    separate SELECT-then-check. See acknowledge_event's docstring for the
+    full race this closes: two callers who both read a resolvable status
+    before either committed used to both pass the Python check and both
+    UPDATE unconditionally, letting the second commit silently overwrite
+    the first caller's resolved_by/resolved_at/notes.
+
     Returns:
-        True if successful, False if event not found or wrong status
+        True if successful, False if the event was not found or the row was
+        no longer PENDING/ACKNOWLEDGED by the time the UPDATE ran (caller
+        should re-check current status — typically a 404 or 409).
     """
     if get_backend() == "postgresql":
         return _resolve_event_pg(alert_id, resolved_by, notes)
@@ -263,63 +287,56 @@ def resolve_event(
         db = get_db()
     cursor = db.cursor()
 
-    # Check current status
-    cursor.execute("SELECT status FROM events WHERE id = ?", (alert_id,))
-    row = cursor.fetchone()
-    
-    if not row:
-        logger.warning(f"Event {alert_id} not found")
-        return False
-
-    # Both PENDING (direct resolve) and ACKNOWLEDGED (resolve after triage) are valid.
-    if row["status"] not in ("PENDING", "ACKNOWLEDGED"):
-        logger.warning(f"Event {alert_id} status is {row['status']}, expected PENDING or ACKNOWLEDGED")
-        return False
-
-    # Update
     resolved_at = utcnow().isoformat()
     cursor.execute("""
-        UPDATE events SET 
+        UPDATE events SET
             status = 'RESOLVED',
             resolved_by = ?,
             resolved_at = ?,
             notes = COALESCE(?, notes)
-        WHERE id = ?
+        WHERE id = ? AND status IN ('PENDING', 'ACKNOWLEDGED')
     """, (resolved_by, resolved_at, notes, alert_id))
+    updated = cursor.rowcount
     db.commit()
-    
+
+    if not updated:
+        logger.warning(
+            f"Event {alert_id} resolve no-op (not found, or status was no "
+            "longer PENDING/ACKNOWLEDGED when the UPDATE ran)"
+        )
+        return False
+
     logger.info(f"Event {alert_id} resolved by {resolved_by}")
     return True
 
 
 def _resolve_event_pg(alert_id: int, resolved_by: str, notes: Optional[str]) -> bool:
-    """PostgreSQL branch of resolve_event (throwaway-engine idiom)."""
+    """PostgreSQL branch of resolve_event (throwaway-engine idiom).
+
+    DATA-002 fix: same atomic ``WHERE id = :id AND status IN (...)`` +
+    rowcount check as the SQLite branch — see resolve_event docstring.
+    """
     import sqlalchemy
     engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    resolved_at = utcnow().isoformat()
     with engine.connect() as conn:
-        row = conn.execute(
-            sqlalchemy.text("SELECT status FROM events WHERE id = :id"),
-            {"id": alert_id},
-        ).mappings().fetchone()
-        if not row:
-            logger.warning(f"Event {alert_id} not found")
-            return False
-        if row["status"] not in ("PENDING", "ACKNOWLEDGED"):
-            logger.warning(
-                f"Event {alert_id} status is {row['status']}, expected PENDING or ACKNOWLEDGED"
-            )
-            return False
-        resolved_at = utcnow().isoformat()
         result = conn.execute(
             sqlalchemy.text(
                 "UPDATE events SET status = 'RESOLVED', resolved_by = :by, "
-                "resolved_at = :at, notes = COALESCE(:notes, notes) WHERE id = :id"
+                "resolved_at = :at, notes = COALESCE(:notes, notes) "
+                "WHERE id = :id AND status IN ('PENDING', 'ACKNOWLEDGED')"
             ),
             {"by": resolved_by, "at": resolved_at, "notes": notes, "id": alert_id},
         )
         conn.commit()
+    if not result.rowcount:
+        logger.warning(
+            f"Event {alert_id} resolve no-op (not found, or status was no "
+            "longer PENDING/ACKNOWLEDGED when the UPDATE ran) (PostgreSQL)"
+        )
+        return False
     logger.info(f"Event {alert_id} resolved by {resolved_by}")
-    return result.rowcount > 0
+    return True
 
 
 def _event_counts_rows_pg() -> List[Dict[str, Any]]:

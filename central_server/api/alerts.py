@@ -43,6 +43,17 @@ logger = logging.getLogger("alerts_api")
 # Create router
 router = APIRouter(tags=["alerts"])
 
+# Exact per-file cap for a single uploaded video (DATA-004, 2026-08-01).
+# Module-level (not a local inside upload_video) so it can be monkeypatched
+# in tests and so the streaming write loop below can reference the SAME
+# value the pre-write gate uses. The coarse gate that stops an unbounded
+# body from being buffered at all is BodySizeLimitMiddleware (main.py) --
+# it has to be, because by the time this handler runs Starlette has already
+# parsed and spooled the whole multipart body. This constant is the precise
+# limit on what gets STORED; that middleware is what stops it being
+# RECEIVED in the first place.
+MAX_VIDEO_SIZE = 100 * 1024 * 1024
+
 
 # ===== Pydantic Models =====
 
@@ -219,13 +230,16 @@ async def upload_video(
     - **file**: MP4 video file (multipart/form-data)
     """
     logger.info(f"Uploading video for alert {alert_id}, filename={file.filename}")
-    
-    # Exact per-file cap. The coarse gate that stops an unbounded body from
-    # being buffered at all is BodySizeLimitMiddleware (main.py) -- it has to
-    # be, because by the time this handler runs Starlette has already parsed
-    # and spooled the whole multipart body. This check is the precise limit on
-    # what gets STORED; that one is what stops it being RECEIVED.
-    MAX_VIDEO_SIZE = 100 * 1024 * 1024
+
+    # Cheap pre-write gate using whatever Starlette/python-multipart already
+    # computed for file.size. NOTE: this is NOT the authoritative check --
+    # file.size can be None (e.g. a chunked upload with no Content-Length may
+    # report it that way, and nothing guarantees every UploadFile
+    # implementation always sets a real int), which makes `file.size and ...`
+    # silently skip this branch entirely. DATA-004 (2026-08-01): the
+    # streaming write loop below is what actually enforces MAX_VIDEO_SIZE,
+    # by counting real bytes as they are written -- this pre-check is just a
+    # cheap early exit when the size happens to already be known.
     if file.size and file.size > MAX_VIDEO_SIZE:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -298,20 +312,52 @@ async def upload_video(
     mp4_path = node_dir / filename
     full_path_str = str(mp4_path)
     
-    # Stream write the file to disk (64KB chunks)
+    # Stream write the file to disk (64KB chunks).
+    #
+    # DATA-004 fix (2026-08-01): `written` is a running total of real bytes
+    # about to be written, checked against MAX_VIDEO_SIZE on every chunk --
+    # independent of whatever file.size ever reported (which the pre-check
+    # above already relies on and which can be None/unreliable). This is
+    # the ONLY check in this handler that cannot be bypassed by a caller
+    # that manages to skip declaring a size: it counts what actually flows
+    # through this loop, not what was claimed upstream.
     chunk_size = 64 * 1024  # 64 KB
-    
+    written = 0
+    oversized = False
+
     try:
         with open(mp4_path, "wb") as f:
             while True:
                 chunk = await file.read(chunk_size)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > MAX_VIDEO_SIZE:
+                    # Stop pulling more bytes; do NOT write this chunk. The
+                    # `with` block below still closes the handle normally
+                    # (unlinking an open handle can fail on Windows), so the
+                    # unlink happens just after, outside the `with`.
+                    oversized = True
+                    break
                 f.write(chunk)
-        
+
+        if oversized:
+            if mp4_path.exists():
+                mp4_path.unlink()
+            logger.warning(
+                f"Rejected oversized video stream for alert {alert_id} "
+                f"(exceeded {MAX_VIDEO_SIZE // (1024*1024)} MB cap)"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Video file too large (max {MAX_VIDEO_SIZE // (1024*1024)} MB)"
+            )
+
         file_size = mp4_path.stat().st_size
         logger.info(f"Video saved: {full_path_str} ({file_size} bytes)")
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to save video file: {e}")
         # Clean up partial file if it exists
@@ -421,9 +467,32 @@ async def acknowledge_alert(
 
     result = acknowledge_event_db(alert_id=alert_id, acknowledged_by=user)
     if result is None:
+        # DATA-002 fix (2026-08-01): acknowledge_event_db's UPDATE is now
+        # atomic and conditional (WHERE ... AND status = 'PENDING'); None
+        # means that predicate matched 0 rows -- i.e. between our read
+        # above and this UPDATE, another request's write already moved the
+        # row past PENDING (or it vanished). That is a conflict the caller
+        # can act on, not a server failure: re-check the current status and
+        # answer 404/409 instead of a blanket 500.
+        current = get_event(alert_id)
+        if current is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Alert {alert_id} not found"
+            )
+        if current["status"] == "ACKNOWLEDGED" and current.get("acknowledged_by") == user:
+            # The row that "won" the race was this same operator's own
+            # request (e.g. a duplicated double-click) -- idempotent
+            # success, matching the same-operator shortcut above.
+            return {
+                "status": "ok",
+                "alert_id": alert_id,
+                "acknowledged_by": user,
+                "acknowledged_at": current.get("acknowledged_at"),
+            }
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to acknowledge alert"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Alert status changed to {current['status']} before acknowledge completed"
         )
 
     try:
@@ -503,9 +572,21 @@ async def resolve_alert(
         )
 
         if not success:
+            # DATA-002 fix (2026-08-01): resolve_event_db's UPDATE is now
+            # atomic and conditional (WHERE ... AND status IN ('PENDING',
+            # 'ACKNOWLEDGED')); False means that predicate matched 0 rows --
+            # another request's write already moved the row between our
+            # read above and this UPDATE (or it vanished). Re-check and
+            # answer 404/409 rather than a blanket 500.
+            current = get_event(alert_id)
+            if current is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Alert {alert_id} not found"
+                )
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to resolve alert"
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Alert status changed to {current['status']} before resolve completed"
             )
 
         logger.info(f"Alert {alert_id} resolved by {user}")
