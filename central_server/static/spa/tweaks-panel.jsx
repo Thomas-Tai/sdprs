@@ -481,10 +481,15 @@ function TweakRow({ label, value, children, inline = false }) {
 // ── Controls ────────────────────────────────────────────────────────────────
 
 function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  // COMP-006: the visual label was a plain <span> with no programmatic
+  // association to the range input — a screen reader announced a bare
+  // "slider", not "字體大小 slider". aria-label ties the visible text to the
+  // control without requiring an id that would need to stay unique across
+  // every panel instance.
   return (
     <TweakRow label={label} value={`${value}${unit}`}>
       <input type="range" className="twk-slider" min={min} max={max} step={step}
-             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+             value={value} aria-label={label} onChange={(e) => onChange(Number(e.target.value))} />
     </TweakRow>
   );
 }
@@ -493,8 +498,10 @@ function TweakToggle({ label, value, onChange }) {
   return (
     <div className="twk-row twk-row-h">
       <div className="twk-lbl"><span>{label}</span></div>
+      {/* COMP-006: role="switch" with no accessible name announced as a bare
+          "switch". */}
       <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
-              role="switch" aria-checked={!!value}
+              role="switch" aria-checked={!!value} aria-label={label}
               onClick={() => onChange(!value)}><i /></button>
     </div>
   );
@@ -604,9 +611,10 @@ function TweakRadio({ label, value, options, onChange }) {
 }
 
 function TweakSelect({ label, value, options, onChange }) {
+  // COMP-006: same missing-accessible-name issue as the slider/toggle above.
   return (
     <TweakRow label={label}>
-      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+      <select className="twk-field" value={value} aria-label={label} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => {
           const v = typeof o === 'object' ? o.value : o;
           const l = typeof o === 'object' ? o.label : o;

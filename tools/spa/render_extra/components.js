@@ -245,4 +245,31 @@ module.exports = [
       delete window.Hls;
     `,
   },
+  {
+    name: 'COMP-006 tweaks-panel slider/toggle/select controls have a programmatic label',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweakSlider, {
+        label: '字體大小', value: 16, min: 10, max: 32, unit: 'px', onChange: () => {},
+      })));
+      const range = container.querySelector('input[type="range"]');
+      A('COMP-006 TweakSlider input has an accessible name matching its visual label',
+        !!range && range.getAttribute('aria-label') === '字體大小', range && range.getAttribute('aria-label'));
+
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweakToggle, {
+        label: '深色模式', value: true, onChange: () => {},
+      })));
+      const toggle = container.querySelector('button[role="switch"]');
+      A('COMP-006 TweakToggle switch has an accessible name matching its visual label',
+        !!toggle && toggle.getAttribute('aria-label') === '深色模式', toggle && toggle.getAttribute('aria-label'));
+
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweakSelect, {
+        label: '密度', value: 'regular', options: ['compact', 'regular', 'comfy'], onChange: () => {},
+      })));
+      const select = container.querySelector('select');
+      A('COMP-006 TweakSelect has an accessible name matching its visual label',
+        !!select && select.getAttribute('aria-label') === '密度', select && select.getAttribute('aria-label'));
+    `,
+  },
 ];
