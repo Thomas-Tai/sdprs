@@ -1253,7 +1253,13 @@ function App({ initialError = null }) {
         el.focus();
         return;
       }
-      if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(true); return; }
+      // SHELL-011: this used to always OPEN, never close — inconsistent with
+      // Cmd/Ctrl+K above (B2: "idempotent toggle — a second Cmd+K closes the
+      // palette"). An operator who already has the drawer open and presses M
+      // again (muscle memory from the palette pattern, or just not noticing
+      // it's already up) got no way to close it via the same key; Escape or
+      // the drawer's own close button were the only ways out.
+      if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(v => !v); return; }
       if (e.key === 't' || e.key === 'T') { setTweak('theme', tweaks.theme === 'dark' ? 'light' : 'dark'); return; }
       if (e.shiftKey && (e.key === 'D' || e.key === 'd')) { setTweak('density', tweaks.density === 'compact' ? 'comfortable' : 'compact'); return; }
 
