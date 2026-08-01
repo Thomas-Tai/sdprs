@@ -436,8 +436,9 @@ function App({ initialError = null }) {
 
   // Apply theme/wall/focus classes
   useEffectA(() => {
-    document.documentElement.classList.toggle('dark', tweaks.theme === 'dark');
-    document.documentElement.classList.toggle('light', tweaks.theme === 'light');
+    const t = window.effectiveTheme(tweaks.theme, tweaks.wallMode);
+    document.documentElement.classList.toggle('dark', t === 'dark');
+    document.documentElement.classList.toggle('light', t === 'light');
     document.documentElement.classList.toggle('wall-mode', !!tweaks.wallMode);
     document.documentElement.classList.toggle('focus-mode', !!focusMode);
   }, [tweaks.theme, tweaks.wallMode, focusMode]);
@@ -1791,7 +1792,7 @@ function WallView({ alerts, nodes, unackCount }) {
           </div>
         </div>
         <div className="w-px h-10 bg-border-subtle"></div>
-        <window.Pill tone={liveState} dot pulse={liveState==='ok'} className="!h-8 !text-sm !px-3">{`Live · ${liveSec}s`}</window.Pill>
+        <window.Pill tone={liveState} dot pulse={liveState==='ok'} className="!h-8 !text-sm !px-3">{window.liveClockLabel(liveSec)}</window.Pill>
         {unackCount > 0 && (
           <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink">
             <Icon.Bell size={16}/> 未認領 {unackCount}
@@ -1829,7 +1830,7 @@ function WallView({ alerts, nodes, unackCount }) {
           <div className="grid grid-cols-3 gap-3 min-h-0 overflow-hidden flex-1">
             {sorted.slice(0, 9).map(n => (
               <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
-                <div className={`relative h-full snapshot-placeholder ${n.status === 'offline' ? 'snapshot-frozen' : ''}`}>
+                <div className={`relative h-full snapshot-placeholder ${window.wallTileFrozen(n) ? 'snapshot-frozen' : ''}`}>
                   <WallSnapshot node={n} iconSize={64}/>
                   <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
                   {n.status === 'offline' && (

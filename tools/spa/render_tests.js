@@ -1457,7 +1457,54 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------- WAL-H5/M8/M10: wall-mode pure helpers (data.jsx) -------
+// Commit A of the 2026-08-01 wall-mode audit fix plan. Three pure helpers
+// extracted into data.jsx so the wall's decision logic is unit-testable:
+//   liveClockLabel(liveSec)  — WAL-H5: pill text degrades during outage
+//   wallTileFrozen(node)     — WAL-M8: stale-online tiles freeze (grayscale)
+//   effectiveTheme(theme, wallMode) — WAL-M10: wall forces dark palette
+const TEST_WALL_DATA_HELPERS = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    // --- WAL-H5: liveClockLabel ---
+    var lcl = window.liveClockLabel;
+    A('WAL-H5 liveClockLabel is exported', typeof lcl === 'function');
+    A('WAL-H5 liveClockLabel(3) === Live · 3s', lcl(3) === 'Live \\u00b7 3s', lcl(3));
+    A('WAL-H5 liveClockLabel(9) still Live (boundary <10)', lcl(9).indexOf('Live') === 0, lcl(9));
+    A('WAL-H5 liveClockLabel(10) degrades to reconnecting', lcl(10).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(10));
+    A('WAL-H5 liveClockLabel(15) contains reconnecting', lcl(15).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(15));
+    A('WAL-H5 liveClockLabel(29) still reconnecting (boundary <30)', lcl(29).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(29));
+    A('WAL-H5 liveClockLabel(30) degrades to disconnected', lcl(30).indexOf('\\u9023\\u7dda\\u4e2d\\u65b7') !== -1, lcl(30));
+    A('WAL-H5 liveClockLabel(45) contains disconnected', lcl(45).indexOf('\\u9023\\u7dda\\u4e2d\\u65b7') !== -1, lcl(45));
+    A('WAL-H5 liveClockLabel(120) shows seconds', lcl(120).indexOf('120s') !== -1, lcl(120));
+
+    // --- WAL-M8: wallTileFrozen ---
+    var wtf = window.wallTileFrozen;
+    A('WAL-M8 wallTileFrozen is exported', typeof wtf === 'function');
+    A('WAL-M8 offline node is frozen', wtf({ status: 'offline' }) === true);
+    A('WAL-M8 online + stale upload (120>60) is frozen', wtf({ status: 'online', upload: 120 }) === true);
+    A('WAL-M8 online + fresh upload (5) is NOT frozen', wtf({ status: 'online', upload: 5 }) === false);
+    A('WAL-M8 online + null upload is NOT frozen', wtf({ status: 'online', upload: null }) === false);
+    A('WAL-M8 online + upload=60 is NOT frozen (boundary)', wtf({ status: 'online', upload: 60 }) === false);
+    A('WAL-M8 online + upload=61 is frozen', wtf({ status: 'online', upload: 61 }) === true);
+
+    // --- WAL-M10: effectiveTheme ---
+    var et = window.effectiveTheme;
+    A('WAL-M10 effectiveTheme is exported', typeof et === 'function');
+    A('WAL-M10 light + wallMode forces dark', et('light', true) === 'dark');
+    A('WAL-M10 light + no wall keeps light', et('light', false) === 'light');
+    A('WAL-M10 dark + wallMode stays dark', et('dark', true) === 'dark');
+    A('WAL-M10 dark + no wall stays dark', et('dark', false) === 'dark');
+  } catch (e) {
+    results.push({ name: 'WAL-H5/M8/M10 wall helpers suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
+  { name: 'WAL-H5/M8/M10 wall helpers  data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_WALL_DATA_HELPERS },
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
   { name: 'OPS-003 hls fallback          components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_OPS_HLS_FALLBACK },
   { name: 'OPS-002 stream health bitrate  status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_STREAM_HEALTH },

@@ -481,7 +481,7 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
   // CMP-F17: the degraded/failed connection states — the two an operator most
   // needs to read at a glance during a typhoon — were the only English strings
   // in the status strip. Localised to zh-TW to match the rest of the UI.
-  const liveLabel = liveSec < 10 ? `Live · ${liveSec}s` : liveSec < 30 ? `重新連線中… ${liveSec}s` : `連線中斷 ${liveSec}s`;
+  const liveLabel = window.liveClockLabel(liveSec);
   const tones = { ok: 'bg-sev-ok/15 text-sev-ok border-sev-ok/40', warn: 'bg-sev-warn/15 text-sev-warn border-sev-warn/40', critical: 'bg-sev-critical/15 text-sev-critical border-sev-critical/40' };
   const activeMutes = (muted ? 1 : 0) + (muteState?.nodes?.length || 0) + (muteState?.lightning ? 1 : 0);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);

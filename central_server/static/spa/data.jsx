@@ -240,6 +240,27 @@ async function probeSessionOnce(extendSession) {
   }
 }
 
+// WAL-H5: wall pill + StatusStrip share one label so the wall degrades its
+// text during an outage (not just its color).
+function liveClockLabel(liveSec) {
+  if (liveSec < 10) return 'Live \u00b7 ' + liveSec + 's';
+  if (liveSec < 30) return '\u91cd\u65b0\u9023\u7dda\u4e2d\u2026 ' + liveSec + 's';
+  return '\u9023\u7dda\u4e2d\u65b7 ' + liveSec + 's';
+}
+
+// WAL-M8: a tile is frozen (grayscale) when offline OR when its frame is stale
+// (upload > 60s). upload == null means "never had a snapshot" — not frozen.
+function wallTileFrozen(node) {
+  if (!node) return false;
+  if (node.status === 'offline') return true;
+  return node.upload != null && node.upload > 60;
+}
+
+// WAL-M10: wall mode always uses the dark palette regardless of user theme.
+function effectiveTheme(theme, wallMode) {
+  return wallMode ? 'dark' : theme;
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
   fmtAge, ageColor, sevMeta, alertTypeMap,
@@ -252,3 +273,6 @@ window.Z_LAYER = Z_LAYER;
 window.formatDurationShort = formatDurationShort;
 window.nextToasts = nextToasts;
 window.probeSessionOnce = probeSessionOnce;
+window.liveClockLabel = liveClockLabel;
+window.wallTileFrozen = wallTileFrozen;
+window.effectiveTheme = effectiveTheme;
