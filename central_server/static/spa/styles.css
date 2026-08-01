@@ -33,7 +33,14 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Custom scrollbar — dark, slim */
+/* Custom scrollbar — dark, slim.
+   SHELL-025: the ::-webkit-scrollbar-* rules below are Chromium/Safari-only —
+   Firefox (and any other non-WebKit engine) ignores them entirely and falls
+   back to its native full-width scrollbar, silently losing the "slim" design
+   intent on every scrollable panel. `scrollbar-width`/`scrollbar-color` are
+   the standard-track equivalent Firefox actually implements; declared once
+   here so it applies everywhere `.scroll-thin` is used. */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: #1E293B transparent; }
 .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
 .scroll-thin::-webkit-scrollbar-track { background: transparent; }
 .scroll-thin::-webkit-scrollbar-thumb {
@@ -196,6 +203,7 @@ html.light .text-sev-info  { color: #1D4ED8 !important; }
 html.light .text-sev-stale { color: #475569 !important; }
 
 /* Light-theme scrollbars — the dark slate thumb read as a smear on white. */
+html.light .scroll-thin { scrollbar-color: #CBD5E1 transparent; }
 html.light .scroll-thin::-webkit-scrollbar-thumb { background: #CBD5E1; }
 html.light .scroll-thin::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
