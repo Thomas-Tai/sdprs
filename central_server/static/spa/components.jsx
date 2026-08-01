@@ -776,7 +776,6 @@ const NAV_ITEMS = [
 const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, offlineCount }) => {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const drawerRef = useRef(null);
-  const hamburgerRef = useRef(null);
   // Element that had focus before the drawer opened; restored on close so
   // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
   const lastFocusedRef = useRef(null);
@@ -876,7 +875,6 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
     <>
       {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
       <button
-        ref={hamburgerRef}
         type="button"
         onClick={() => setMobileNavOpen(v => !v)}
         aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
