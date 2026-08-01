@@ -373,3 +373,24 @@ If completeness matters for sign-off, the next step would be a runtime pass:
 run the wall on a 4K output, kill the WS and each API in turn, and observe.
 Every finding above, however, is evidenced in code and reproducible by
 inspection.
+
+---
+
+## Verification 2026-08-01 (branch `fix/wall-mode-audit-2026-08-01`)
+
+Independent re-verification against `main` (56dc0e7) confirmed, refuted, or
+reclassified every finding. Plan: `docs/audits/2026-08-01-wall-mode-fix-plan-for-glm.md`.
+
+| ID | Verdict | Resolution |
+|----|---------|------------|
+| WAL-H5 | **FIXED** | `liveClockLabel` helper in data.jsx; wall pill degrades text. Commit 860504b. |
+| WAL-H6 | **FIXED** | `dataWarnings` prop threaded to WallView; amber banner renders. Commit 253d764. |
+| WAL-M3 | **FIXED** | WallClock + WallLivePill leaf components isolate the 1s re-render. Commit 5f9ea30. |
+| WAL-M8 | **FIXED** | `wallTileFrozen` helper; stale-online tiles get snapshot-frozen. Commit 860504b. |
+| WAL-M9 | **FIXED** | `activeAlertCount` + `orderWallAlerts` helpers; honest count + severity sort. Commit 4c98445. |
+| WAL-M10 | **FIXED** | `effectiveTheme` helper; wall forces dark palette. Commit 860504b. |
+| WAL-M4 | Deferred | Low priority rain-tile cosmetic; skipped per plan §2.7. |
+| WAL-M6 | **REFUTED** | Single-instance guard already exists on main. No action. |
+| WAL-H4 | **SUPERSEDED** | `TrayApp.set_status` deliberately removed; finding no longer applies. |
+| WAL-C1, C2, H1, H2, H3, M1, M2, M5, M7 | FEATURE/DESIGN | Confirmed gaps requiring explicit design sign-off. Not built. |
+| WAL-L1..L5 | LOW/cosmetic | Skipped per plan. |
