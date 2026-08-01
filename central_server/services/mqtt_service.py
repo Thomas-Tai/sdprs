@@ -247,10 +247,19 @@ class MQTTService:
                 # Capture the prior status BEFORE overwriting so we can detect a
                 # transition (unknown-node first contact, or OFFLINE->ONLINE
                 # recovery). Steady-state heartbeats must NOT broadcast.
-                prev_status = self.node_states.get(node_id, {}).get("status")
+                prev = self.node_states.get(node_id, {})
+                prev_status = prev.get("status")
+                # DATA-007: a heartbeat is a generic liveness signal and must NOT
+                # downgrade an already-known pump to "glass". The in-memory type
+                # drives the offline-timeout loop (30s pump vs 90s glass) and the
+                # critical-vs-warning logging, so clobbering it would delay
+                # dead-pump detection 3x. Preserve the established type; default
+                # to "glass" only for a genuinely new node (cameras are the
+                # common case and heartbeat is their primary liveness signal).
+                node_type = prev.get("type") or "glass"
                 # Update node state in memory
                 self.node_states[node_id] = {
-                    "type": "glass",
+                    "type": node_type,
                     "status": "ONLINE",
                     "last_heartbeat": utcnow(),
                     "cpu_temp": data.get("cpu_temp"),
@@ -280,9 +289,9 @@ class MQTTService:
             }
 
             if self.db:
-                self.db.upsert_node(node_id, "glass", "ONLINE", metadata)
+                self.db.upsert_node(node_id, node_type, "ONLINE", metadata)
             else:
-                upsert_node(node_id, "glass", "ONLINE", metadata)
+                upsert_node(node_id, node_type, "ONLINE", metadata)
 
             logger.debug(f"Heartbeat from {node_id}: cpu_temp={data.get('cpu_temp')}°C")
 
