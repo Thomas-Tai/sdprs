@@ -496,7 +496,7 @@ async def login_page(request: Request):
             target = "/"
         return RedirectResponse(url=target, status_code=303)
 
-    return templates.TemplateResponse(request, "login.html", {"next": next_param})
+    return templates.TemplateResponse(request, "login.html", {"next": next_param, "year": utcnow().year})
 
 
 @app.post("/login")
@@ -549,7 +549,8 @@ async def login(request: Request):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": f"嘗試次數過多，請於 {retry_after} 秒後再試", "next": next_param},
+            {"error": f"嘗試次數過多，請於 {retry_after} 秒後再試", "next": next_param,
+             "retry_after": retry_after, "year": utcnow().year},
             status_code=429,
             headers={"Retry-After": str(retry_after)},
         )
@@ -577,7 +578,7 @@ async def login(request: Request):
     from .services.audit_service import log_action, ACTION_LOGIN_FAILED
     log_action(username or "<empty>", ACTION_LOGIN_FAILED, target_id=ip)
 
-    return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤", "next": next_param})
+    return templates.TemplateResponse(request, "login.html", {"error": "帳號或密碼錯誤", "next": next_param, "year": utcnow().year})
 
 
 @app.post("/api/session/extend")

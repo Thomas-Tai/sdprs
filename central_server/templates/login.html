@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -20,8 +20,16 @@
             </div>
             
             <!-- 錯誤訊息 -->
+            <!-- SEC-004: the error banner is announced to assistive tech (alert
+                 role). UX-003: on a lockout the server passes retry_after and
+                 login.js reads it off the banner to run a live countdown and gate
+                 the submit button. -->
             {% if error %}
-            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+            <div
+                class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6"
+                role="alert"
+                {% if retry_after %}data-retry-after="{{ retry_after }}"{% endif %}
+            >
                 {{ error }}
             </div>
             {% endif %}
@@ -92,8 +100,10 @@
             </form>
             
             <!-- 底部 -->
+            <!-- SEC-004: year is server-injected (utcnow().year) so it never goes
+                 stale. Falls back to a literal if the context omits it. -->
             <div class="text-center mt-8 text-gray-500 text-sm">
-                © 2026 SDPRS 防災監控系統
+                © {{ year or 2026 }} SDPRS 防災監控系統
             </div>
         </div>
     </div>
