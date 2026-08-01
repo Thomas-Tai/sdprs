@@ -1418,9 +1418,49 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------- OPS-002: 串流健康 reads real bitrate --------
+// The column rendered n.bitrate — mapNode's stream_status.bitrate_mbps, which
+// the edge never publishes, so it was a red 0.0 Mbps for every camera forever
+// (alarm fatigue). It must read getStreamHealth().bitrateMbps (mediamtx's own
+// scrape, the same source StreamRowButton uses) and show a neutral — when
+// unknown, never a fake red 0.0.
+const TEST_OPS_STREAM_HEALTH = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    let healthResult = { enabled: true, reachable: true, bitrateMbps: 2.5, drops: 3, viewers: 1 };
+    window.SDPRS_API = {
+      getStreamHealth: () => Promise.resolve(healthResult),
+      startStream: () => Promise.resolve({}),
+      stopStream: () => Promise.resolve({}),
+    };
+    // node.bitrate is the always-0 field the edge never populates — the cell
+    // must read getStreamHealth().bitrateMbps instead.
+    const cam = { id: 'cam_01', name: '大門攝影機', location: '大門', type: 'camera', status: 'online', bitrate: 0, drops: 0, upload: 3, heartbeat: 3, temp: 40, snoozeMin: 0 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, { nodes: [cam], onSelectNode: () => {}, onRefresh: () => {} })));
+    await settle();
+    A('OPS-002 串流健康 shows the real bitrate from getStreamHealth', container.textContent.indexOf('2.5Mbps') !== -1);
+    A('OPS-002 串流健康 is NOT the always-0 node.bitrate', container.textContent.indexOf('0.0Mbps') === -1);
+    A('OPS-002 串流健康 shows drops from getStreamHealth', container.textContent.indexOf('3 drops') !== -1);
+
+    // Unknown health (bridge up, no scraped sample yet / edge silent) → neutral —,
+    // never a red 0.0 that reads as "every camera broken".
+    healthResult = { enabled: true, reachable: true, bitrateMbps: null, drops: null, viewers: null };
+    ReactDOM.flushSync(() => root.render(null));
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, { nodes: [cam], onSelectNode: () => {}, onRefresh: () => {} })));
+    await settle();
+    A('OPS-002 unknown stream health shows no fake 0.0Mbps', container.textContent.indexOf('0.0Mbps') === -1);
+  } catch (e) {
+    results.push({ name: 'OPS-002 stream-health suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
   { name: 'OPS-003 hls fallback          components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_OPS_HLS_FALLBACK },
+  { name: 'OPS-002 stream health bitrate  status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_STREAM_HEALTH },
   { name: 'FLOW-001 toast queue policy   data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_FLOW_TOAST_QUEUE },
   { name: 'AUTH-003 session restore probe data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_AUTH_SESSION_PROBE },
   { name: 'FLOW-001 toast stack render   components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_FLOW_TOAST_STACK },

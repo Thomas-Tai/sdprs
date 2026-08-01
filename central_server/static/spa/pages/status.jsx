@@ -164,6 +164,37 @@ const StreamRowButton = ({ node, onDone, onError }) => {
   );
 };
 
+// OPS-002: the 串流健康 column rendered `n.bitrate` — mapNode's
+// `stream_status.bitrate_mbps`, which the edge device NEVER publishes, so it was
+// pinned at a red 0.0 Mbps for every camera forever (alarm fatigue: it trains
+// operators to ignore the column). The real per-node bitrate/drops come from
+// mediamtx's own scrape via getStreamHealth — the SAME source of truth
+// StreamRowButton's `isActive` already uses (see its MSP-F7 note). Read that
+// here; when it's unknown (no API, not yet scraped, or no live mediamtx entry)
+// show a neutral 「—」, never a fabricated red 0.0 that reads as "camera broken".
+const StreamHealthCell = ({ node }) => {
+  const [health, setHealth] = React.useState(null);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  const api = window.SDPRS_API || {};
+  const hasApi = typeof api.getStreamHealth === 'function';
+  React.useEffect(() => {
+    if (!hasApi) return;
+    Promise.resolve(api.getStreamHealth(node.id))
+      .then(h => { if (mountedRef.current) setHealth(h || null); })
+      .catch(() => {}); // best-effort probe — fall back to "unknown", never throw
+  }, [node.id, hasApi]);
+  const mbps = health && health.bitrateMbps != null ? health.bitrateMbps : null;
+  const drops = health && health.drops != null ? health.drops : null;
+  if (mbps == null) return <span className="text-ink-muted">—</span>;
+  const tone = mbps < 0.5 ? 'text-sev-critical' : mbps < 1 ? 'text-sev-warn' : 'text-sev-ok';
+  return (
+    <span className={tone}>
+      {mbps.toFixed(1)}Mbps{drops != null && <span className="text-ink-muted"> · {drops} drops</span>}
+    </span>
+  );
+};
+
 const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump | webcam
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
@@ -446,11 +477,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     {uploadIssue && <span className="ml-1 text-[10px] bg-sev-critical/20 text-sev-critical px-1 rounded">上傳異常</span>}
                   </td>
                   <td className="px-3 py-2 font-mono">
-                    {n.type === 'camera' ? (
-                      <span className={n.bitrate < 0.5 ? 'text-sev-critical' : n.bitrate < 1 ? 'text-sev-warn' : 'text-sev-ok'}>
-                        {n.bitrate != null ? n.bitrate.toFixed(1) : '—'}Mbps <span className="text-ink-muted">· {n.drops} drops</span>
-                      </span>
-                    ) : <span className="text-ink-muted">—</span>}
+                    {n.type === 'camera' ? <StreamHealthCell node={n}/> : <span className="text-ink-muted">—</span>}
                   </td>
                   <td className="px-3 py-2 text-right font-mono">
                     {n.type === 'camera' ? (
