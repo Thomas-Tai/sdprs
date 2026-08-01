@@ -1,6 +1,9 @@
 // Shared UI components
 
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
+// COMP-018: useMemo/useCallback were destructured here but never used
+// anywhere in this file (every memoization in components.jsx goes through
+// React.memo on whole components, not these hooks).
+const { useState, useEffect, useRef } = React;
 
 // ---------- Safe meta lookups ----------
 // Backend can send severities / states / detector-health values the UI has not
