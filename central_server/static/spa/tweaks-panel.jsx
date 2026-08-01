@@ -266,8 +266,18 @@ const __writeTweaks = (obj) => {
   try { localStorage.setItem(__TWEAKS_LS_KEY, JSON.stringify(obj)); }
   catch (_) { /* quota / private mode — in-memory only is fine */ }
 };
+// COMP-028: a slider (or the number scrub-label) fires onChange once per
+// pixel/step moved — dozens of times a second during a real drag. Both the
+// localStorage write and the outbound host postMessage used to fire on
+// EVERY one of those, flooding disk I/O and spamming a host editor with
+// consecutive "rewrite the file" requests. 150ms is short enough that a
+// drag still feels instantly saved once the operator stops moving, long
+// enough that a real drag gesture coalesces into one write.
+const TWEAKS_PERSIST_DEBOUNCE_MS = 150;
 function useTweaks(defaults) {
   const [values, setValues] = React.useState(() => __readTweaks(defaults));
+  const valuesRef = React.useRef(values);
+  React.useEffect(() => { valuesRef.current = values; }, [values]);
   // WHA-M13 fix (2026-07-20): this used to do
   //   let next; setValues(prev => { next = {...}; return next; }); __writeTweaks(next);
   // — reading `next` immediately after calling setValues relies on React
@@ -279,21 +289,49 @@ function useTweaks(defaults) {
   // resetting every tweak on next reload. Persist from a useEffect keyed on
   // `values` instead — that only runs after React has actually committed
   // the new state, so it can never observe a stale/undefined value.
-  React.useEffect(() => { __writeTweaks(values); }, [values]);
+  //
+  // COMP-028: that effect used to call __writeTweaks(values) directly on
+  // every change — debounce the actual disk write instead, so a drag
+  // settles into ONE write, not one per pixel. React state (`values`)
+  // itself still updates synchronously above, so the UI stays live during
+  // the drag; only the side-effecting write is delayed. The unmount-only
+  // effect below still flushes the latest value immediately, so a fast
+  // navigate-away mid-drag never drops the final position.
+  React.useEffect(() => {
+    const t = setTimeout(() => { __writeTweaks(values); }, TWEAKS_PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [values]);
+  React.useEffect(() => () => { __writeTweaks(valuesRef.current); }, []);
   // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
   // useState-style call doesn't write a "[object Object]" key into the persisted
   // JSON block.
+  const hostSyncTimerRef = React.useRef(null);
+  const pendingEditsRef = React.useRef({});
   const setTweak = React.useCallback((keyOrEdits, val) => {
     const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
       ? keyOrEdits : { [keyOrEdits]: val };
     setValues((prev) => ({ ...prev, ...edits }));
-    // G5: was '*'; the inbound listener already gates on same-origin, so
-    // tighten the outbound target to match — nothing legitimate reads these
-    // from a cross-origin parent.
-    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, window.location.origin);
     // Same-window signal so in-page listeners (deck-stage rail thumbnails)
-    // can react — the parent message only reaches the host, not peers.
+    // can react — the parent message only reaches the host, not peers. Kept
+    // immediate (not debounced): it is a cheap in-page event, not an I/O
+    // or cross-window round trip.
     window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
+    // COMP-028: same per-pixel flood as the localStorage write, on the
+    // OUTBOUND host sync — the host round-trips this into a disk rewrite of
+    // the EDITMODE block, so forwarding every drag-pixel edit as its own
+    // postMessage produced one file rewrite per pixel too. Coalesce rapid
+    // edits and forward the merged set once they settle.
+    Object.assign(pendingEditsRef.current, edits);
+    if (hostSyncTimerRef.current) clearTimeout(hostSyncTimerRef.current);
+    hostSyncTimerRef.current = setTimeout(() => {
+      hostSyncTimerRef.current = null;
+      const pending = pendingEditsRef.current;
+      pendingEditsRef.current = {};
+      // G5: was '*'; the inbound listener already gates on same-origin, so
+      // tighten the outbound target to match — nothing legitimate reads
+      // these from a cross-origin parent.
+      window.parent.postMessage({ type: '__edit_mode_set_keys', edits: pending }, window.location.origin);
+    }, TWEAKS_PERSIST_DEBOUNCE_MS);
   }, []);
   return [values, setTweak];
 }

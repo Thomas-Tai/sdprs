@@ -795,4 +795,64 @@ module.exports = [
         !!closeBtn && closeBtn.getAttribute('aria-label') !== 'Close tweaks', closeBtn && closeBtn.getAttribute('aria-label'));
     `,
   },
+  {
+    name: 'COMP-028 TweakSlider drag coalesces localStorage + host postMessage writes',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const setItemCalls = [];
+      // Storage instances are host exotic objects (arbitrary-key get/set IS
+      // the storage API itself) — assigning window.localStorage.setItem
+      // directly does not shadow the real method, it just silently stores a
+      // key literally named "setItem". Patch the shared Storage.prototype
+      // method instead, which real calls actually dispatch through.
+      const origSetItem = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (k, v) { setItemCalls.push([k, v]); return origSetItem.call(this, k, v); };
+      const postMsgCalls = [];
+      const origPostMessage = window.postMessage.bind(window);
+      window.postMessage = function (data, origin) {
+        if (data && data.type === '__edit_mode_set_keys') postMsgCalls.push(data);
+        return origPostMessage(data, origin);
+      };
+
+      const Harness = () => {
+        const [t, setTweak] = window.useTweaks({ fontSize: 16 });
+        return React.createElement(window.TweakSlider, {
+          label: '字體大小', value: t.fontSize, min: 10, max: 32, unit: 'px',
+          onChange: (v) => setTweak('fontSize', v),
+        });
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(Harness)));
+      await settle();
+      const range = container.querySelector('input[type="range"]');
+      A('COMP-028 setup: the range input renders', !!range);
+
+      // Simulate a 10-pixel drag: 10 rapid onChange calls, each firing well
+      // within a single drag gesture — exactly what dragging a real slider
+      // produces (many native 'input' events within a handful of ms).
+      for (let i = 0; i < 10; i++) {
+        setInput(range, String(17 + i));
+        await tick();
+      }
+      A('COMP-028 setup: the slider value tracks the final drag frame (React state stays live during the drag)',
+        container.textContent.indexOf('26px') !== -1, container.textContent);
+      A('COMP-028 a 10-step drag does not write localStorage once per pixel',
+        setItemCalls.length < 10, setItemCalls.length);
+      A('COMP-028 a 10-step drag does not postMessage the host once per pixel',
+        postMsgCalls.length < 10, postMsgCalls.length);
+
+      await sleep(300); // past the debounce window, well short of a flaky margin
+      A('COMP-028 the drag DOES eventually persist to localStorage once it settles',
+        setItemCalls.length >= 1, setItemCalls.length);
+      A('COMP-028 the drag DOES eventually notify the host once it settles',
+        postMsgCalls.length >= 1, postMsgCalls.length);
+      const lastWrite = setItemCalls[setItemCalls.length - 1];
+      A('COMP-028 the persisted value reflects the FINAL drag position, not an intermediate one',
+        !!lastWrite && lastWrite[1].indexOf('26') !== -1, lastWrite && lastWrite[1]);
+
+      window.Storage.prototype.setItem = origSetItem;
+      window.postMessage = origPostMessage;
+    `,
+  },
 ];
