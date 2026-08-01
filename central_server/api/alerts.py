@@ -858,6 +858,13 @@ async def list_alerts(
     """
     from ..database import get_all_events, get_events_by_status
 
+    # DATA-005: clamp the page window so a mistyped or hostile `?limit=1e9`
+    # cannot ask the database for an unbounded row set (a trivial memory/DoS
+    # lever on this operator-facing endpoint). Mirrors GET /api/audit's clamp
+    # (min 1, max 500); offset is floored at 0.
+    limit = min(max(int(limit), 1), 500)
+    offset = max(int(offset), 0)
+
     if status_filter:
         # Support comma-separated multi-status (e.g. PENDING,ACKNOWLEDGED for active-only)
         statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
