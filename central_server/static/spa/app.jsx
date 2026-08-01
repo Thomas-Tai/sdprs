@@ -60,12 +60,29 @@ class ErrorBoundary extends React.Component {
             <div className="text-xs font-mono text-ink-muted break-all">
               {String(this.state.error?.message || this.state.error)}
             </div>
-            <button
-              onClick={() => this.setState({ error: null })}
-              className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
-            >
-              重試
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              <button
+                onClick={() => this.setState({ error: null })}
+                className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
+              >
+                重試
+              </button>
+              {/* SHELL-022: a page that crashes on every render (bad data,
+                  not a transient glitch) turned 重試 into an infinite loop
+                  with no way out short of devtools/reload. onEscape (wired
+                  by renderPage()'s `wrap` below) gives the operator a way OFF
+                  the crashed page entirely — omitted where it wouldn't make
+                  sense (e.g. the wall-mode ErrorBoundary, which already has
+                  its own always-visible exit button outside the boundary). */}
+              {typeof this.props.onEscape === 'function' && (
+                <button
+                  onClick={() => { this.setState({ error: null }); this.props.onEscape(); }}
+                  className="px-4 py-2 rounded border border-border-strong text-ink-secondary text-sm font-bold hover:text-ink-primary"
+                >
+                  返回其他頁面
+                </button>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -1548,7 +1565,10 @@ function App({ initialError = null }) {
         </div>
       );
     }
-    const wrap = (el) => <ErrorBoundary key={page}>{el}</ErrorBoundary>;
+    // SHELL-022: onEscape gives the crashed-page fallback a way to navigate
+    // OFF the current page (see ErrorBoundary above) — pick whichever of
+    // Alerts/Status isn't the page that just crashed, so it's never a no-op.
+    const wrap = (el) => <ErrorBoundary key={page} onEscape={() => setPage(page === 'alerts' ? 'status' : 'alerts')}>{el}</ErrorBoundary>;
     switch (page) {
       case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
