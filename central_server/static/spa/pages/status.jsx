@@ -557,6 +557,12 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                               })
                               .catch(err => setToast({ tone: 'error', msg: err.message || '撤銷失敗' }));
                           }}
+                          // OPS-005: the row (role="button") preventDefault()s
+                          // Enter/Space to select the node; without stopping the
+                          // keydown here it would swallow this button's own
+                          // activation, so a keyboard operator could never rotate
+                          // the key. Mirrors the 刪除 button just below.
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
                           className="w-8 h-8 rounded text-ink-muted hover:text-sev-warn hover:bg-sev-warn/10 transition-colors text-xs disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           🔑

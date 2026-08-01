@@ -207,6 +207,23 @@ function formatDurationShort(seconds) {
   return `${Math.round(s / 86400)}天`;
 }
 
+// FLOW-001: the dashboard used a single toast slot, so a burst of messages
+// overwrote an action-critical failure toast ('認領失敗'/'解決失敗', tone 'warn')
+// in under a second — the operator walked away believing an ack landed when it
+// had failed. Toasts now stack; this pure reducer appends one and enforces the
+// cap. Eviction preferentially drops the OLDEST NON-critical toast so failures
+// survive contention, only falling back to the oldest overall when the whole
+// stack is critical. Kept pure (no React) so the policy is unit-testable.
+const _toastIsCritical = (t) => !!t && (t.tone === 'warn' || t.tone === 'error');
+
+function nextToasts(list, toast, max = 4) {
+  const next = (list || []).concat([toast]);
+  if (next.length <= max) return next;
+  const dropIdx = next.findIndex((t) => !_toastIsCritical(t));
+  next.splice(dropIdx === -1 ? 0 : dropIdx, 1);
+  return next;
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
   fmtAge, ageColor, sevMeta, alertTypeMap,
@@ -217,3 +234,4 @@ window.alertTypeLabel = alertTypeLabel;
 window.nodeStatusTone = nodeStatusTone;
 window.Z_LAYER = Z_LAYER;
 window.formatDurationShort = formatDurationShort;
+window.nextToasts = nextToasts;

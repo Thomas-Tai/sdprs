@@ -1193,10 +1193,111 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------- OPS-005: revoke (🔑) key must be keyboard --
+// The revoke button sits inside a role="button" <tr> whose onKeyDown
+// preventDefault()s Enter/Space to trigger a row-select. Without its own
+// keydown-stopPropagation, a keyboard operator's Enter on 🔑 is swallowed by
+// the row (selection fires; the button never activates) — so credentials can
+// never be rotated from the keyboard. The sibling 刪除 button already does this.
+const TEST_OPS_KEYBOARD_REVOKE = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    window.SDPRS_API = { revokeWebcamKey: () => Promise.resolve({ api_key: 'sk-OPS005' }) };
+    const webcamNode = { id: 'webcam_ab12', clientId: 'webcam_c11e', name: '櫃台電腦', location: '大堂', type: 'webcam', status: 'online', snoozeMin: 0 };
+    let selectCalls = 0;
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [webcamNode],
+      onSelectNode: () => { selectCalls++; },
+      onRefresh: () => {},
+    })));
+    await settle();
+
+    const revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
+    A('OPS-005 revoke (key) button present', !!revokeBtn);
+
+    // Keyboard operator focuses 🔑 and presses Enter. Pre-fix the keydown
+    // bubbles to the row's onKeyDown, which preventDefault()s it and fires a
+    // row-select instead of the button's own activation.
+    const ev = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    const notCancelled = revokeBtn.dispatchEvent(ev);
+
+    A('OPS-005 Enter on 🔑 does not hijack into a row-select', selectCalls === 0, 'selectCalls=' + selectCalls);
+    A('OPS-005 Enter on 🔑 is not preventDefaulted by the row', notCancelled === true && ev.defaultPrevented === false);
+  } catch (e) {
+    results.push({ name: 'OPS-005 revoke-keyboard suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// --------------------------------- FLOW-001: toast queue policy (pure) -------
+// A single-slot toast overwrote an action-critical failure ('認領失敗', tone
+// 'warn') within <1s of any later info toast. nextToasts() stacks instead, and
+// under cap pressure evicts the OLDEST NON-critical toast first so failure
+// toasts survive a burst.
+const TEST_FLOW_TOAST_QUEUE = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const nt = window.nextToasts;
+    A('FLOW-001 nextToasts helper exists', typeof nt === 'function');
+    const afterBurst = nt([{ id: 1, tone: 'warn', message: '認領失敗' }], { id: 2, tone: 'info', message: '已套用模板' }, 4);
+    A('FLOW-001 burst stacks both toasts', afterBurst.length === 2);
+    A('FLOW-001 the critical failure toast survives the burst', afterBurst.some(t => t.message === '認領失敗'));
+    let list = [];
+    for (const m of ['a','b','c']) list = nt(list, { id: 'i'+m, tone: 'info', message: m }, 4);
+    list = nt(list, { id: 'w1', tone: 'warn', message: '解決失敗' }, 4);
+    list = nt(list, { id: 'i5', tone: 'info', message: 'e' }, 4);
+    A('FLOW-001 stack is capped at max', list.length === 4);
+    A('FLOW-001 oldest non-critical evicted first (a gone)', !list.some(t => t.message === 'a'));
+    A('FLOW-001 critical preserved under cap pressure', list.some(t => t.message === '解決失敗'));
+    let crit = [];
+    for (const m of ['w1','w2','w3','w4']) crit = nt(crit, { id: m, tone: 'warn', message: m }, 4);
+    crit = nt(crit, { id: 'w5', tone: 'warn', message: 'w5' }, 4);
+    A('FLOW-001 all-critical still capped', crit.length === 4);
+    A('FLOW-001 all-critical drops the oldest (w1 gone)', !crit.some(t => t.message === 'w1'));
+  } catch (e) {
+    results.push({ name: 'FLOW-001 toast-queue suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
+// --------------------------------- FLOW-001: ToastStack render + dismiss ------
+const TEST_FLOW_TOAST_STACK = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const dismissed = [];
+    const toasts = [
+      { id: 1, tone: 'warn', message: '認領失敗' },
+      { id: 2, tone: 'info', message: '已套用模板' },
+      { id: 3, tone: 'ok', message: '警報已解決' },
+    ];
+    ReactDOM.flushSync(() => root.render(React.createElement(window.ToastStack, { toasts, onDismiss: (id) => dismissed.push(id) })));
+    await settle();
+    A('FLOW-001 all stacked toasts render', ['認領失敗','已套用模板','警報已解決'].every(m => container.textContent.indexOf(m) !== -1));
+    const items = Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('已套用模板') !== -1);
+    A('FLOW-001 toast is a click target', items.length === 1);
+    click(items[0]); await settle();
+    A('FLOW-001 clicking a toast dismisses it by id', dismissed.length === 1 && dismissed[0] === 2, JSON.stringify(dismissed));
+    const live = container.querySelector('.sr-only-live');
+    A('FLOW-001 aria-live announces the newest toast', !!live && live.textContent.indexOf('警報已解決') !== -1);
+  } catch (e) {
+    results.push({ name: 'FLOW-001 toast-stack suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 const SUITES = [
   { name: 'DATA-001 honest snooze chip  data.jsx',  deps: ['icons.jsx'], target: 'data.jsx', test: TEST_DATA_SNOOZE_LABEL },
+  { name: 'FLOW-001 toast queue policy   data.jsx', deps: ['icons.jsx'], target: 'data.jsx', test: TEST_FLOW_TOAST_QUEUE },
+  { name: 'FLOW-001 toast stack render   components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_FLOW_TOAST_STACK },
   { name: 'AUTH-001 logout POST         components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_AUTH_LOGOUT },
   { name: 'OPS-001 key backdrop guard   status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_KEY_BACKDROP },
+  { name: 'OPS-005 revoke key keyboard   status.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_OPS_KEYBOARD_REVOKE },
   { name: 'MSP-F6 / MSP-F5 / API-F9   pumps.jsx',    deps: ['icons.jsx', 'data.jsx'], target: 'pages/pumps.jsx', test: TEST_PUMPS },
   { name: 'MSP-F7                      status.jsx',   deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS },
   { name: 'Task 6                      status.jsx (webcam admin)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM },

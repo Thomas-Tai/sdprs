@@ -2327,8 +2327,50 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
   );
 };
 
+// FLOW-001: renders the toast STACK (was a single overwrite slot). Newest at
+// the bottom (flex-col-reverse); each toast is an accessible <button> so it can
+// be dismissed by click or keyboard. A single aria-live region announces the
+// newest message (assertive for failures, polite otherwise), preserving the
+// prior screen-reader behaviour without shouting every stacked item.
+const ToastStack = ({ toasts, onDismiss }) => {
+  const list = toasts || [];
+  const newest = list.length ? list[list.length - 1] : null;
+  const iconFor = (tone) =>
+    tone === 'ok' ? <window.Icon.CheckCircle size={16} className="text-sev-ok"/>
+    : tone === 'warn' ? <window.Icon.AlertCircle size={16} className="text-sev-warn"/>
+    : <window.Icon.Info size={16} className="text-sev-info"/>;
+  return (
+    <React.Fragment>
+      <div
+        aria-live={newest && newest.tone === 'warn' ? 'assertive' : 'polite'}
+        aria-atomic="true"
+        role={newest && newest.tone === 'warn' ? 'alert' : 'status'}
+        className="sr-only-live"
+      >
+        {(newest && newest.message) || ''}
+      </div>
+      <div className="fixed bottom-14 right-4 z-50 flex flex-col-reverse gap-2 items-end" aria-hidden="true">
+        {list.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            title="點擊關閉"
+            onClick={() => onDismiss && onDismiss(t.id)}
+            className={`animate-in text-left bg-surface-overlay border rounded-lg px-3 py-2 shadow-2xl flex items-center gap-2 text-sm ${
+              t.tone === 'ok' ? 'border-sev-ok/50' : t.tone === 'warn' ? 'border-sev-warn/50' : 'border-sev-info/50'
+            }`}
+          >
+            {iconFor(t.tone)}
+            <span>{t.message}</span>
+          </button>
+        ))}
+      </div>
+    </React.Fragment>
+  );
+};
+
 Object.assign(window, {
   OperatorsCluster, StaleAckPill, NewAlertBanner, ShiftBanner,
   CommandPalette, NodeSidePanel, VolumeSlider,
-  HlsPlayer,
+  HlsPlayer, ToastStack,
 });

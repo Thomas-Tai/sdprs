@@ -279,7 +279,7 @@ function App({ initialError = null }) {
       for (const id of Array.from(flashed)) if (!live.has(id)) flashed.delete(id);
     }
   }, [alerts]);
-  const [toast, setToast] = useStateA(null);
+  const [toasts, setToasts] = useStateA([]);
   // Partial data-load failures — populated when loadInitial() or refreshLive()
   // has some (but not all) loaders reject. Drives the warning banner below the
   // status strip so the operator knows which feeds are stale or unavailable.
@@ -289,7 +289,11 @@ function App({ initialError = null }) {
   // Refs used by callbacks below (declared here so JSX/hooks can reference
   // them). See setPage/goBack for the history flow, showToast for the timer,
   // and the wallMode-aware keyboard handler for the ref-based skip guard.
-  const toastTimerRef = useRefA(null);
+  // FLOW-001: per-toast auto-hide timers keyed by id (was a single timer for a
+  // single slot), plus a monotonic id source so two toasts fired in the same ms
+  // never collide on Date.now().
+  const toastTimersRef = useRefA({});
+  const toastSeqRef = useRefA(0);
   const prevPageRef = useRefA('alerts');
   const skipNextHistoryPushRef = useRefA(false);
   const pageHistoryRef = useRefA([]);
@@ -483,15 +487,23 @@ function App({ initialError = null }) {
     return () => clearInterval(id);
   }, [unackCount, muteState.global, tweaks.muted]);
 
+  const dismissToast = useCallbackA((id) => {
+    setToasts((list) => list.filter((t) => t.id !== id));
+    const timers = toastTimersRef.current;
+    if (timers[id]) { clearTimeout(timers[id]); delete timers[id]; }
+  }, []);
+
   const showToast = useCallbackA((message, tone = 'info') => {
-    setToast({ message, tone, id: Date.now() });
-    // Cancel any in-flight auto-hide so a rapid second toast isn't wiped
-    // by the first one's expiring timer.
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => {
-      setToast(null);
-      toastTimerRef.current = null;
-    }, 3000);
+    // FLOW-001: stack instead of overwrite (see data.jsx nextToasts). Each
+    // toast auto-hides on its OWN timer so a later toast never wipes an
+    // earlier one; action-critical failures ('warn'/'error') linger longer.
+    const id = (toastSeqRef.current += 1);
+    setToasts((list) => window.nextToasts(list, { id, message, tone }, 4));
+    const ttl = (tone === 'warn' || tone === 'error') ? 6000 : 3000;
+    toastTimersRef.current[id] = setTimeout(() => {
+      setToasts((list) => list.filter((t) => t.id !== id));
+      delete toastTimersRef.current[id];
+    }, ttl);
   }, []);
 
   // --- Live-refresh coalescing + in-flight guard ----------------------------
@@ -1613,24 +1625,7 @@ function App({ initialError = null }) {
 
       {/* Toast — a11y: polite for info/ok, assertive for warn.
           role="status" + aria-live announce silently to screen readers. */}
-      <div
-        aria-live={toast?.tone === 'warn' ? 'assertive' : 'polite'}
-        aria-atomic="true"
-        role={toast?.tone === 'warn' ? 'alert' : 'status'}
-        className="sr-only-live"
-      >
-        {toast?.message || ''}
-      </div>
-      {toast && (
-        <div className="fixed bottom-14 right-4 z-50 animate-in" aria-hidden="true">
-          <div className={`bg-surface-overlay border rounded-lg px-3 py-2 shadow-2xl flex items-center gap-2 text-sm ${
-            toast.tone === 'ok' ? 'border-sev-ok/50' : toast.tone === 'warn' ? 'border-sev-warn/50' : 'border-sev-info/50'
-          }`}>
-            {toast.tone === 'ok' ? <Icon.CheckCircle size={16} className="text-sev-ok"/> : toast.tone === 'warn' ? <Icon.AlertCircle size={16} className="text-sev-warn"/> : <Icon.Info size={16} className="text-sev-info"/>}
-            <span>{toast.message}</span>
-          </div>
-        </div>
-      )}
+      <window.ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       {/* Tweaks panel */}
       <window.TweaksPanel>
