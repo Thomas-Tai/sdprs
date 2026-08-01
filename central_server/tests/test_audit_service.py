@@ -170,5 +170,49 @@ def test_list_actions_since_filter_matches_current_timestamp_format(sqlite_conn,
     )
 
 
+def test_snooze_provenance_coerces_pg_datetime_to_iso_string(monkeypatch):
+    """NEW-API-001 regression pin.
+
+    On the PostgreSQL backend, SQLAlchemy hands back
+    operator_actions.timestamp (a real TIMESTAMP column) as a Python
+    `datetime` object — SQLite returns a str, which is why dev/tests never
+    hit this. get_snooze_provenance() stored that value into "at" raw, so a
+    PG-backed deployment fed a datetime straight into
+    NodeStatus.snoozed_at (typed Optional[str]); Pydantic v2 does not coerce
+    datetime -> str, so model construction raised ValidationError and
+    GET /api/nodes returned 500 for the WHOLE list as soon as any node was
+    snoozed.
+
+    Pin: simulate the PG path by monkeypatching get_backend() to
+    "postgresql" and _pg_snooze_provenance_sync() to return a row whose
+    timestamp is a datetime object. get_snooze_provenance() must coerce it
+    to an ISO string at the source, honoring its own
+    Dict[str, Dict[str, str]] annotation.
+    """
+    from datetime import datetime
+
+    import central_server.services.audit_service as audit_service_module
+
+    ts = datetime(2026, 7, 30, 12, 0, 0)
+
+    monkeypatch.setattr(audit_service_module, "get_backend", lambda: "postgresql")
+    monkeypatch.setattr(
+        audit_service_module,
+        "_pg_snooze_provenance_sync",
+        lambda node_ids: [{"operator": "alice", "target_id": "abc", "timestamp": ts}],
+    )
+
+    result = get_snooze_provenance(["abc"])
+
+    assert isinstance(result["abc"]["at"], str), (
+        f"Expected an ISO string, got raw {type(result['abc']['at'])!r} — "
+        "this is NEW-API-001: NodeStatus.snoozed_at is Optional[str] and "
+        "Pydantic v2 does not coerce datetime, so this raw value would "
+        "raise ValidationError and 500 the GET /api/nodes list endpoint."
+    )
+    assert result["abc"]["at"] == ts.isoformat()
+    assert result["abc"]["by"] == "alice"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
