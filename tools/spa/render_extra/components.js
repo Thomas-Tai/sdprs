@@ -116,4 +116,71 @@ module.exports = [
         document.activeElement && (document.activeElement.tagName + '.' + document.activeElement.className));
     `,
   },
+  {
+    name: 'COMP-004 HlsPlayer retry budget resets when nodeId changes',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // Minimal hls.js double: a plain constructor function (not an ES class —
+      // this test body is Babel-transformed with the 'react' preset only) that
+      // records every instance so the test can drive its ERROR event by hand.
+      const instances = [];
+      function FakeHls(opts) {
+        this.opts = opts;
+        this.handlers = {};
+        this.destroyed = false;
+        instances.push(this);
+      }
+      FakeHls.isSupported = () => true;
+      FakeHls.Events = { MANIFEST_PARSED: 'hlsManifestParsed', ERROR: 'hlsError' };
+      FakeHls.ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError', OTHER_ERROR: 'otherError' };
+      FakeHls.prototype.loadSource = function (src) { this.src = src; };
+      FakeHls.prototype.attachMedia = function (video) { this.video = video; };
+      FakeHls.prototype.on = function (evt, cb) { this.handlers[evt] = cb; };
+      FakeHls.prototype.trigger = function (evt, data) { if (this.handlers[evt]) this.handlers[evt](evt, data); };
+      FakeHls.prototype.startLoad = function () { this.startLoadCalls = (this.startLoadCalls || 0) + 1; };
+      FakeHls.prototype.recoverMediaError = function () { this.recoverCalls = (this.recoverCalls || 0) + 1; };
+      FakeHls.prototype.destroy = function () { this.destroyed = true; };
+      window.Hls = FakeHls;
+
+      const proto = window.HTMLMediaElement.prototype;
+      const origPlay = proto.play;
+      proto.play = () => Promise.resolve();
+
+      let fellBack = 0;
+      const render = (nodeId) => ReactDOM.flushSync(() => root.render(
+        React.createElement(window.HlsPlayer, { nodeId, onFallback: () => { fellBack++; } })
+      ));
+
+      render('node-a');
+      await settle();
+      A('COMP-004 setup: mounting creates one Hls instance', instances.length === 1, instances.length);
+      const first = instances[0];
+      // Two fatal errors on node-a: under budget (3), no fallback yet.
+      first.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      first.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      await settle();
+      A('COMP-004 setup: 2 fatal errors on node-a do not yet trigger fallback', fellBack === 0, fellBack);
+
+      // Switch to a different node — a brand new stream session. The retry
+      // budget must NOT carry over the 2 strikes already used against node-a.
+      render('node-b');
+      await settle();
+      A('COMP-004 setup: switching nodeId destroys the old hls instance', first.destroyed === true);
+      A('COMP-004 setup: switching nodeId creates a fresh Hls instance', instances.length === 2, instances.length);
+      const second = instances[1];
+
+      fellBack = 0;
+      // Only ONE fatal error on the fresh node-b session — must NOT hit the
+      // fallback threshold (that would only be correct if the budget had
+      // incorrectly carried over node-a's 2 prior strikes).
+      second.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      await settle();
+      A('COMP-004 a fresh node gets a fresh retry budget (1 error does not force permanent fallback)',
+        fellBack === 0, 'fellBack=' + fellBack);
+
+      proto.play = origPlay;
+      delete window.Hls;
+    `,
+  },
 ];

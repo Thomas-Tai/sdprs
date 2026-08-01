@@ -2319,6 +2319,13 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
   React.useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    // COMP-004: retryCount is a ref, so it survives across effect re-runs —
+    // switching to a DIFFERENT node re-runs this effect (dep [nodeId]) but
+    // used to inherit whatever strike count the PREVIOUS node's session had
+    // already accumulated. A camera the operator had just been viewing (2
+    // strikes in) handed the next camera only 1 more error's worth of budget
+    // before a premature permanent fallback. Each node gets its own session.
+    retryCount.current = 0;
     const src = `/api/webcam/${nodeId}/hls/playlist.m3u8`;
 
     // OPS-003: decide the playback path explicitly instead of the old
