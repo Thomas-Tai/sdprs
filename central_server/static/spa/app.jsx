@@ -1244,7 +1244,13 @@ function App({ initialError = null }) {
         // future search-input additions on other pages.
         const el = document.getElementById('global-search')
           || document.querySelector('input[type="text"][placeholder*="搜尋"]');
-        el?.focus();
+        // SHELL-010: no search input exists off the Alerts page, so `el` is
+        // null there and this used to be a silent no-op — the operator
+        // presses "/" on Monitor/Status/etc. and nothing visibly happens,
+        // with no way to tell "not on this page" apart from "shortcut is
+        // broken". Tell them explicitly instead.
+        if (!el) { showToast('搜尋僅限警報頁使用', 'info'); return; }
+        el.focus();
         return;
       }
       if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(true); return; }
