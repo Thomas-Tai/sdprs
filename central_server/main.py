@@ -537,11 +537,21 @@ async def login(request: Request):
         # defeat the purpose of persisting them.
         from .services.audit_service import log_action, ACTION_LOGIN_LOCKED
         log_action(username or "<empty>", ACTION_LOGIN_LOCKED, target_id=ip)
+        # AUTH-006: tell the operator HOW LONG to wait instead of a bare "try
+        # later" (which just invites form-hammering that refreshes nothing). The
+        # lock lifts once enough of the oldest in-window failures age out that
+        # fewer than max_attempts remain — the earliest such expiry is when
+        # recent_sorted[len - max_attempts] passes `window`.
+        from math import ceil
+        recent_sorted = sorted(recent)
+        unlock_at = recent_sorted[len(recent_sorted) - max_attempts] + window
+        retry_after = max(1, ceil(unlock_at - now))
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "嘗試次數過多，請稍後再試", "next": next_param},
+            {"error": f"嘗試次數過多，請於 {retry_after} 秒後再試", "next": next_param},
             status_code=429,
+            headers={"Retry-After": str(retry_after)},
         )
 
     if authenticate_user(username, password):
