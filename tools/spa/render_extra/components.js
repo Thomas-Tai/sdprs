@@ -611,4 +611,26 @@ module.exports = [
       document.body.removeChild(outside);
     `,
   },
+  {
+    name: 'COMP-021 TweaksPanel z-index sits below the logout confirmation modal (z-[80])',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweaksPanel, { title: '設定' },
+        React.createElement('div', null, 'content'))));
+      await settle();
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: '__activate_edit_mode' }, origin: window.location.origin,
+      }));
+      await settle();
+      const panel = container.querySelector('.twk-panel');
+      A('COMP-021 setup: the open panel renders', !!panel);
+      // The real <style>{__TWEAKS_STYLE}</style> tag is mounted for real, so
+      // getComputedStyle reflects the ACTUAL applied z-index, not a Tailwind
+      // utility class (which needs the Play CDN JIT this test harness does
+      // not run).
+      const z = parseInt(window.getComputedStyle(panel).zIndex, 10);
+      A('COMP-021 TweaksPanel z-index is below the logout modal (components.jsx z-[80])', z < 80, z);
+    `,
+  },
 ];

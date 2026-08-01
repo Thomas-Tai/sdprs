@@ -46,8 +46,16 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
+// COMP-021: z-index was 90 for both the open panel and its closed trigger —
+// higher than every overlay in components.jsx, including the logout
+// confirmation dialog (z-[80]). A settings widget floating on top of a
+// destructive confirm dialog could visually obscure/intercept clicks meant
+// for it. 45 sits above the persistent chrome (Footer z-30, StatusStrip
+// z-40) but below every modal/drawer in the app (MuteDrawer/NodeSidePanel
+// z-50 up through the logout dialog's z-80), so no app overlay can ever be
+// covered by it.
 const __TWEAKS_STYLE = `
-  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:90;width:280px;
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:45;width:280px;
     max-height:calc(100vh - 32px);display:flex;flex-direction:column;
     transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
     background:rgba(250,249,247,.78);color:#29261b;
@@ -194,7 +202,7 @@ const __TWEAKS_STYLE = `
 // only ever mounted when the panel is closed, whereas __TWEAKS_STYLE is
 // only mounted when open, so the two never need to coexist.
 const __TWEAKS_TRIGGER_STYLE = `
-  .twk-trigger{position:fixed;right:16px;bottom:16px;z-index:90;
+  .twk-trigger{position:fixed;right:16px;bottom:16px;z-index:45;
     width:36px;height:36px;border-radius:50%;
     display:flex;align-items:center;justify-content:center;
     appearance:none;cursor:default;
