@@ -1644,7 +1644,9 @@ function App({ initialError = null }) {
           <span>
             {dataWarnings.map(k => _FAILURE_LABELS[k] || k).join('、')} 無法載入 — 顯示快取資料
           </span>
-          <button onClick={() => setDataWarnings([])} className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
+          {/* SHELL-012: this glyph-only button had no accessible name — a
+              screen-reader user heard nothing but "button". */}
+          <button onClick={() => setDataWarnings([])} aria-label="關閉此警示" className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
         </div>
       )}
       {/* SHELL-003: #root (styles.css, CMP-F18) migrated to 100dvh so the
