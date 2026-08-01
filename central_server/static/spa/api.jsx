@@ -352,10 +352,10 @@
       mac: n.mac || null,
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
-             : ss.bitrate != null ? ss.bitrate : 0,
+             : ss.bitrate != null ? ss.bitrate : null,
       drops: ss.dropped_frames != null ? ss.dropped_frames
            : ss.dropped != null ? ss.dropped
-           : ss.drops != null ? ss.drops : 0,
+           : ss.drops != null ? ss.drops : null,
       level, // null = sensor down / no reading (was previously coerced to 0 → misleading)
       // MSP-F1 fix: the actual reported pump state, distinct from `status`
       // (which is derived from water level / online-ness, not the relay).

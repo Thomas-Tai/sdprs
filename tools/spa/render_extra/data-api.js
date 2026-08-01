@@ -93,6 +93,39 @@ module.exports = [
       A('DATA-011 ageColor(null) is not the calm fresh color', window.ageColor(null) !== 'text-ink-secondary', window.ageColor(null));
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-020 ----
+  {
+    name: 'DATA-020                    api.jsx (bitrate/drops null, not 0)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ${RES_HELPER}
+      // A node whose stream_status carries no bitrate/drops keys must map to
+      // null — a fabricated 0 reads as a measured 0.0Mbps / zero drops.
+      const cam = { node_id: 'CAM-1', node_type: 'camera', status: 'ONLINE',
+        stream_status: { status: 'idle' } };
+      window.fetch = (path) => {
+        if (String(path).indexOf('/api/nodes') === 0) return _res([cam]);
+        return _res([]);
+      };
+      const rl = await window.SDPRS_API.refreshLive();
+      const mapped = (rl.nodes || []).find(n => n.id === 'CAM-1');
+      A('DATA-020 absent bitrate maps to null (not 0)', !!mapped && mapped.bitrate === null, mapped && String(mapped.bitrate));
+      A('DATA-020 absent drops maps to null (not 0)', !!mapped && mapped.drops === null, mapped && String(mapped.drops));
+      // A node that DOES report a bitrate still surfaces the number.
+      const cam2 = { node_id: 'CAM-2', node_type: 'camera', status: 'ONLINE',
+        stream_status: { status: 'live', bitrate_mbps: 2.4, dropped_frames: 3 } };
+      window.fetch = (path) => {
+        if (String(path).indexOf('/api/nodes') === 0) return _res([cam2]);
+        return _res([]);
+      };
+      const rl2 = await window.SDPRS_API.refreshLive();
+      const m2 = (rl2.nodes || []).find(n => n.id === 'CAM-2');
+      A('DATA-020 a reported bitrate_mbps still maps to the number', !!m2 && m2.bitrate === 2.4, m2 && String(m2.bitrate));
+      A('DATA-020 reported dropped_frames still maps to the number', !!m2 && m2.drops === 3, m2 && String(m2.drops));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
