@@ -487,7 +487,12 @@ const useBackdropDismiss = (onClose) => {
 
 // ---------- Status Strip ----------
 
-const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
+// COMP-011: `page` and `setMuted` were accepted here but never read anywhere
+// in this component — `setPage` (a distinct prop) drives navigation, and
+// muting goes through `window.SDPRS_AUDIO.setMuted` / `onOpenMuteDrawer`, not
+// a `setMuted` prop. Dead parameters removed; callers may still pass them
+// (JS ignores extra props) with no behavior change.
+const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShortcuts, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
   const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
   // CMP-F17: the degraded/failed connection states — the two an operator most
