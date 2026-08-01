@@ -65,4 +65,34 @@ module.exports = [
       A('SHELL-004 missing labels map (undefined) still returns a usable message, not a throw', window.describeLoadFailures(['nodes'], undefined).toastMessage.indexOf('nodes') !== -1, window.describeLoadFailures(['nodes'], undefined).toastMessage);
     `,
   },
+
+  // ------------------------------- SHELL-007: RESTORED_STATE.selectedId ----
+  // app.jsx's selectedId useState initializer adopted RESTORED_STATE.selectedId
+  // (decoded straight out of a base64 URL param on the cross-login roundtrip)
+  // with NO check that it names an alert actually in the queue — unlike the
+  // sessionStorage-saved id, which the boot effect already validates via
+  // `.find(a => String(a.id) === saved)` before adopting it. A stale id
+  // (resolved/aged out between the redirect and the next load), a corrupted
+  // blob, or a hand-edited URL therefore selected nothing real. resolveSelectedId
+  // is the single validation both untrusted sources should have gone through.
+  {
+    name: 'SHELL-007                   data.jsx (resolveSelectedId)',
+    target: 'data.jsx',
+    deps: ['icons.jsx'],
+    body: `
+      A('SHELL-007 window.resolveSelectedId is published as a function', typeof window.resolveSelectedId === 'function', typeof window.resolveSelectedId);
+      const alerts = [{ id: 101 }, { id: 202 }, { id: 303 }];
+
+      A('SHELL-007 a restoredId matching a live alert wins', window.resolveSelectedId(202, null, alerts) === 202, window.resolveSelectedId(202, null, alerts));
+      A('SHELL-007 a restoredId matching a live alert wins even as a string/number mismatch', window.resolveSelectedId('202', null, alerts) === 202, window.resolveSelectedId('202', null, alerts));
+      A('SHELL-007 a restoredId NOT among live alerts is rejected, falling through', window.resolveSelectedId(999, null, alerts) === 101, window.resolveSelectedId(999, null, alerts));
+      A('SHELL-007 a savedId matching a live alert wins when no restoredId', window.resolveSelectedId(null, '303', alerts) === 303, window.resolveSelectedId(null, '303', alerts));
+      A('SHELL-007 restoredId takes priority over savedId when both are valid', window.resolveSelectedId(101, '303', alerts) === 101, window.resolveSelectedId(101, '303', alerts));
+      A('SHELL-007 an invalid restoredId falls through to a valid savedId', window.resolveSelectedId(999, '303', alerts) === 303, window.resolveSelectedId(999, '303', alerts));
+      A('SHELL-007 both invalid falls through to the first alert', window.resolveSelectedId(999, '888', alerts) === 101, window.resolveSelectedId(999, '888', alerts));
+      A('SHELL-007 no ids at all falls through to the first alert', window.resolveSelectedId(null, null, alerts) === 101, window.resolveSelectedId(null, null, alerts));
+      A('SHELL-007 an empty alert queue resolves to null, never throws', window.resolveSelectedId(101, null, []) === null, String(window.resolveSelectedId(101, null, [])));
+      A('SHELL-007 a null/undefined alerts array resolves to null, never throws', window.resolveSelectedId(101, null, null) === null, String(window.resolveSelectedId(101, null, null)));
+    `,
+  },
 ];

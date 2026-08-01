@@ -198,10 +198,15 @@ function App({ initialError = null }) {
     try { savedSelectedIdRef.current = sessionStorage.getItem('sdprs.selectedId'); }
     catch (_) { savedSelectedIdRef.current = null; /* sessionStorage unavailable */ }
   }
-  const [selectedId, setSelectedId] = useStateA(() => {
-    if (RESTORED_STATE?.selectedId != null) return RESTORED_STATE.selectedId;
-    return null;
-  });
+  // SHELL-007: RESTORED_STATE.selectedId used to be adopted here directly,
+  // completely unvalidated — unlike the sessionStorage-saved id right above,
+  // which is deliberately deferred to the boot effect specifically so it CAN
+  // be checked against a live alert once data.jsx's window.ALERTS placeholder
+  // is replaced by real data. A stale id (resolved/aged out between the H-1
+  // redirect and the next load), a corrupted blob, or a hand-edited URL was
+  // therefore trusted as-is. Both untrusted sources now defer to the same
+  // resolveSelectedId validation in the boot effect below; this starts null.
+  const [selectedId, setSelectedId] = useStateA(null);
   // LiveClock ref — LiveClockProvider registers its reset function here so
   // runRefresh and onPing can reset the drift counter without App owning the state.
   const resetClockRef = useRefA(() => {});
@@ -1067,18 +1072,15 @@ function App({ initialError = null }) {
         setNodes(window.NODES ?? []);
         setNodeHistory(window.NODE_HISTORY ?? {});
         // Resolve the selection now that there are alerts to resolve against:
-        // an explicit cross-login RESTORED_STATE id wins (already seeded), then
-        // the sessionStorage id captured during first render, then the head of
-        // the queue. Functional update so a selection the operator made while
+        // an explicit cross-login RESTORED_STATE id wins if it names a LIVE
+        // alert, then the sessionStorage id captured during first render if
+        // IT names one, then the head of the queue (SHELL-007:
+        // resolveSelectedId — neither untrusted source is adopted blind
+        // anymore). Functional update so a selection the operator made while
         // the load was in flight is never yanked out from under them.
         setSelectedId(prev => {
           if (prev != null) return prev;
-          const saved = savedSelectedIdRef.current;
-          if (saved != null) {
-            const match = (window.ALERTS ?? []).find(a => String(a.id) === saved);
-            if (match) return match.id;
-          }
-          return window.ALERTS?.[0]?.id ?? null;
+          return window.resolveSelectedId(RESTORED_STATE?.selectedId, savedSelectedIdRef.current, window.ALERTS);
         });
         // B8: auto-open the shift banner when there's meaningful summary data.
         if (window.SHIFT_SUMMARY && window.SHIFT_SUMMARY.alertsHandled > 0) {

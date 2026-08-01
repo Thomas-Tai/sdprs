@@ -319,6 +319,30 @@ function describeLoadFailures(failures, labels) {
   return { warnings: failures.slice(), toastMessage: '部分資料載入失敗: ' + names };
 }
 
+// SHELL-007: app.jsx used to adopt RESTORED_STATE.selectedId (decoded from a
+// base64 URL param on the H-1 cross-login roundtrip) directly into initial
+// state with no check that it names an alert actually in the queue — unlike
+// the sessionStorage-saved id, which WAS already validated against the
+// loaded alerts before being adopted. A stale id (resolved/aged out between
+// the redirect and the next load), a corrupted blob, or a hand-edited URL
+// therefore selected nothing real, with nothing to fall back to. Both
+// untrusted sources now go through this one validation: restoredId wins if
+// it names a live alert, else savedId if IT names one, else the head of the
+// queue. String()-compared since ids cross a URL/sessionStorage boundary and
+// may arrive as strings even when the underlying alert id is numeric.
+function resolveSelectedId(restoredId, savedId, alerts) {
+  const list = Array.isArray(alerts) ? alerts : [];
+  if (restoredId != null) {
+    const match = list.find(a => String(a.id) === String(restoredId));
+    if (match) return match.id;
+  }
+  if (savedId != null) {
+    const match = list.find(a => String(a.id) === String(savedId));
+    if (match) return match.id;
+  }
+  return list.length > 0 ? list[0].id : null;
+}
+
 // WAL-M9: count only unacked (pending) alerts for the wall ticker header.
 function activeAlertCount(alerts) {
   return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
@@ -362,3 +386,4 @@ window.orderWallAlerts = orderWallAlerts;
 window.VALID_PAGES = VALID_PAGES;
 window.sanitizePage = sanitizePage;
 window.describeLoadFailures = describeLoadFailures;
+window.resolveSelectedId = resolveSelectedId;
