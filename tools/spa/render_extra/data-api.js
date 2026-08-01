@@ -264,6 +264,44 @@ module.exports = [
       A('DATA-013 the rejection carries the export status (403)', !!err && err.status === 403, err && String(err && err.status));
     `,
   },
+
+  // --------------------------------------- api.jsx: DATA-014 -----------------
+  {
+    name: 'DATA-014                     api.jsx (pump cycles fail -> null, not 0)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // When the batch /api/pumps/cycles fetch FAILS, every pump must read as
+      // unknown ('—'), not a fabricated 0 that looks like a measured "healthy,
+      // not short-cycling" reading. The failure must also be observable so the
+      // shell can raise a banner.
+      window.fetch = (path) => {
+        const p = String(path);
+        if (p === '/api/nodes') {
+          return Promise.resolve({ ok: true, status: 200,
+            headers: { get: () => 'application/json' },
+            json: () => Promise.resolve([{ node_id: 'pump-1', node_type: 'pump', location: '' }]),
+            text: () => Promise.resolve('') });
+        }
+        if (p.indexOf('/api/pumps/cycles') === 0) {
+          return Promise.resolve({ ok: false, status: 500,
+            headers: { get: () => 'application/json' },
+            json: () => Promise.resolve({ detail: 'boom' }),
+            text: () => Promise.resolve('{}') });
+        }
+        // benign default so the other refreshLive loaders don't throw
+        return Promise.resolve({ ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: () => Promise.resolve([]), text: () => Promise.resolve('') });
+      };
+      const rl = await window.SDPRS_API.refreshLive();
+      const nodes = rl.nodes || [];
+      const pump = nodes.find((n) => n.id === 'pump-1');
+      A('DATA-014 the pump is present in the refreshed nodes', !!pump, JSON.stringify(nodes.map((n) => n.id)));
+      A('DATA-014 failed cycles fetch renders cycles null (unknown), not 0', pump && pump.cycles === null, pump && String(pump.cycles));
+      A('DATA-014 the cycles failure is observable on the node list', nodes.pumpCyclesFailed === true, String(nodes.pumpCyclesFailed));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use

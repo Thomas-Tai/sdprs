@@ -413,7 +413,7 @@
       // pages CAN switch off their own hardcoded >20/>15 magic numbers
       // (which silently drift if PUMP_CYCLE_ALERT_THRESHOLD ever changes)
       // without recomputing anything client-side.
-      cycles: (n._cycles && n._cycles.count != null) ? n._cycles.count : 0,
+      cycles: n._cyclesUnknown ? null : ((n._cycles && n._cycles.count != null) ? n._cycles.count : 0),
       cyclesAlert: !!(n._cycles && n._cycles.alert),
       cycleHistory: null,
       raining: n.raining,
@@ -576,27 +576,39 @@
     const rows = await apiFetch('/api/nodes');
     const list = Array.isArray(rows) ? rows : (rows.nodes || []);
     const pumps = list.filter((n) => n.node_type === 'pump');
+    let pumpCyclesFailed = false;
     if (pumps.length) {
       // One batch call for every pump's cycle-count instead of one request per
-      // pump (was N+1). Degrades gracefully to all-zeros if the endpoint is
-      // missing (older server 404s) or errors.
+      // pump (was N+1).
       let cycles = {};
       try {
         const resp = await apiFetch('/api/pumps/cycles?window=1h');
         cycles = (resp && resp.nodes) || {};
-      } catch (e) { cycles = {}; }
+      } catch (e) { cycles = {}; pumpCyclesFailed = true; }
       pumps.forEach((n) => {
         const c = cycles[n.node_id];
-        // API-F9 fix: was `n._cycles = c.count` — kept only the raw count and
-        // threw away `c.alert` (computed server-side at nodes.py:704 against
-        // PUMP_CYCLE_ALERT_THRESHOLD), so the server's alert verdict never
-        // reached the UI at all. Carry the whole {count, alert} object
-        // through; mapNode splits it back into `cycles` (number, unchanged
-        // contract) + `cyclesAlert` (new, boolean).
-        n._cycles = c || { count: 0, alert: false };
+        // DATA-014: the old code degraded a FAILED batch fetch to all-zeros, so
+        // every pump read as a measured "0 cycles this hour" — a fabricated
+        // healthy value that hides short-cycling. When the fetch failed we don't
+        // KNOW the count, so mark it unknown → mapNode renders '—'. (A pump
+        // merely absent from a SUCCESSFUL response is a genuine 0 and stays 0.)
+        if (pumpCyclesFailed) {
+          n._cyclesUnknown = true;
+          n._cycles = null;
+        } else {
+          // API-F9 fix: carry the whole {count, alert} object through (not just
+          // the raw count) so the server's threshold verdict (nodes.py:704)
+          // reaches the UI; mapNode splits it into `cycles` + `cyclesAlert`.
+          n._cycles = c || { count: 0, alert: false };
+        }
       });
     }
-    return list.map(mapNode);
+    const mapped = list.map(mapNode);
+    // DATA-014: ride the failure flag on the returned array (mirrors
+    // loadAlerts.truncated) so the shell can raise a "泵啟動次數暫時無法取得"
+    // banner instead of silently presenting every pump at 0.
+    mapped.pumpCyclesFailed = pumpCyclesFailed;
+    return mapped;
   }
 
   // ALR-M7 fix: the backend silently caps this list at LIMIT (oldest/
