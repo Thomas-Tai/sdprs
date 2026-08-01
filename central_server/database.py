@@ -1042,6 +1042,13 @@ def get_pump_readings_multi(
     TODO): the previous implementation called get_pump_readings once per pump
     node. This helper issues a single SELECT and groups in Python.
 
+    ``limit`` is PER-PUMP, not global (DATA-027): a single ``ORDER BY node_id …
+    LIMIT`` let a fast-cycling pump early in the ordering consume the whole cap
+    and truncate later pumps to zero readings, silently undercounting their
+    cycles. A ROW_NUMBER() window partitioned by node_id caps each pump's own
+    oldest ``limit`` readings independently (window functions: SQLite >= 3.25,
+    always in PostgreSQL).
+
     Return shape: ``{node_id: [{timestamp, water_level, pump_state, raining,
     sensor_conflict}, ...], ...}``. Missing nodes are ABSENT from the dict;
     callers should treat ``dict.get(nid, [])`` as "no readings in window".
@@ -1052,10 +1059,11 @@ def get_pump_readings_multi(
         return {}
     if _backend == "postgresql":
         rows = _pg_fetch_many_sync(
-            "SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict "
-            "FROM pump_readings WHERE node_id = ANY(:ids) "
-            "AND timestamp BETWEEN :s AND :e "
-            "ORDER BY node_id, timestamp ASC LIMIT :lim",
+            "SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict FROM ("
+            "  SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict, "
+            "         ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY timestamp ASC) AS rn "
+            "  FROM pump_readings WHERE node_id = ANY(:ids) AND timestamp BETWEEN :s AND :e"
+            ") sub WHERE rn <= :lim ORDER BY node_id, timestamp ASC",
             {"ids": list(node_ids), "s": start, "e": end, "lim": limit},
         )
     else:
@@ -1063,10 +1071,11 @@ def get_pump_readings_multi(
         cursor = db.cursor()
         placeholders = ",".join("?" for _ in node_ids)
         cursor.execute(
-            f"SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict "
-            f"FROM pump_readings WHERE node_id IN ({placeholders}) "
-            f"AND timestamp BETWEEN ? AND ? "
-            f"ORDER BY node_id, timestamp ASC LIMIT ?",
+            f"SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict FROM ("
+            f"  SELECT node_id, timestamp, water_level, pump_state, raining, sensor_conflict, "
+            f"         ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY timestamp ASC) AS rn "
+            f"  FROM pump_readings WHERE node_id IN ({placeholders}) AND timestamp BETWEEN ? AND ?"
+            f") sub WHERE rn <= ? ORDER BY node_id, timestamp ASC",
             (*node_ids, start, end, limit),
         )
         rows = [dict(r) for r in cursor.fetchall()]
