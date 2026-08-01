@@ -152,6 +152,28 @@ module.exports = [
       A('DATA-018 no raw slash from the id leaks into the path', urls.slice(0,4).every(u => u.indexOf('webcam/a b') === -1 && u.indexOf('webcam/a%20b') === -1 || u.indexOf(enc) !== -1), JSON.stringify(urls));
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-025 ----
+  {
+    name: 'DATA-025                    api.jsx (guarded success JSON parse)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // A 200 whose body fails to parse must reject with an error that still
+      // carries .status — a bare SyntaxError gives callers nothing to branch on.
+      window.fetch = () => Promise.resolve({
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: () => Promise.reject(new SyntaxError('Unexpected token')),
+        text: () => Promise.resolve('not json'),
+      });
+      let err = null;
+      try { await window.SDPRS_API.extendSession(); } catch (e) { err = e; }
+      A('DATA-025 a failed success-path JSON parse rejects', !!err);
+      A('DATA-025 the rejection carries a numeric .status', !!err && typeof err.status === 'number', err && String(err.status));
+      A('DATA-025 the rejection is not the raw SyntaxError', !!err && err.name !== 'SyntaxError', err && err.name);
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use

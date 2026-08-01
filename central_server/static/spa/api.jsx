@@ -104,7 +104,14 @@
     }
     if (res.status === 204) return null;
     const ct = res.headers.get('content-type') || '';
-    return ct.includes('application/json') ? res.json() : res.text();
+    if (ct.includes('application/json')) {
+      return res.json().catch((e) => {
+        const err = new Error('invalid JSON on ' + path + ': ' + (e && e.message ? e.message : 'parse error'));
+        err.status = res.status;
+        throw err;
+      });
+    }
+    return res.text();
   }
 
   const jsonBody = (method, obj) => ({
