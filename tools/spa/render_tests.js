@@ -994,6 +994,54 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------------------------- COMP-001: TweakRadio keyboard access --
+// The 主題/密度 segmented control was operable only by pointer (track
+// onPointerDown). Keyboard users need: each option is a real activatable radio
+// (onClick), roving tabindex (only the selected option is a tab stop), and
+// arrow-key navigation that moves selection.
+const TEST_TWEAKS_RADIO = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const changes = [];
+    const opts = [{ value: 'dark', label: '深色' }, { value: 'light', label: '淺色' }];
+    const render = (val) => ReactDOM.flushSync(() => root.render(React.createElement(TweakRadio, { label: '主題', value: val, options: opts, onChange: (v) => changes.push(v) })));
+
+    render('dark');
+    let btns = Array.from(container.querySelectorAll('button[role="radio"]'));
+    A('COMP-001 one radio button per option', btns.length === 2, btns.length);
+    A('COMP-001 selected option is aria-checked', btns[0].getAttribute('aria-checked') === 'true');
+    A('COMP-001 selected option is the tab stop (tabindex 0)', btns[0].tabIndex === 0, btns[0].tabIndex);
+    A('COMP-001 unselected option is out of tab order (tabindex -1)', btns[1].tabIndex === -1, btns[1].tabIndex);
+
+    // Enter/Space on a focused option dispatches a click -> must select it.
+    changes.length = 0;
+    click(btns[1]);
+    await settle();
+    A('COMP-001 activating an option commits onChange(value)', changes.indexOf('light') !== -1, JSON.stringify(changes));
+
+    // ArrowRight selects the next option.
+    changes.length = 0;
+    render('dark');
+    btns = Array.from(container.querySelectorAll('button[role="radio"]'));
+    btns[0].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await settle();
+    A('COMP-001 ArrowRight selects the next option', changes.indexOf('light') !== -1, JSON.stringify(changes));
+
+    // ArrowLeft selects the previous option.
+    changes.length = 0;
+    render('light');
+    btns = Array.from(container.querySelectorAll('button[role="radio"]'));
+    btns[1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    await settle();
+    A('COMP-001 ArrowLeft selects the previous option', changes.indexOf('dark') !== -1, JSON.stringify(changes));
+  } catch (e) {
+    results.push({ name: 'COMP-001 tweaks-radio suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // -------------------------------------------------- api.jsx: public surface --
 // api.jsx is a self-contained IIFE that publishes window.SDPRS_API at eval, so
 // loading it as a target (no deps) lets us assert the exported method surface
@@ -1162,6 +1210,7 @@ const SUITES = [
   { name: 'Live refresh                components.jsx (snapshot 1fps)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_LIVE_REFRESH },
   { name: 'WHA-M8                      handover.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/handover.jsx', test: TEST_HANDOVER },
   { name: 'WHA-L8                      tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS },
+  { name: 'COMP-001 radio keyboard     tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS_RADIO },
   { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },
 ];
 

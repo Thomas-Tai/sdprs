@@ -479,8 +479,23 @@ async def login_page(request: Request):
     """Login page. Preserves `?next=` into a hidden form input so the POST
     round-trip carries it back. Jinja auto-escapes the value in the
     rendered HTML; open-redirect validation is enforced at POST time via
-    `_safe_next_path` — GET-time echo is not a trust boundary."""
+    `_safe_next_path` — GET-time echo is not a trust boundary.
+
+    AUTH-004: an already-authenticated (and non-expired, per SEC-001) session
+    hitting GET /login is bounced to the dashboard instead of being shown the
+    form again. The redirect target honors a safe `?next=` via _safe_next_path
+    (no open redirect) and falls back to `/`, guarding against a /login loop.
+    """
     next_param = request.query_params.get("next", "")
+
+    from .auth import _session_expired
+    if request.session.get("user") and not _session_expired(request):
+        target = _safe_next_path(next_param)
+        # Never redirect back to the login form itself (avoids a loop).
+        if target.split("?", 1)[0] == "/login":
+            target = "/"
+        return RedirectResponse(url=target, status_code=303)
+
     return templates.TemplateResponse(request, "login.html", {"next": next_param})
 
 

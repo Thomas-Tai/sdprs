@@ -10,6 +10,14 @@ and closes with 1008 — without inventing a new WS message type.
 Had zero coverage. These drive the loop directly with the interval patched
 to 0 so it runs instantly, using asyncio.run inside sync tests (the idiom in
 test_ws_broadcast.py).
+
+AUTH-002 (2026-07-26): the loop's stay-open decision moved from
+``_get_session_user`` (a truthy-forever check on the frozen connect-time
+scope) to ``_ws_session_still_valid``, which also enforces the SEC-001
+absolute 24h cap. The loop-driving tests below monkeypatch that new decision
+function — the seam the loop actually consults — instead of the old user
+lookup (which the loop no longer calls). ``_ws_session_still_valid`` has its
+own direct coverage in test_auth_highs_auth002_auth004.py.
 """
 import sys
 from pathlib import Path
@@ -49,7 +57,7 @@ def test_get_session_user_reads_scope_session():
 
 def test_loop_closes_and_sends_auth_expired_on_invalid_session(monkeypatch):
     monkeypatch.setattr(ws_svc, "SESSION_REVALIDATION_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(ws_svc, "_get_session_user", lambda ws: None)
+    monkeypatch.setattr(ws_svc, "_ws_session_still_valid", lambda session: False)
     ws = FakeWS({})
 
     asyncio.run(ws_svc._session_revalidation_loop(ws))
@@ -61,9 +69,9 @@ def test_loop_closes_and_sends_auth_expired_on_invalid_session(monkeypatch):
 
 def test_loop_continues_while_valid_then_closes_when_it_lapses(monkeypatch):
     monkeypatch.setattr(ws_svc, "SESSION_REVALIDATION_INTERVAL_SECONDS", 0)
-    # Valid for two checks, then the session lapses.
-    seq = iter(["alice", "alice", None])
-    monkeypatch.setattr(ws_svc, "_get_session_user", lambda ws: next(seq))
+    # Valid for two checks, then the session lapses (e.g. crosses the 24h cap).
+    seq = iter([True, True, False])
+    monkeypatch.setattr(ws_svc, "_ws_session_still_valid", lambda session: next(seq))
     ws = FakeWS({})
 
     asyncio.run(ws_svc._session_revalidation_loop(ws))
@@ -78,15 +86,15 @@ def test_valid_session_does_not_close_within_the_checks(monkeypatch):
     Bounded by a finite sequence so the otherwise-infinite loop terminates
     via StopIteration rather than hanging the test."""
     monkeypatch.setattr(ws_svc, "SESSION_REVALIDATION_INTERVAL_SECONDS", 0)
-    seq = iter(["alice"] * 5)
+    seq = iter([True] * 5)
 
-    def check(ws):
+    def still_valid(session):
         try:
             return next(seq)
         except StopIteration:
             raise _StopLoop  # break the loop without triggering the close path
 
-    monkeypatch.setattr(ws_svc, "_get_session_user", check)
+    monkeypatch.setattr(ws_svc, "_ws_session_still_valid", still_valid)
     ws = FakeWS({})
 
     try:

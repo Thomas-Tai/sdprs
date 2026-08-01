@@ -555,6 +555,33 @@ function TweakRadio({ label, value, options, onChange }) {
     window.addEventListener('pointerup', up);
   };
 
+  // COMP-001: the segmented control was pointer-only — the radios had no
+  // onClick/tabIndex/onKeyDown, so keyboard operators (and screen readers)
+  // could not change 主題/密度 at all. Implement the standard roving-tabindex
+  // radiogroup: only the selected radio is a tab stop; Arrow/Home/End move the
+  // selection AND focus (selection follows focus, per the ARIA radio pattern).
+  const focusRadio = (j) => {
+    const btns = trackRef.current &&
+      trackRef.current.querySelectorAll('button[role="radio"]');
+    if (btns && btns[j]) btns[j].focus();
+  };
+
+  const onKeyDown = (e) => {
+    let j = idx;
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown': j = (idx + 1) % n; break;
+      case 'ArrowLeft':
+      case 'ArrowUp':   j = (idx - 1 + n) % n; break;
+      case 'Home':      j = 0; break;
+      case 'End':       j = n - 1; break;
+      default: return;  // leave Tab/Space/Enter and everything else untouched
+    }
+    e.preventDefault();
+    if (opts[j].value !== value) onChange(opts[j].value);
+    focusRadio(j);  // element order is stable across re-render; focus by index
+  };
+
   return (
     <TweakRow label={label}>
       <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
@@ -562,8 +589,12 @@ function TweakRadio({ label, value, options, onChange }) {
         <div className="twk-seg-thumb"
              style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
                       width: `calc((100% - 4px) / ${n})` }} />
-        {opts.map((o) => (
-          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+        {opts.map((o, i) => (
+          <button key={o.value} type="button" role="radio"
+                  aria-checked={o.value === value}
+                  tabIndex={i === idx ? 0 : -1}
+                  onClick={() => onChange(o.value)}
+                  onKeyDown={onKeyDown}>
             {o.label}
           </button>
         ))}

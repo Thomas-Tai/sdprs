@@ -9,9 +9,12 @@ to all connected dashboard clients.
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from .. import auth
 
 # Configure logging
 logger = logging.getLogger("websocket_service")
@@ -29,17 +32,51 @@ SEND_TIMEOUT_SECONDS = 5.0
 SESSION_REVALIDATION_INTERVAL_SECONDS = 45.0
 
 
+def _get_ws_session(websocket: WebSocket) -> Dict[str, Any]:
+    """Return the session dict backing a WebSocket (empty dict if none).
+
+    NOTE (AUTH-002): Starlette populates ``scope["session"]`` from the cookie
+    once, at the WS handshake, and does NOT re-read the cookie for the life of
+    the connection — so this dict is effectively FROZEN at connect time. That
+    is why the periodic re-validation loop keys off the SEC-001 absolute cap
+    (``login_at`` is a fixed anchor and wall-clock time advances past it), which
+    IS observable on a frozen session; a plain "is there a user?" check is not,
+    because the frozen dict keeps naming the connect-time user forever.
+    """
+    return websocket.scope.get("session") or getattr(websocket, "session", None) or {}
+
+
 def _get_session_user(websocket: WebSocket) -> Optional[str]:
     """
     Extract the authenticated username from a WebSocket's session.
 
     This is the SAME check the connect handler (`websocket_endpoint`) uses
-    to accept/reject a new connection, factored out so the periodic
-    re-validation loop can reuse it verbatim instead of duplicating the
-    session-lookup logic.
+    to accept/reject a new connection.
     """
-    session = websocket.scope.get("session") or getattr(websocket, "session", None) or {}
-    return session.get("user")
+    return _get_ws_session(websocket).get("user")
+
+
+def _ws_session_still_valid(session: Optional[Dict[str, Any]]) -> bool:
+    """AUTH-002: should an already-open socket STAY open?
+
+    "Valid" means the same thing here as at connect time PLUS the SEC-001
+    absolute cap: there must be a user AND the session must not have crossed
+    its 24h ``login_at`` anchor (``auth._session_expired``).
+
+    The connect-time ``scope["session"]`` is frozen (Starlette never re-reads
+    the cookie mid-connection), so a plain "is there a user?" check is truthy
+    forever and can never tear a socket down — that was the no-op bug. The
+    absolute-cap check IS observable on the frozen dict, because ``login_at``
+    is a fixed anchor and wall-clock time advances past it; so this predicate
+    flips to False once the cap is exceeded and the loop finally closes the
+    socket. (A server-side logout of an already-open socket is not observable
+    from a stateless signed cookie and is out of scope for this check.)
+    """
+    if not session or not session.get("user"):
+        return False
+    # auth._session_expired reads request.session.get("login_at"); adapt the
+    # raw session dict to that interface without a real Request/cookie.
+    return not auth._session_expired(SimpleNamespace(session=session))
 
 
 class WebSocketManager:
@@ -211,16 +248,19 @@ async def _session_revalidation_loop(websocket: WebSocket) -> None:
     and so this check can never stall broadcast delivery or message
     dispatch on the main loop.
 
-    Reuses `_get_session_user()` — the exact same session/user lookup the
-    connect handler runs — so "valid" means the same thing at connect time
-    and on every re-check. On failure it mirrors the connect-time rejection
-    path exactly: send the existing `auth_expired` frame, then close with
-    code 1008 (no new WS message type introduced).
+    The stay-open decision is `_ws_session_still_valid()`: a user must be
+    present AND the SEC-001 absolute cap must not be exceeded. Because the
+    WS session scope is frozen at connect time (AUTH-002), a plain user
+    lookup is truthy forever and never tears the socket down; keying off the
+    absolute cap (a fixed `login_at` anchor vs. advancing wall-clock time)
+    makes the re-check actually fire. On failure it mirrors the connect-time
+    rejection path exactly: send the existing `auth_expired` frame, then
+    close with code 1008 (no new WS message type introduced).
     """
     try:
         while True:
             await asyncio.sleep(SESSION_REVALIDATION_INTERVAL_SECONDS)
-            if _get_session_user(websocket):
+            if _ws_session_still_valid(_get_ws_session(websocket)):
                 continue
             logger.warning(
                 "WebSocket session no longer valid on periodic re-check; closing"
