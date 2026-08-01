@@ -1291,6 +1291,13 @@ function App({ initialError = null }) {
             return cur.replace(/\s+$/, '') + '\n' + t;
           });
           showToast(`已套用模板: ${t}`, 'info');
+        } else {
+          // SHELL-009: a deployment with fewer than 6 configured templates
+          // (window.RESOLVE_TEMPLATES trimmed down) left keys past the end
+          // silently swallowed — same class of dead keystroke as the "7" case
+          // right below, which already toasts feedback. Match it here instead
+          // of leaving 4/5/6 unexplained on a shorter template list.
+          showToast('無此模板', 'info');
         }
         return;
       }
