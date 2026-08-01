@@ -723,7 +723,22 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
   // real number, and resync from the external `value` on blur (or whenever
   // it changes from outside, e.g. another control resetting this tweak).
   const [text, setText] = React.useState(() => String(value));
-  React.useEffect(() => { setText(String(value)); }, [value]);
+  // COMP-023: this resync used to run unconditionally on every `value`
+  // change — including the one the CURRENT keystroke itself just caused.
+  // Typing "0" then "5" to build "05" (meaning 5): after "0", onChange(0)
+  // fires and `value` becomes 0, syncing text back to "0" (invisible, no
+  // harm yet); after "5", text is locally "05" and onChange(5) fires —
+  // `value` changes 0 -> 5, so this effect fires AGAIN and stomped the
+  // in-progress "05" back down to "5", visibly deleting the leading zero
+  // the operator just typed. Skip the resync whenever the currently-typed
+  // text ALREADY represents the incoming value — only an externally-driven
+  // change (a different control resetting this tweak, e.g.) should override
+  // what the operator is mid-typing.
+  React.useEffect(() => {
+    const n = Number(text);
+    if (text !== '' && !Number.isNaN(n) && n === value) return;
+    setText(String(value));
+  }, [value]);
   const onScrubStart = (e) => {
     e.preventDefault();
     startRef.current = { x: e.clientX, val: value };
@@ -750,8 +765,14 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
   };
   const onInputBlur = () => {
     const n = Number(text);
-    if (text === '' || Number.isNaN(n)) setText(String(value)); // revert
-    else onChange(clamp(n));
+    if (text === '' || Number.isNaN(n)) { setText(String(value)); return; } // revert
+    const clamped = clamp(n);
+    onChange(clamped);
+    // COMP-023: normalize the display now that editing has ended. The
+    // resync effect above deliberately leaves an in-progress "05"-style
+    // string alone while it still parses to the current value — blur is
+    // the moment to collapse it to the canonical "5" the value actually is.
+    setText(String(clamped));
   };
   return (
     <div className="twk-num">

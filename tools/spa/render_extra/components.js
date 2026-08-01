@@ -675,4 +675,36 @@ module.exports = [
         'right=' + panel.style.right + ' bottom=' + panel.style.bottom);
     `,
   },
+  {
+    name: 'COMP-023 TweakNumber does not snap away a leading zero mid-typing',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // A real controlled-input harness (mirrors how useTweaks feeds a
+      // TweakNumber in the app): the round-trip through the PARENT's value
+      // is exactly what re-syncs (and, pre-fix, clobbers) the field's local
+      // text on every keystroke.
+      const Harness = () => {
+        const [value, setValue] = React.useState(9);
+        return React.createElement(window.TweakNumber, {
+          label: 'X', value, min: 0, max: 100, onChange: (v) => setValue(v),
+        });
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(Harness)));
+      await settle();
+      const input = container.querySelector('.twk-num input[type="number"]');
+      A('COMP-023 setup: the number input renders', !!input);
+
+      // Retype from scratch: clear, then type "0", then "5" — each
+      // keystroke is its own 'input' event, same as a real user typing.
+      setInput(input, '');
+      await settle();
+      setInput(input, '0');
+      await settle();
+      setInput(input, '05');
+      await settle();
+      A('COMP-023 typing a leading zero is not snapped away while still typing',
+        input.value === '05', input.value);
+    `,
+  },
 ];
