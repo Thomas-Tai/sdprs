@@ -118,6 +118,7 @@ window.OPERATORS_ONLINE = [];
 // ---- Helpers ------------------------------------------------------------
 
 const fmtAge = (sec) => {
+  if (sec == null) return '—';
   sec = Math.max(0, Math.round(sec || 0));
   if (sec < 60) return sec + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
@@ -131,6 +132,7 @@ const fmtAge = (sec) => {
   return d + 'd ' + h + 'h';
 };
 const ageColor = (sec) => {
+  if (sec == null) return 'text-ink-muted';
   if (sec < 300) return 'text-ink-secondary';
   if (sec < 900) return 'text-sev-warn';
   if (sec < 1800) return 'text-orange-400';

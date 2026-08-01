@@ -212,7 +212,7 @@
     const db = e.audio_db_peak;
     const created = e.created_at || e.timestamp;
     const state = STATE_MAP[e.status] || 'pending';
-    const ageSec = secsSince(created) || 0;
+    const ageSec = secsSince(created);
 
     const timeline = [];
     timeline.push({

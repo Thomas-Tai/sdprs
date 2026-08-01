@@ -57,6 +57,42 @@ module.exports = [
       A('UX-001 fmtTs accepts epoch ms', window.fmtTs(now.getTime()) === hms, window.fmtTs(now.getTime()));
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-011 ----
+  {
+    name: 'DATA-011                    api.jsx (ageSec null, not 0)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      ${RES_HELPER}
+      // An alert whose created timestamp is unparseable must map to ageSec null,
+      // not 0 — 0 reads as "just now" (fresh), null reads as "unknown".
+      const badAlert = { id: 7, status: 'PENDING', visual_confidence: 0.9,
+        created_at: 'not-a-timestamp', timestamp: null, node_id: 'CAM-1' };
+      window.fetch = (path) => {
+        if (String(path).indexOf('/api/alerts?status_filter=PENDING') === 0) return _res([badAlert]);
+        if (String(path).indexOf('/api/nodes') === 0) return _res([]);
+        return _res([]);
+      };
+      const rl = await window.SDPRS_API.refreshLive();
+      const mapped = (rl.alerts || []).find(a => a.id === 7);
+      A('DATA-011 unparseable created_at maps to ageSec null (not 0)', !!mapped && mapped.ageSec === null, mapped && String(mapped.ageSec));
+      // A genuinely fresh alert still gets a numeric age.
+      const freshAlert = { id: 8, status: 'PENDING', visual_confidence: 0.9,
+        created_at: new Date(Date.now() - 5000).toISOString(), node_id: 'CAM-1' };
+      window.fetch = (path) => {
+        if (String(path).indexOf('/api/alerts?status_filter=PENDING') === 0) return _res([freshAlert]);
+        if (String(path).indexOf('/api/nodes') === 0) return _res([]);
+        return _res([]);
+      };
+      const rl2 = await window.SDPRS_API.refreshLive();
+      const fresh = (rl2.alerts || []).find(a => a.id === 8);
+      A('DATA-011 a parseable created_at still yields a numeric ageSec', !!fresh && typeof fresh.ageSec === 'number' && fresh.ageSec >= 0, fresh && String(fresh.ageSec));
+      // The render path must show an honest dash for a null age, never "0s".
+      A('DATA-011 fmtAge(null) renders the em dash, not 0s', window.fmtAge(null) === '\\u2014', window.fmtAge(null));
+      A('DATA-011 ageColor(null) is not the calm fresh color', window.ageColor(null) !== 'text-ink-secondary', window.ageColor(null));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
