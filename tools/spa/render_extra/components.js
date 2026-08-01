@@ -309,4 +309,29 @@ module.exports = [
         container.textContent.indexOf('尚未就緒') !== -1, container.textContent);
     `,
   },
+  {
+    name: 'COMP-008 StatusStrip weather chip survives a partial WEATHER payload (missing .wind)',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // A schema-drift / partial weather payload — available + rain present,
+      // wind entirely absent. StatusStrip's weather chip must degrade, not
+      // take the whole status strip down with it.
+      window.WEATHER = { available: true, typhoon: null, wind: undefined,
+        rain: { now: 5, hour: null, day: null }, lightning: null };
+      const noop = () => {};
+      const props = { unackCount: 0, muted: false, setMuted: noop, theme: 'dark', setTheme: noop,
+        onOpenShortcuts: noop, page: 'monitor', setPage: noop, onOpenMuteDrawer: noop, audioReplayIn: 0,
+        muteState: { nodes: [], sources: [], global: false }, operators: [], staleAckCount: 0,
+        onOpenCmdK: noop, focusMode: false, onToggleFocus: noop };
+      let threw = false;
+      try {
+        ReactDOM.flushSync(() => root.render(React.createElement(window.StatusStrip, props)));
+        await settle();
+      } catch (e) { threw = true; }
+      A('COMP-008 StatusStrip renders without crashing when WEATHER.wind is missing', threw === false);
+      A('COMP-008 the rest of the status strip still renders (unack pill area present)',
+        container.textContent.indexOf('SDPRS') !== -1);
+    `,
+  },
 ];

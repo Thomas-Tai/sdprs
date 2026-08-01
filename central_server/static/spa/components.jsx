@@ -639,7 +639,12 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             )}
             <span className="flex items-center gap-1 text-ink-secondary tnum">
               <Icon.Wind size={12}/>
-              <span className="font-mono">{window.WEATHER.wind.dir || ''} {window.WEATHER.wind.speed}<span className="text-ink-muted">km/h</span></span>
+              {/* COMP-008: a partial WEATHER payload (schema drift / a load
+                  that populated `available` but not every nested field) could
+                  leave `.wind` undefined — unguarded access crashed the ENTIRE
+                  status strip (nav, mute, logout — everything), not just this
+                  chip. Optional-chain + a neutral fallback degrade instead. */}
+              <span className="font-mono">{window.WEATHER.wind?.dir || ''} {window.WEATHER.wind?.speed ?? '—'}<span className="text-ink-muted">km/h</span></span>
             </span>
             <span className="text-ink-dim">|</span>
             <span className="flex items-center gap-1 text-ink-secondary tnum">
