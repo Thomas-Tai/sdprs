@@ -663,6 +663,62 @@ ${PRELUDE}
 })();
 `;
 
+// --------------------------------- OPS-004: live-start / warm-up failures loud -
+// A failed startWebcamStream just .catch()'d to 'off', and the 30s readiness
+// timeout silently returned to 'off' — the operator got no toast, no error text,
+// the tile just reverted with no explanation. NodeCard now surfaces inline error
+// text on the tile for both paths, cleared on the next retry.
+const TEST_OPS_LIVE_ERRORS = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const HEADER_ONLY = '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n';
+    let failStart = false;
+    let playlist = HEADER_ONLY;
+    window.SDPRS_API = {
+      startWebcamStream: () => failStart ? Promise.reject(new Error('boom')) : Promise.resolve({}),
+      stopWebcamStream: () => Promise.resolve({}),
+      renewWebcamStream: () => Promise.resolve({}),
+      getWebcamPlaylist: () => Promise.resolve(playlist),
+    };
+    const node = { id: 'webcam_e1', name: '門口', type: 'webcam', status: 'online', upload: 2, heartbeat: 2, snoozeMin: 0, level: null };
+    const render = () => ReactDOM.flushSync(() => root.render(React.createElement(NodeCard, { node, onSelect: () => {}, nodeAlerts: [] })));
+    const findBtn = (txt) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf(txt) !== -1);
+
+    // (1) a failed live-start must not be silent
+    failStart = true;
+    render();
+    click(findBtn('即時'));
+    await settle();
+    A('OPS-004 a failed live-start reverts to the 即時 affordance', !!findBtn('即時'));
+    A('OPS-004 a failed live-start surfaces an error to the operator', container.textContent.indexOf('啟動失敗') !== -1, container.textContent.slice(0, 120));
+
+    // (2) retrying clears the prior error
+    failStart = false;
+    click(findBtn('即時'));
+    await settle();
+    A('OPS-004 retrying clears the prior error message', container.textContent.indexOf('啟動失敗') === -1);
+
+    // (3) a readiness timeout must not be silent
+    ReactDOM.flushSync(() => root.render(null));
+    playlist = HEADER_ONLY;
+    const realNow = Date.now;
+    render();
+    click(findBtn('即時'));
+    await settle();
+    Date.now = () => realNow() + 35000; // jump past LIVE_POLL_TIMEOUT_MS
+    await sleep(1700);
+    A('OPS-004 a readiness timeout surfaces an error to the operator', container.textContent.indexOf('逾時') !== -1, container.textContent.slice(0, 120));
+    A('OPS-004 a readiness timeout returns the 即時 affordance', !!findBtn('即時'));
+    Date.now = realNow;
+  } catch (e) {
+    results.push({ name: 'OPS-004 live-errors suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ---------------------------------------- monitor.jsx: webcam tile (Task 5) --
 // NodeCard keys its source badge + live button off node.type === 'webcam' (the
 // value Step 0b makes mapNode emit). A webcam tile shows the blue "Webcam"
@@ -1379,6 +1435,7 @@ const SUITES = [
   { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
   { name: 'Follow-up 2/3               status.jsx (webcam delete)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_DELETE },
   { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
+  { name: 'OPS-004 live-start errors     monitor.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_OPS_LIVE_ERRORS },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
   { name: 'Wall feed                   components.jsx (webcam snapshot)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_WEBCAM },
   { name: 'Live refresh                components.jsx (snapshot 1fps)', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_SNAPSHOT_LIVE_REFRESH },

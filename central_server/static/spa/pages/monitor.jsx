@@ -86,6 +86,11 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // Live-view state for webcam tiles: off → loading (stream spinning up) → live
   // (HlsPlayer mounted). Non-webcam tiles never leave 'off'.
   const [liveMode, setLiveMode] = useState_p('off'); // 'off' | 'loading' | 'live'
+  // OPS-004: a failed live-start and the readiness timeout used to revert the
+  // tile to 'off' SILENTLY — the operator had no idea their ▶即時 click failed.
+  // Hold a short reason string, shown inline on the tile while 'off', cleared on
+  // the next retry.
+  const [liveError, setLiveError] = useState_p(null);
   // Live-view timers are lifecycle-managed off liveMode so BOTH the warm-up
   // transition and the lease renewal auto-clean on unmount/stop (state is the
   // single source of truth — no dangling setTimeout after the tile unmounts).
@@ -122,6 +127,7 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
               // stop. Best-effort; a failed stop just lets the lease lapse.
               if (api.stopWebcamStream) api.stopWebcamStream(node.id).catch(() => {});
               setLiveMode('off');
+              setLiveError('直播逾時：30 秒無畫面');
               return;
             }
             timer = setTimeout(probe, LIVE_POLL_MS);
@@ -224,6 +230,18 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             {frozen ? <span className="text-white/35">--:--:--</span> : <ClockDisplay />}
           </div>
         </div>
+        {/* OPS-004: inline failure notice — a silent revert to 'off' left the
+            operator believing nothing happened. Dismissible; auto-cleared on the
+            next ▶即時. */}
+        {isWebcam && liveMode === 'off' && liveError && (
+          <button
+            onClick={(e) => { e.stopPropagation(); setLiveError(null); }}
+            title="點擊關閉"
+            className="absolute inset-x-1 bottom-8 z-20 px-2 py-1 rounded bg-sev-critical/90 text-white text-[10px] font-bold text-center"
+          >
+            {liveError}
+          </button>
+        )}
         {/* Live-view controls (webcam only): off → loading → live. */}
         {isWebcam && liveMode === 'off' && (
           <button
@@ -237,9 +255,10 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
               // bundle there is nothing to start, so stay 'off' rather than
               // sticking the tile on 「連線中...」 until the poll times out.
               if (!(api && api.startWebcamStream)) return;
+              setLiveError(null);   // OPS-004: clear any prior failure on retry
               setLiveMode('loading');
               Promise.resolve(api.startWebcamStream(node.id))
-                .catch(() => setLiveMode('off'));
+                .catch(() => { setLiveMode('off'); setLiveError('直播啟動失敗，請重試'); });
             }}
             className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
           >
