@@ -305,7 +305,10 @@ function useTweaks(defaults) {
 // The close button posts __edit_mode_dismissed so the host's toolbar toggle
 // flips off in lockstep; the host echoes __deactivate_edit_mode back which
 // is what actually hides the panel.
-function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
+// COMP-026: app.jsx mounts <window.TweaksPanel> with no `title` prop, so
+// this default is the literal string operators see in the (zh-TW-only)
+// production console — it was the English word "Tweaks".
+function TweaksPanel({ title = '顯示設定', noDeckControls = false, children }) {
   const [open, setOpen] = React.useState(false);
   const dragRef = React.useRef(null);
   // COMP-020: element that had focus right before the panel opened, so it
@@ -522,7 +525,7 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
            style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
         <div className="twk-hd" onPointerDown={onDragStart}>
           <b>{title}</b>
-          <button className="twk-x" aria-label="Close tweaks"
+          <button className="twk-x" aria-label="關閉顯示設定"
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={dismiss}>✕</button>
         </div>

@@ -772,4 +772,27 @@ module.exports = [
         t.density === 'compact', JSON.stringify(t));
     `,
   },
+  {
+    name: 'COMP-026 TweaksPanel default title and close-button label are zh-TW, not English',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // app.jsx mounts <window.TweaksPanel> with NO title prop (grep-confirmed
+      // — components.jsx/app.jsx never pass one), so whatever this default
+      // is IS the string real operators see in production.
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweaksPanel, null,
+        React.createElement('div', null, 'content'))));
+      await settle();
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: '__activate_edit_mode' }, origin: window.location.origin,
+      }));
+      await settle();
+      A('COMP-026 the default panel title is NOT the English literal "Tweaks"',
+        container.textContent.indexOf('Tweaks') === -1, container.textContent.slice(0, 60));
+      const closeBtn = container.querySelector('.twk-x');
+      A('COMP-026 setup: the close button renders', !!closeBtn);
+      A('COMP-026 the close button aria-label is NOT the English literal "Close tweaks"',
+        !!closeBtn && closeBtn.getAttribute('aria-label') !== 'Close tweaks', closeBtn && closeBtn.getAttribute('aria-label'));
+    `,
+  },
 ];
