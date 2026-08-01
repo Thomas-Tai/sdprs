@@ -162,9 +162,14 @@ function App({ initialError = null }) {
   // Alerts. sessionStorage is tab-scoped and survives reloads but not tab
   // close, which is the right lifetime for "where was I" — try/catch covers
   // sessionStorage-disabled contexts (e.g. some locked-down kiosk browsers).
+  // SHELL-001: every source here is untrusted (a base64 URL blob, a
+  // sessionStorage string, a stale bookmark) — sanitizePage funnels all of
+  // them through the one authoritative valid-page set (renderPage()'s switch)
+  // so a bad value falls back to 'alerts' instead of renderPage() returning
+  // `null` for a blank content area under an otherwise-normal-looking shell.
   const [page, setPageRaw] = useStateA(() => {
-    if (RESTORED_STATE?.page) return RESTORED_STATE.page;
-    try { return sessionStorage.getItem('sdprs.page') ?? 'alerts'; }
+    if (RESTORED_STATE?.page) return window.sanitizePage(RESTORED_STATE.page);
+    try { return window.sanitizePage(sessionStorage.getItem('sdprs.page') ?? 'alerts'); }
     catch (_) { return 'alerts'; }
   });
   const [pageHistory, setPageHistory] = useStateA([]); // for Alt+← back
@@ -341,8 +346,11 @@ function App({ initialError = null }) {
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
+  // SHELL-001: sanitize here too — CommandPalette/NavRail/keyboard nav all
+  // route through this one function, so this is the choke point for any
+  // caller-supplied page id, not just the three mount-time sources above.
   const setPage = useCallbackA((p) => {
-    setPageRaw(p);
+    setPageRaw(window.sanitizePage(p));
   }, []);
 
   // Mirror pageHistory into a ref so goBack can read the current value
@@ -429,9 +437,14 @@ function App({ initialError = null }) {
     const onPopState = (event) => {
       const nextPage = event.state && event.state.page;
       if (!nextPage) return;
-      if (nextPage === prevPageRef.current) return;
+      // SHELL-001: this bypasses setPage (goes straight to setPageRaw so the
+      // URL-push effect's skip guard below stays correctly sequenced), so it
+      // needs its own sanitize call — a hand-edited/forged history.state.page
+      // must not reach renderPage() unvalidated.
+      const safePage = window.sanitizePage(nextPage);
+      if (safePage === prevPageRef.current) return;
       skipNextUrlPushRef.current = true;
-      setPageRaw(nextPage);
+      setPageRaw(safePage);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);

@@ -289,6 +289,21 @@ function effectiveTheme(theme, wallMode) {
   return wallMode ? 'dark' : theme;
 }
 
+// SHELL-001: the single authoritative set of pages app.jsx's renderPage()
+// switch actually handles. `page` state can be seeded from RESTORED_STATE (a
+// base64 blob decoded from a URL query param on the cross-login roundtrip),
+// sessionStorage (tab-scoped, survives reloads), or a browser popstate event —
+// all three are untrusted strings a stale bookmark, a corrupted blob, or a
+// hand-edited URL could hand back as garbage. An unvalidated bad value used to
+// fall through renderPage()'s `default: return null`, leaving the whole
+// content area blank with the nav/status strip still showing (looked like a
+// crash, wasn't one). sanitizePage is the single choke point every entry point
+// funnels through; VALID_PAGES is published too so a caller can enumerate it.
+const VALID_PAGES = ['alerts', 'monitor', 'status', 'pumps', 'weather', 'handover', 'audit'];
+function sanitizePage(p) {
+  return VALID_PAGES.indexOf(p) !== -1 ? p : 'alerts';
+}
+
 // WAL-M9: count only unacked (pending) alerts for the wall ticker header.
 function activeAlertCount(alerts) {
   return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
@@ -329,3 +344,5 @@ window.wallTileFrozen = wallTileFrozen;
 window.effectiveTheme = effectiveTheme;
 window.activeAlertCount = activeAlertCount;
 window.orderWallAlerts = orderWallAlerts;
+window.VALID_PAGES = VALID_PAGES;
+window.sanitizePage = sanitizePage;
