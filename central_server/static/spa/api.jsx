@@ -1166,17 +1166,17 @@
   // RTSP/mediamtx pipeline). createWebcamClient/revokeWebcamKey manage the
   // per-node webcam client credential issued by /api/nodes/webcam.
   async function startWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/start`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/start`, jsonBody('POST', {}));
   }
   async function stopWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/stop`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/stop`, jsonBody('POST', {}));
   }
   // Renews the 90s server-side viewer lease so an actively-watched stream is not
   // force-stopped mid-view. The dashboard calls this every ~30s while a tile is
   // 'live' (see monitor.jsx); a lapsed lease lets cleanup_stale_streams enqueue
   // stream_stop to the client.
   async function renewWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/renew`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/renew`, jsonBody('POST', {}));
   }
   // Live-view readiness probe. The dashboard used to flip a webcam tile to
   // 'live' on a blind 3s timer, which on a slow client mounts <video> against a
@@ -1201,7 +1201,7 @@
     return apiFetch('/api/nodes/webcam', jsonBody('POST', { name }));
   }
   async function revokeWebcamKey(nodeId) {
-    return apiFetch(`/api/nodes/${nodeId}/revoke-key`, jsonBody('POST', {}));
+    return apiFetch(`/api/nodes/${encodeURIComponent(nodeId)}/revoke-key`, jsonBody('POST', {}));
   }
   // Permanently removes a webcam client (node row + its API key). Server
   // contract: 204 on success, 404 if it is already gone — callers should treat

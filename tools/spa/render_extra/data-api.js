@@ -126,6 +126,32 @@ module.exports = [
       A('DATA-020 reported dropped_frames still maps to the number', !!m2 && m2.drops === 3, m2 && String(m2.drops));
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-018 ----
+  {
+    name: 'DATA-018                    api.jsx (webcam ids URL-encoded)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // Webcam mutation helpers must encodeURIComponent the node id in the path,
+      // matching their siblings (deleteWebcamClient, getWebcamPlaylist). A raw id
+      // with '/' or '?' would split into extra path segments / a query string.
+      const urls = [];
+      window.fetch = (path, opts) => { urls.push(String(path)); return Promise.resolve({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: () => Promise.resolve({}), text: () => Promise.resolve('') }); };
+      const raw = 'webcam/a b?c';
+      const enc = encodeURIComponent(raw);
+      const api = window.SDPRS_API;
+      await api.startWebcamStream(raw);
+      await api.stopWebcamStream(raw);
+      await api.renewWebcamStream(raw);
+      await api.revokeWebcamKey(raw);
+      A('DATA-018 startWebcamStream encodes the node id', urls[0] && urls[0].indexOf('/api/webcam/' + enc + '/stream/start') !== -1, urls[0]);
+      A('DATA-018 stopWebcamStream encodes the node id', urls[1] && urls[1].indexOf('/api/webcam/' + enc + '/stream/stop') !== -1, urls[1]);
+      A('DATA-018 renewWebcamStream encodes the node id', urls[2] && urls[2].indexOf('/api/webcam/' + enc + '/stream/renew') !== -1, urls[2]);
+      A('DATA-018 revokeWebcamKey encodes the node id', urls[3] && urls[3].indexOf('/api/nodes/' + enc + '/revoke-key') !== -1, urls[3]);
+      A('DATA-018 no raw slash from the id leaks into the path', urls.slice(0,4).every(u => u.indexOf('webcam/a b') === -1 && u.indexOf('webcam/a%20b') === -1 || u.indexOf(enc) !== -1), JSON.stringify(urls));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
