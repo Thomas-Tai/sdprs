@@ -707,4 +707,34 @@ module.exports = [
         input.value === '05', input.value);
     `,
   },
+  {
+    name: 'COMP-024 TweakSelect resolves back to the ORIGINAL option type, not a string',
+    target: 'tweaks-panel.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // Native <select> always emits a STRING via e.target.value, even when
+      // the options themselves are numbers (a font-size preset list, say).
+      // A numeric consumer (style={{fontSize: t.fontSize}}) silently breaks:
+      // React only auto-suffixes an actual NUMBER style value with 'px', not
+      // a numeric-looking string.
+      let calls = [];
+      ReactDOM.flushSync(() => root.render(React.createElement(window.TweakSelect, {
+        label: '字體大小', value: 14, options: [10, 12, 14, 16, 20],
+        onChange: (v) => calls.push(v),
+      })));
+      await settle();
+      const select = container.querySelector('select');
+      A('COMP-024 setup: the select renders', !!select);
+
+      const setSelect = (el, val) => {
+        Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(el, val);
+        el.dispatchEvent(new window.Event('change', { bubbles: true }));
+      };
+      setSelect(select, '20');
+      await settle();
+      A('COMP-024 selecting a numeric option emits a NUMBER, not a string',
+        calls.length === 1 && calls[0] === 20 && typeof calls[0] === 'number',
+        JSON.stringify(calls) + ' typeof=' + typeof calls[0]);
+    `,
+  },
 ];

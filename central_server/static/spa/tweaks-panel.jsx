@@ -685,9 +685,20 @@ function TweakRadio({ label, value, options, onChange }) {
 
 function TweakSelect({ label, value, options, onChange }) {
   // COMP-006: same missing-accessible-name issue as the slider/toggle above.
+  // COMP-024: a native <select> always yields a STRING via e.target.value,
+  // even when `options` are numbers/booleans (a font-size preset list, a
+  // numeric zoom level). A numeric consumer breaks silently — e.g.
+  // style={{fontSize: t.fontSize}} only gets React's auto 'px' suffix for
+  // an actual number, not a numeric-looking string. Resolve back to the
+  // ORIGINAL option's value/type, the same pattern TweakRadio's own
+  // <select> fallback already uses below.
+  const resolve = (s) => {
+    const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
+    return m === undefined ? s : (typeof m === 'object' ? m.value : m);
+  };
   return (
     <TweakRow label={label}>
-      <select className="twk-field" value={value} aria-label={label} onChange={(e) => onChange(e.target.value)}>
+      <select className="twk-field" value={value} aria-label={label} onChange={(e) => onChange(resolve(e.target.value))}>
         {options.map((o) => {
           const v = typeof o === 'object' ? o.value : o;
           const l = typeof o === 'object' ? o.label : o;
