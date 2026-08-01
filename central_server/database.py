@@ -32,6 +32,7 @@ _backend: str = "sqlite"          # "sqlite" | "postgresql"
 _db_connection: Optional[sqlite3.Connection] = None
 _db_lock: Optional[threading.Lock] = None
 _pg_database = None               # databases.Database instance (PostgreSQL)
+_pg_engine = None                 # shared sync SQLAlchemy engine (PostgreSQL); see _get_engine (DATA-010)
 
 
 # =============================================================================
@@ -96,15 +97,38 @@ def _init_postgresql(database_url: str) -> Any:
 
     _pg_database = databases.Database(database_url)
 
-    # Create tables using synchronous SQLAlchemy engine (run once at startup)
-    engine = sqlalchemy.create_engine(database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-                                      if "postgresql://" in database_url else database_url)
+    # Create tables using the shared synchronous engine (run once at startup).
+    # DATA-010: every subsequent query reuses this same engine via _get_engine()
+    # instead of building a fresh one (and a fresh pool) per call.
+    engine = _get_engine()
     with engine.connect() as conn:
         _create_tables_postgresql(conn)
         conn.commit()
 
     logger.info("PostgreSQL database initialised")
     return _pg_database
+
+
+def _get_engine():
+    """Process-wide singleton SQLAlchemy engine for the PostgreSQL backend.
+
+    DATA-010: every query helper used to call ``sqlalchemy.create_engine()``
+    itself, building a brand-new engine — and therefore a brand-new connection
+    pool — on every call. On the 20s node-poll hot path that is a fresh pool per
+    query, so the pooling never pools and each call pays a full connect/teardown.
+    Reuse one engine (created lazily here, or at init) so its pool is shared
+    across calls. SQLAlchemy engines are designed to be module-level singletons
+    and are safe to share across threads; disposed in close_db().
+    """
+    global _pg_engine
+    if _pg_engine is None:
+        import sqlalchemy
+        database_url = os.environ.get("DATABASE_URL", "")
+        _pg_engine = sqlalchemy.create_engine(
+            database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+            if "postgresql://" in database_url else database_url
+        )
+    return _pg_engine
 
 
 def _create_tables_sqlite(cursor: sqlite3.Cursor):
@@ -466,7 +490,7 @@ def get_db() -> sqlite3.Connection:
 
 def close_db():
     """Close the active database connection."""
-    global _db_connection, _db_lock, _pg_database
+    global _db_connection, _db_lock, _pg_database, _pg_engine
     if _backend == "sqlite" and _db_connection:
         _db_connection.close()
         _db_connection = None
@@ -477,6 +501,15 @@ def close_db():
         # For sync shutdown we just clear the reference.
         _pg_database = None
         logger.info("PostgreSQL database reference cleared")
+
+    # DATA-010: dispose the shared engine (and its pool) so a re-init, or a test
+    # that swaps DATABASE_URL, doesn't keep reusing a stale engine.
+    if _pg_engine is not None:
+        try:
+            _pg_engine.dispose()
+        except Exception:
+            pass
+        _pg_engine = None
 
 
 @contextmanager
@@ -528,8 +561,7 @@ def insert_event(
 def _pg_insert_event_sync(node_id, timestamp, visual_confidence, audio_db_peak, audio_freq_peak_hz, status) -> int:
     """Synchronous PostgreSQL insert via raw psycopg2 (fallback for sync callers)."""
     import sqlalchemy
-    database_url = os.environ.get("DATABASE_URL", "")
-    engine = sqlalchemy.create_engine(database_url)
+    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(
             sqlalchemy.text("""
@@ -593,8 +625,7 @@ def update_event_status(
 
 def _pg_update_event_sync(alert_id, status, mp4_path, resolved_by, notes) -> bool:
     import sqlalchemy
-    database_url = os.environ.get("DATABASE_URL", "")
-    engine = sqlalchemy.create_engine(database_url)
+    engine = _get_engine()
     sets = ["status = :status"]
     params: dict = {"status": status, "id": alert_id}
     if mp4_path is not None:
@@ -720,8 +751,7 @@ def upsert_node(
 
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text("""
@@ -761,8 +791,7 @@ def delete_node(node_id: str) -> bool:
     operator_actions above). Returns True if the node row was removed."""
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(sqlalchemy.text("DELETE FROM pump_readings WHERE node_id = :id"),
                          {"id": node_id})
@@ -786,8 +815,7 @@ def set_node_location(node_id: str, location: Optional[str]) -> bool:
 
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             result = conn.execute(
                 sqlalchemy.text("UPDATE nodes SET location = :loc WHERE node_id = :id"),
@@ -809,8 +837,7 @@ def touch_node_upload(node_id: str) -> None:
     try:
         if _backend == "postgresql":
             import sqlalchemy
-            database_url = os.environ.get("DATABASE_URL", "")
-            engine = sqlalchemy.create_engine(database_url)
+            engine = _get_engine()
             with engine.connect() as conn:
                 conn.execute(
                     sqlalchemy.text(
@@ -835,8 +862,7 @@ def set_node_snooze(node_id: str, snoozed_until: Optional[str], reason: Optional
     """Item 17: set or clear node snooze. snoozed_until=None clears."""
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             result = conn.execute(
                 sqlalchemy.text("UPDATE nodes SET snoozed_until = :u, snooze_reason = :r WHERE node_id = :id"),
@@ -864,8 +890,7 @@ def get_weather_config() -> Dict[str, Any]:
     cols = "site_lat, site_lon, station_name, smg_station, hko_station, fallback_provider"
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             result = conn.execute(sqlalchemy.text(f"SELECT {cols} FROM weather_config WHERE id = 1;"))
             row = result.fetchone()
@@ -904,8 +929,7 @@ def set_weather_config(
     """
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text(
@@ -940,8 +964,7 @@ def insert_pump_reading(node_id: str, timestamp: str, water_level: Optional[floa
 
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text("""
@@ -1037,8 +1060,7 @@ def update_node_heartbeat(node_id: str, metadata: Optional[Dict[str, Any]] = Non
 
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             if metadata_json:
                 conn.execute(
@@ -1070,8 +1092,7 @@ def update_node_status(node_id: str, status: str):
     """Update node status field."""
     if _backend == "postgresql":
         import sqlalchemy
-        database_url = os.environ.get("DATABASE_URL", "")
-        engine = sqlalchemy.create_engine(database_url)
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text("UPDATE nodes SET status=:status WHERE node_id=:id"),
@@ -1181,8 +1202,7 @@ def set_handover_note(note: str, author: str, updated_at_iso: str) -> None:
 
 def _pg_set_handover_note_sync(note, author, updated_at_iso) -> None:
     import sqlalchemy
-    database_url = os.environ.get("DATABASE_URL", "")
-    engine = sqlalchemy.create_engine(database_url)
+    engine = _get_engine()
     with engine.connect() as conn:
         conn.execute(
             sqlalchemy.text(
@@ -1295,7 +1315,7 @@ def check_database_health() -> Dict[str, Any]:
 
 def _pg_fetch_one_sync(query: str, params: dict) -> Optional[Dict[str, Any]]:
     import sqlalchemy
-    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(sqlalchemy.text(query), params)
         row = result.mappings().fetchone()
@@ -1304,7 +1324,7 @@ def _pg_fetch_one_sync(query: str, params: dict) -> Optional[Dict[str, Any]]:
 
 def _pg_fetch_many_sync(query: str, params: dict) -> List[Dict[str, Any]]:
     import sqlalchemy
-    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(sqlalchemy.text(query), params)
         return [dict(r) for r in result.mappings().fetchall()]
@@ -1313,7 +1333,7 @@ def _pg_fetch_many_sync(query: str, params: dict) -> List[Dict[str, Any]]:
 def _pg_execute_sync(query: str, params: dict) -> None:
     """Synchronous PostgreSQL write (INSERT/UPDATE/DELETE) via SQLAlchemy."""
     import sqlalchemy
-    engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+    engine = _get_engine()
     with engine.connect() as conn:
         conn.execute(sqlalchemy.text(query), params)
         conn.commit()
@@ -1397,7 +1417,7 @@ def delete_webcam_client(node_id: str) -> bool:
     such client (caller maps that to 404)."""
     if get_backend() == "postgresql":
         import sqlalchemy
-        engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+        engine = _get_engine()
         with engine.connect() as conn:
             conn.execute(
                 sqlalchemy.text("DELETE FROM webcam_cameras WHERE client_id = :id"),
@@ -1434,7 +1454,7 @@ def register_webcam_cameras(client_node_id: str, cameras: list) -> list:
     results = []
     if get_backend() == "postgresql":
         import sqlalchemy
-        engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL", ""))
+        engine = _get_engine()
         # Single connection + single commit: leaving the block without
         # reaching conn.commit() (i.e. on any exception) rolls the batch back.
         with engine.connect() as conn:
