@@ -1310,9 +1310,14 @@
           console.warn('[SDPRS] ws handler error for', type, e);
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         clearStable();
         if (closed) return;
+        // 1008 = policy violation / auth-expiry: the session is gone, so
+        // reconnecting just spins against an immediate re-close. Stop here; the
+        // session-expiry modal (driven by __SDPRS_SESSION_EXPIRED / auth_expired)
+        // is the operator's path back.
+        if (ev && ev.code === 1008) { closed = true; return; }
         reconnectTimer = setTimeout(connect, retry);
         retry = Math.min(retry * 2, 15000);
       };

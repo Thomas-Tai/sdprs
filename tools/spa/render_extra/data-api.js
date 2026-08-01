@@ -198,6 +198,44 @@ module.exports = [
       A('DATA-021 401 fallback carries totalAvailable', !!audit && typeof audit.totalAvailable === 'number', audit && String(audit.totalAvailable));
     `,
   },
+
+  // --------------------------------------------------- api.jsx: DATA-015 ----
+  {
+    name: 'DATA-015                    api.jsx (no reconnect after 1008)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // An auth-expiry close (code 1008) must stop the reconnect loop; any other
+      // close still reconnects with backoff.
+      const instances = [];
+      class MockWS {
+        constructor(url) { this.url = url; this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null; instances.push(this); }
+        close() {}
+      }
+      window.WebSocket = MockWS;
+      const timeouts = [];
+      const origST = window.setTimeout;
+      window.setTimeout = function (fn, ms) { timeouts.push({ fn, ms }); return origST.call(window, fn, ms); };
+
+      // --- 1008: stop ---
+      const teardown = window.SDPRS_API.openSocket({ onEvent: () => {} });
+      A('DATA-015 openSocket creates one socket', instances.length === 1, instances.length);
+      timeouts.length = 0;
+      instances[0].onclose({ code: 1008 });
+      A('DATA-015 a 1008 close schedules NO reconnect', timeouts.length === 0, JSON.stringify(timeouts.map(t => t.ms)));
+      teardown();
+
+      // --- normal close: still reconnects ---
+      const teardown2 = window.SDPRS_API.openSocket({ onEvent: () => {} });
+      const sock2 = instances[instances.length - 1];
+      timeouts.length = 0;
+      sock2.onclose({ code: 1006 });
+      A('DATA-015 a normal (1006) close still schedules a reconnect', timeouts.length === 1 && timeouts[0].ms === 1000, JSON.stringify(timeouts.map(t => t.ms)));
+      teardown2();
+
+      window.setTimeout = origST;
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
