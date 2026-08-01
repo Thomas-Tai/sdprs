@@ -1024,17 +1024,41 @@
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
 
-    // apiFetch handles 401 (sets window.__SDPRS_SESSION_EXPIRED for the
-    // soft-401 modal flow — no hard redirect) and re-throws non-2xx with
-    // `.status` attached, so a 403 non-admin surfaces to the caller's toast.
+    // DATA-013 / AUD-001: fetch the CSV as a blob in ONE authenticated request.
+    // The old shape — an auth preflight on /api/audit followed by a fire-and-
+    // forget anchor.click() navigation — had a TOCTOU gap, let a failed export
+    // download its JSON error body as a .csv, and resolved (firing the page's
+    // 已匯出 CSV toast) before any download existed. Now we only resolve once
+    // the blob is actually in hand, and a non-OK / JSON body rejects with
+    // .status so the caller shows an error instead.
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+    let res;
     try {
-      await apiFetch('/api/audit?limit=1');
+      res = await fetch(url, { credentials: 'same-origin', signal: ac.signal });
     } catch (e) {
-      const err = new Error('audit export failed: ' + (e && e.status != null ? e.status : (e && e.message) || 'unknown'));
-      err.status = (e && e.status) || 0;
-      err.cause = e;
+      if (e && e.name === 'AbortError') {
+        const err = new Error('timeout on export'); err.status = 0; err.timeout = true; throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
+    if (res.status === 401) {
+      window.__SDPRS_SESSION_EXPIRED = true;
+      const err = new Error('unauthorized'); err.status = 401; throw err;
+    }
+    const ct = res.headers.get('content-type') || '';
+    if (!res.ok || ct.includes('application/json')) {
+      // A JSON body here is an error payload — never let it download as a .csv.
+      let body = null;
+      if (ct.includes('application/json')) body = await res.json().catch(() => null);
+      const err = new Error('HTTP ' + res.status + ' on ' + url);
+      err.status = res.status;
+      err.detail = _extractDetail(body);
       throw err;
     }
+    const blob = await res.blob();
 
     // SHL-16: this used to be `new Date().toISOString().slice(0,10)`, i.e. the
     // UTC date. Macau is UTC+8, so for the whole 00:00–08:00 local night shift
@@ -1047,14 +1071,16 @@
     const _now = new Date();
     const _p = (n) => String(n).padStart(2, '0');
     const ymd = String(_now.getFullYear()) + _p(_now.getMonth() + 1) + _p(_now.getDate());
+    const objUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = objUrl;
     a.download = 'audit_' + ymd + '.csv';
     // Some browsers (Firefox pre-93) require the anchor to be in the DOM.
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
   }
 
   const snoozeNode = (nodeId, minutes, reason) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',

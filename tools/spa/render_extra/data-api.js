@@ -236,6 +236,34 @@ module.exports = [
       window.setTimeout = origST;
     `,
   },
+
+  // --------------------------------------- api.jsx: DATA-013 / AUD-001 -------
+  {
+    name: 'DATA-013/AUD-001            api.jsx (csv export rejects on error)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // When the export endpoint fails, exportAuditCsv must REJECT (so the page
+      // shows an error) — it must not resolve and let the browser download the
+      // JSON error body as a .csv, nor toast success before a download exists.
+      window.fetch = (path) => {
+        const p = String(path);
+        if (p.indexOf('/api/audit/export.csv') === 0) {
+          return Promise.resolve({ ok: false, status: 403,
+            headers: { get: () => 'application/json' },
+            json: () => Promise.resolve({ detail: 'admin required' }),
+            text: () => Promise.resolve('{"detail":"admin required"}') });
+        }
+        return Promise.resolve({ ok: true, status: 200,
+          headers: { get: () => 'application/json' },
+          json: () => Promise.resolve({ rows: [] }), text: () => Promise.resolve('') });
+      };
+      let err = null;
+      try { await window.SDPRS_API.exportAuditCsv({ limit: 10 }); } catch (e) { err = e; }
+      A('AUD-001 a failed export REJECTS (no premature success)', !!err);
+      A('DATA-013 the rejection carries the export status (403)', !!err && err.status === 403, err && String(err && err.status));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
