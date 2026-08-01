@@ -183,4 +183,66 @@ module.exports = [
       delete window.Hls;
     `,
   },
+  {
+    name: 'COMP-005 HlsPlayer uses hls.js own recovery action per error type',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // recoverMediaError() only repairs the MSE/media pipeline — it does
+      // nothing for a failed network fetch (the manifest 404ing/timing out,
+      // i.e. "hls.js fails to load"). Calling it for a network-type fatal
+      // error left the loader permanently stalled: hls.js never fired another
+      // ERROR event, so the retry counter never reached the fallback
+      // threshold and the tile stayed a silent, unexplained black frame.
+      const instances = [];
+      function FakeHls(opts) {
+        this.opts = opts;
+        this.handlers = {};
+        this.destroyed = false;
+        instances.push(this);
+      }
+      FakeHls.isSupported = () => true;
+      FakeHls.Events = { MANIFEST_PARSED: 'hlsManifestParsed', ERROR: 'hlsError' };
+      FakeHls.ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError', OTHER_ERROR: 'otherError' };
+      FakeHls.prototype.loadSource = function (src) { this.src = src; };
+      FakeHls.prototype.attachMedia = function (video) { this.video = video; };
+      FakeHls.prototype.on = function (evt, cb) { this.handlers[evt] = cb; };
+      FakeHls.prototype.trigger = function (evt, data) { if (this.handlers[evt]) this.handlers[evt](evt, data); };
+      FakeHls.prototype.startLoad = function () { this.startLoadCalls = (this.startLoadCalls || 0) + 1; };
+      FakeHls.prototype.recoverMediaError = function () { this.recoverCalls = (this.recoverCalls || 0) + 1; };
+      FakeHls.prototype.destroy = function () { this.destroyed = true; };
+      window.Hls = FakeHls;
+
+      const proto = window.HTMLMediaElement.prototype;
+      const origPlay = proto.play;
+      proto.play = () => Promise.resolve();
+
+      const render = (nodeId) => ReactDOM.flushSync(() => root.render(
+        React.createElement(window.HlsPlayer, { nodeId, onFallback: () => {} })
+      ));
+
+      render('net-node');
+      await settle();
+      const netHls = instances[0];
+      netHls.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.NETWORK_ERROR });
+      await settle();
+      A('COMP-005 a fatal NETWORK_ERROR calls hls.startLoad() (the correct network-recovery action)',
+        (netHls.startLoadCalls || 0) === 1, 'startLoadCalls=' + netHls.startLoadCalls);
+      A('COMP-005 a fatal NETWORK_ERROR does NOT misuse recoverMediaError()',
+        !netHls.recoverCalls, 'recoverCalls=' + netHls.recoverCalls);
+
+      render('media-node');
+      await settle();
+      const mediaHls = instances[1];
+      mediaHls.trigger(FakeHls.Events.ERROR, { fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR });
+      await settle();
+      A('COMP-005 a fatal MEDIA_ERROR still calls recoverMediaError() (regression guard)',
+        (mediaHls.recoverCalls || 0) === 1, 'recoverCalls=' + mediaHls.recoverCalls);
+      A('COMP-005 a fatal MEDIA_ERROR does not call startLoad()',
+        !mediaHls.startLoadCalls, 'startLoadCalls=' + mediaHls.startLoadCalls);
+
+      proto.play = origPlay;
+      delete window.Hls;
+    `,
+  },
 ];

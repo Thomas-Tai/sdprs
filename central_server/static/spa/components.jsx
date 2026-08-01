@@ -2377,6 +2377,16 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
           hls.destroy();
           hlsRef.current = null;
           if (onFallback) onFallback();
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // COMP-005: recoverMediaError() only repairs the MSE/media buffer;
+          // it does nothing for a failed network fetch (the manifest 404ing
+          // or timing out — "hls.js fails to load"). Calling the media
+          // recovery for a network-type error left the loader permanently
+          // stalled: hls.js never emitted another ERROR event, so the retry
+          // counter above never reached the fallback threshold and the tile
+          // stayed a silent, unexplained black frame forever. startLoad() is
+          // hls.js's own documented recovery action for a fatal network error.
+          hls.startLoad();
         } else {
           hls.recoverMediaError();
         }
