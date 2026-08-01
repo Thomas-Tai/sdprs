@@ -1785,6 +1785,15 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
     ? items.filter(it => (it.label + ' ' + (it.hint || '') + ' ' + it.id).toLowerCase().includes(q.toLowerCase()))
     : items.slice(0, 15);
 
+  // COMP-009: `hi` only got reset on typing (setHi(0) alongside setQ above) —
+  // but the underlying list can also shrink while the operator types NOTHING
+  // at all, because app.jsx's ~20s poll can hand this component a smaller
+  // `alerts`/`nodes` array (an alert got resolved elsewhere, a node was
+  // removed) while the palette sits open on the same query. Clamp on every
+  // render so the highlight never points past the end of the CURRENT list,
+  // for whichever reason it changed.
+  const hiSafe = matches.length ? Math.min(hi, matches.length - 1) : 0;
+
   const fire = (it) => {
     if (it.kind === 'nav') onNav(it.id);
     else if (it.kind === 'alert') { onNav('alerts'); onSelectAlert(it.id); }
@@ -1810,9 +1819,16 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
     // Firefox, which delivers keydown before the IME swallows the key. The
     // app-level shortcut handler in app.jsx already guards exactly this way.
     if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(matches.length - 1, h + 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, h - 1)); }
-    else if (e.key === 'Enter') { e.preventDefault(); matches[hi] && fire(matches[hi]); }
+    // COMP-009: navigate with a functional updater so rapid arrow presses that
+    // land in the SAME render cycle still accumulate (a plain value computed
+    // from the closure-captured hiSafe would make every press in that cycle
+    // compute the same next index). Clamp the previous index against the
+    // CURRENT (possibly shrunk) list first, so a stale hi never carries an
+    // out-of-range base into the next step. Enter fires from hiSafe — the
+    // clamped position the operator actually sees highlighted.
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(matches.length - 1, Math.min(h, matches.length - 1) + 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, Math.min(h, matches.length - 1) - 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); matches[hiSafe] && fire(matches[hiSafe]); }
   };
 
   return (
@@ -1842,7 +1858,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
             aria-expanded={matches.length > 0}
             aria-controls="cmdk-listbox"
             aria-autocomplete="list"
-            aria-activedescendant={matches.length > 0 ? `cmd-item-${hi}` : undefined}
+            aria-activedescendant={matches.length > 0 ? `cmd-item-${hiSafe}` : undefined}
           />
           <Kbd>Esc</Kbd>
         </div>
@@ -1857,7 +1873,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
           ) : (
             matches.map((it, i) => {
               const Ico = it.icon;
-              const selected = hi === i;
+              const selected = hiSafe === i;
               return (
                 <button key={`${it.kind}-${it.id}-${i}`}
                   type="button"

@@ -334,4 +334,58 @@ module.exports = [
         container.textContent.indexOf('SDPRS') !== -1);
     `,
   },
+  {
+    name: 'COMP-009 CommandPalette clamps the highlight index when live results shrink',
+    target: 'components.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // The palette stays open while app.jsx's ~20s poll keeps handing it
+      // fresh alerts/nodes props — the operator need not type anything for
+      // the underlying item list to shrink (an alert got resolved elsewhere,
+      // a node was removed). hi must never point past the end of the new,
+      // shorter matches array.
+      window.NAV_ITEMS = [];
+      // ZQ- prefix collides with none of the palette's hardcoded nav/cmd
+      // item strings, so the query below matches ONLY these 3 alerts —
+      // deterministic, unlike a bare 'A' (which also matches e.g. the
+      // hardcoded 'audit-me' command id).
+      let alerts = [
+        { id: 'ZQ1', type: 'glass_break', node: 'CAM-01', state: 'pending', sev: 'critical' },
+        { id: 'ZQ2', type: 'glass_break', node: 'CAM-02', state: 'pending', sev: 'warn' },
+        { id: 'ZQ3', type: 'glass_break', node: 'CAM-03', state: 'pending', sev: 'info' },
+      ];
+      const render = () => ReactDOM.flushSync(() => root.render(React.createElement(window.CommandPalette, {
+        open: true, onClose: () => {}, alerts, nodes: [],
+        onSelectAlert: () => {}, onNav: () => {}, onCmd: () => {},
+      })));
+      render();
+      await settle();
+
+      const input = container.querySelector('input[role="combobox"]');
+      setInput(input, 'ZQ');
+      await settle();
+      let options = Array.from(container.querySelectorAll('button[role="option"]'));
+      A('COMP-009 setup: query matches all 3 alerts', options.length === 3, options.length);
+
+      // Move the highlight down to the LAST row (index 2).
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await settle();
+      options = Array.from(container.querySelectorAll('button[role="option"]'));
+      A('COMP-009 setup: highlight sits on the last (3rd) row', options[2].getAttribute('aria-selected') === 'true');
+
+      // Live data shrinks the list to 2 items WITHOUT the operator typing —
+      // the same query ('A') still matches both remaining alerts.
+      alerts = alerts.slice(0, 2);
+      render();
+      await settle();
+      options = Array.from(container.querySelectorAll('button[role="option"]'));
+      A('COMP-009 setup: the list is now only 2 rows', options.length === 2, options.length);
+      const anySelected = options.some(o => o.getAttribute('aria-selected') === 'true');
+      A('COMP-009 the stale highlight index does not orphan (some row is still highlighted)', anySelected);
+      const activeDescendant = input.getAttribute('aria-activedescendant');
+      A('COMP-009 aria-activedescendant points at a row that still exists',
+        !!activeDescendant && !!container.querySelector('#' + activeDescendant), activeDescendant);
+    `,
+  },
 ];
