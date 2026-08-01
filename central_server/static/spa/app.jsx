@@ -2098,7 +2098,19 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
         <span className="text-ink-muted font-mono tnum">警報率 · 15min × 16</span>
         <div className="flex-1"></div>
         {handoverPin && (
-          <span className="text-ink-muted">上一班: <span className="text-ink-secondary font-mono tnum">{handoverPin.by} @ {handoverPin.at}</span> "<span className="text-ink-secondary">{handoverPin.text}</span>"</span>
+          // SHELL-020: `handoverPin.text` is a free-form operator note with no
+          // length cap — inside this h-8 footer row it used to have no
+          // truncation/overflow handling at all, so a long note could push
+          // past the footer's fixed height (wrapping to a second line) or
+          // off the edge of a 4K wall with nothing to indicate it was cut
+          // off. min-w-0 on the flex item lets it actually shrink below its
+          // content width (the flex default blocks that), and `truncate` is
+          // scoped to just the note text so the "由誰 @ 何時" prefix always
+          // stays fully visible.
+          <span className="text-ink-muted flex items-center gap-1 min-w-0 overflow-hidden">
+            <span className="flex-shrink-0 whitespace-nowrap">上一班: <span className="text-ink-secondary font-mono tnum">{handoverPin.by} @ {handoverPin.at}</span></span>
+            <span className="truncate min-w-0 text-ink-secondary">"{handoverPin.text}"</span>
+          </span>
         )}
       </div>
     </div>
