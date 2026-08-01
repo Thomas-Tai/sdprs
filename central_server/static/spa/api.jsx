@@ -272,6 +272,13 @@
       resBy: e.resolved_by || null,
       resAt: e.resolved_at ? fmtClock(parseTs(e.resolved_at)) : null,
       note: e.notes || null,
+      // DATA-022: raw epoch-ms timestamps retained so buildShiftSummary can
+      // compute real time-to-ack / time-to-resolve medians. (ackAt/resAt above
+      // are display-only HH:MM:SS strings; ackAgeSec is age-since-now, not
+      // latency.) null when the stage never happened or the stamp won't parse.
+      createdMs: created ? parseTsMs(created) : null,
+      ackMs: e.acknowledged_at ? parseTsMs(e.acknowledged_at) : null,
+      resolveMs: e.resolved_at ? parseTsMs(e.resolved_at) : null,
     };
   }
 
@@ -801,15 +808,48 @@
     return byNode;
   }
 
+  function _median(nums) {
+    if (!nums.length) return null;
+    const s = nums.slice().sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
   function buildShiftSummary(history, alerts) {
+    // DATA-022: duration / ackMedian / resolveMedian used to be hardcoded '—'
+    // even though every history row now carries created/ack/resolve epoch-ms.
+    // Derive real medians of time-to-acknowledge and time-to-resolve, plus the
+    // span of the handled window. Each falls back to '—' honestly when no row
+    // supplies the underlying data (empty shift, cold start, unparseable stamp).
+    const fmtDur = window.formatDurationShort || ((v) => (v == null ? '—' : Math.round(v) + 's'));
+    const ackSecs = [];
+    const resolveSecs = [];
+    let firstMs = null;
+    let lastMs = null;
+    history.forEach((a) => {
+      if (a.createdMs != null) {
+        if (firstMs == null || a.createdMs < firstMs) firstMs = a.createdMs;
+        if (lastMs == null || a.createdMs > lastMs) lastMs = a.createdMs;
+      }
+      if (a.createdMs != null && a.ackMs != null && a.ackMs >= a.createdMs) {
+        ackSecs.push((a.ackMs - a.createdMs) / 1000);
+      }
+      if (a.createdMs != null && a.resolveMs != null && a.resolveMs >= a.createdMs) {
+        resolveSecs.push((a.resolveMs - a.createdMs) / 1000);
+        if (lastMs == null || a.resolveMs > lastMs) lastMs = a.resolveMs;
+      }
+    });
+    const ackMed = _median(ackSecs);
+    const resolveMed = _median(resolveSecs);
+    const spanSec = (firstMs != null && lastMs != null && lastMs > firstMs) ? (lastMs - firstMs) / 1000 : null;
     return {
-      duration: '—',
+      duration: spanSec != null ? fmtDur(spanSec) : '—',
       alertsHandled: history.length,
       critical: history.filter((a) => a.sev === 'critical').length,
       warn: history.filter((a) => a.sev === 'warn').length,
       info: history.filter((a) => a.sev === 'info').length,
-      ackMedian: '—',
-      resolveMedian: '—',
+      ackMedian: ackMed != null ? fmtDur(ackMed) : '—',
+      resolveMedian: resolveMed != null ? fmtDur(resolveMed) : '—',
       carryOver: alerts.filter((a) => a.state === 'acknowledged').length,
       highlights: [],
     };

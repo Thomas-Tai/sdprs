@@ -302,6 +302,44 @@ module.exports = [
       A('DATA-014 the cycles failure is observable on the node list', nodes.pumpCyclesFailed === true, String(nodes.pumpCyclesFailed));
     `,
   },
+
+  // --------------------------------------- api.jsx: DATA-022 -----------------
+  {
+    name: 'DATA-022                     api.jsx (shift summary medians computed)',
+    target: 'api.jsx',
+    deps: ['icons.jsx', 'data.jsx'],
+    body: `
+      // buildShiftSummary used to ship duration/ackMedian/resolveMedian as a
+      // permanent '—' even though every history row carries the created/ack/
+      // resolve timestamps needed to compute them. Two resolved alerts:
+      //   time-to-ack     60s & 120s  -> median 90s  -> "2分"
+      //   time-to-resolve 300s & 600s -> median 450s -> "8分"
+      const base = 1737000000000;
+      const iso = (ms) => new Date(ms).toISOString();
+      const hist = [
+        { id: 'h1', node_id: 'n1', status: 'RESOLVED', visual_confidence: 0.9,
+          created_at: iso(base), acknowledged_at: iso(base + 60000), resolved_at: iso(base + 300000) },
+        { id: 'h2', node_id: 'n2', status: 'RESOLVED', visual_confidence: 0.5,
+          created_at: iso(base), acknowledged_at: iso(base + 120000), resolved_at: iso(base + 600000) },
+      ];
+      window.fetch = (path) => {
+        const p = String(path);
+        if (p.indexOf('/api/alerts?') === 0 && p.indexOf('status_filter=RESOLVED') !== -1) {
+          return Promise.resolve({ ok: true, status: 200, headers: { get: () => 'application/json' },
+            json: () => Promise.resolve(hist), text: () => Promise.resolve('') });
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => 'application/json' },
+          json: () => Promise.resolve([]), text: () => Promise.resolve('') });
+      };
+      await window.SDPRS_API.refreshLive();
+      const s = window.SHIFT_SUMMARY || {};
+      A('DATA-022 ackMedian is no longer the hardcoded dash', s.ackMedian && s.ackMedian !== '\\u2014', String(s.ackMedian));
+      A('DATA-022 resolveMedian is no longer the hardcoded dash', s.resolveMedian && s.resolveMedian !== '\\u2014', String(s.resolveMedian));
+      A('DATA-022 ack median of 60s & 120s renders "2分"', s.ackMedian === '2分', String(s.ackMedian));
+      A('DATA-022 resolve median of 300s & 600s renders "8分"', s.resolveMedian === '8分', String(s.resolveMedian));
+      A('DATA-022 duration span is filled when history exists', s.duration && s.duration !== '\\u2014', String(s.duration));
+    `,
+  },
 ];
 
 // keep the helper referenced so linters/bundlers don't drop it before use
