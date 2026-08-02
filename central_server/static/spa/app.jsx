@@ -1097,6 +1097,10 @@ function App({ initialError = null }) {
     if (bootRanRef.current) return;
     bootRanRef.current = true;
     let cancelled = false;
+    // NEW-RT-007 (DEFERRED): under React StrictMode's dev-only double-invoke,
+    // the first cleanup sets cancelled=true while bootRanRef stays true, so
+    // bootstrap would never complete. Inert today — no <React.StrictMode> is
+    // wired. If StrictMode is ever adopted, rework this guard.
     (async () => {
       try {
         await window.SDPRS_API.loadInitial();
