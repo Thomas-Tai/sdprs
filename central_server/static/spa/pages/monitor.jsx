@@ -75,10 +75,16 @@ function playlistHasSegment(text) {
 
 const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
-  // MSP-F9 contract: `upload` is null for a camera with no snapshot ever —
-  // `null > 60` is false, so this correctly does NOT freeze on "no data yet"
-  // and instead only freezes once we know the age (offline always freezes).
-  const frozen = node.status === 'offline' || node.upload > 60;
+  // OPS-036: was `node.status === 'offline' || node.upload > 60` only — a
+  // camera that never uploaded ANY snapshot (`upload == null`) was NOT
+  // treated as frozen here (MSP-F9's old reasoning), while components.jsx's
+  // SnapshotImage independently treats the exact same null as frozen
+  // ("Absent data is frozen data" — see its own Contract A comment) and
+  // falls back to the icon. The two disagreed: this tile showed no overlay
+  // and no grayscale, yet SnapshotImage was already refusing to render a
+  // live image — a plain fallback icon with nothing explaining why. Aligned
+  // on components.jsx's contract so both halves of the same tile agree.
+  const frozen = node.status === 'offline' || node.upload == null || node.upload > 60;
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   const isWebcam = node.type === 'webcam';
   // Live-view state for webcam tiles: off → loading (stream spinning up) → live
@@ -200,8 +206,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         ) : (
           <SnapshotImage node={node}/>
         )}
-        {/* Frozen overlay */}
-        {frozen && (
+        {/* Frozen overlay — OPS-010: `frozen` is derived from snapshot age
+            (node.upload), which says nothing about an HLS live view the
+            operator has separately opened. Without this guard, a stale
+            snapshot age painted "畫面凍結" directly over a perfectly live
+            HLS <video>. Suppress it whenever the tile is actually showing
+            the live player. */}
+        {frozen && !(isWebcam && liveMode === 'live') && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
             <div className="bg-sev-critical text-xs font-bold px-2 py-1 rounded">
               {/* MSP-F19: raw seconds ("86400s") for a node offline for days is
