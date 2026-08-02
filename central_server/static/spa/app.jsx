@@ -768,9 +768,15 @@ function App({ initialError = null }) {
     const mark = () => { lastActivityRef.current = Date.now(); };
     window.addEventListener('pointerdown', mark, { passive: true });
     window.addEventListener('keydown', mark, { passive: true });
+    // FLOW-006: scroll-only interaction (e.g. reading a long alerts history
+    // without clicking or typing) must also count as activity — an operator
+    // who spends 16 minutes scrolling through records is actively using the
+    // console and should not be logged out.
+    window.addEventListener('scroll', mark, { passive: true, capture: true });
     return () => {
       window.removeEventListener('pointerdown', mark);
       window.removeEventListener('keydown', mark);
+      window.removeEventListener('scroll', mark, true);
     };
   }, []);
 
@@ -814,6 +820,24 @@ function App({ initialError = null }) {
     }, PROBE_EVERY_MS);
     return () => clearInterval(id);
   }, [sessionExpired, showToast, refresh]);
+
+  // FLOW-002: pageshow/bfcache — if the operator uses Back after logging out
+  // (or after the session expired), the browser may restore a fully-stale page
+  // from bfcache with timers intact and no network round-trip. The page looks
+  // live but is showing data from before logout. Detect the bfcache restore
+  // and force a hard reload so the server can redirect to login.
+  useEffectA(() => {
+    const onPageShow = (e) => {
+      if (!e.persisted) return; // normal navigation, not bfcache
+      // Session was already dead when this page was frozen — reload to get
+      // redirected to login by the server.
+      if (window.__SDPRS_SESSION_EXPIRED || document.cookie.indexOf('session_id') === -1) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
 
   // Offline / online detection — toast the operator when connectivity changes
   // and trigger a refresh when the connection comes back so stale data is
@@ -1761,8 +1785,9 @@ function App({ initialError = null }) {
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
 
-      {/* Floating new-alert banner */}
-      {page === 'alerts' && newAlertBannerCount > 0 && (
+      {/* FLOW-004: new-alert banner now shows on ALL pages, not just Alerts.
+          Operators on the Monitor wall were missing new incoming alerts. */}
+      {newAlertBannerCount > 0 && (
         <window.NewAlertBanner count={newAlertBannerCount} onClick={() => {
           setNewAlertBannerCount(0);
           const firstUnseen = alerts.find(a => !a.seen);
