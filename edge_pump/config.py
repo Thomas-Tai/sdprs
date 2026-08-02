@@ -93,3 +93,27 @@ MAX_RUN_MS = 600000
 REST_MS = 60000
 DEBOUNCE_MS = 2500
 SOCKET_TIMEOUT_S = 3        # MQTT socket 逾時（秒）— 由 mqtt_client 套用於 broker socket
+
+# ============ 致動器 profile 與運作模式（spec §5.1）============
+# 兩個正交軸，互不參照：
+#   ACTUATOR_PROFILE — GPIO 33 另一端是什麼（安全時序、周邊是否存在）
+#   PUMP_MODE        — 水位代表什麼意義（觸發邏輯）
+# 預設值即為現行行為，既有節點重新燒錄後行為不變（spec §12.2）。
+ACTUATOR_PROFILE = "PUMP_12V"   # "SOCKET_220V" | "PUMP_12V"
+PUMP_MODE = "DRAIN"             # "DRAIN" | "COLLECT"
+
+# ============ 市電箱周邊腳位（僅 SOCKET_220V 建構）============
+CT_ADC_PIN = 39        # 電流互感器 — ADC1_CH3 只讀腳，WiFi 安全。35 已保留給電池
+HOA_HAND_PIN = 13      # HOA 面板開關第 2 極；HIGH_WATER 移至 26 後釋出
+
+# HOA 拉向「非 HAND」：斷線時韌體判定為 AUTO，熔接偵測維持啟用（傾向誤報）。
+# 反向配置會讓斷線永久停用熔接偵測（傾向漏報）。誤報優於盲點。
+HOA_HAND_ACTIVE_LOW = True
+
+# CT 分級門檻（ADC counts，非安培 — spec §6.1 禁止發布精確電流值）。
+# 這些是佔位值，必須在 §8.3 台架以已知電阻性負載校正後改寫。
+CT_BAND_LOW = 40       # 低於此值視為無電流
+CT_BAND_NORMAL = 120   # 低於此值視為輕載
+CT_BAND_HIGH = 900     # 高於此值視為過載
+CT_SAMPLE_RATE_HZ = 1000
+CT_SAMPLE_CYCLES = 3   # 整數個市電週期，否則殘留基波會偏移 RMS

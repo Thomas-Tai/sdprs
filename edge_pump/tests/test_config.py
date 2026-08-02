@@ -10,10 +10,36 @@ def test_thresholds_ordered():
 def test_new_sensor_pins_distinct_from_existing():
     # Battery/power pins ship as None (unwired) — only wired pins can clash.
     used = {p for p in (config.RELAY_PIN, config.LED_RED_PIN, config.LED_GREEN_PIN,
-                        config.ADC_PIN, config.BATTERY_ADC_PIN, config.POWER_SOURCE_PIN)
+                        config.ADC_PIN, config.BATTERY_ADC_PIN, config.POWER_SOURCE_PIN,
+                        config.CT_ADC_PIN, config.HOA_HAND_PIN)
             if p is not None}
     for pin in (config.FLOAT_PIN, config.RAIN_PIN, config.HIGH_WATER_PIN):
         assert pin not in used
+
+
+def test_all_wired_pins_are_unique():
+    pins = [config.RELAY_PIN, config.LED_RED_PIN, config.LED_GREEN_PIN,
+            config.ADC_PIN, config.BATTERY_ADC_PIN, config.POWER_SOURCE_PIN,
+            config.CT_ADC_PIN, config.HOA_HAND_PIN,
+            config.FLOAT_PIN, config.RAIN_PIN, config.HIGH_WATER_PIN]
+    wired = [p for p in pins if p is not None]
+    assert len(wired) == len(set(wired)), "duplicate GPIO assignment"
+
+
+def test_ct_pin_is_input_only_adc1():
+    # GPIO 39 is ADC1_CH3: input-only and unaffected by WiFi (ADC2 is not).
+    # 35 is reserved for BATTERY_ADC_PIN per the §6 commissioning note.
+    assert config.CT_ADC_PIN == 39
+
+
+def test_defaults_preserve_existing_behaviour():
+    # Reflashing a commissioned node must be behaviour-neutral (spec §12.2).
+    assert config.ACTUATOR_PROFILE == "PUMP_12V"
+    assert config.PUMP_MODE == "DRAIN"
+
+
+def test_ct_bands_ascend():
+    assert config.CT_BAND_LOW < config.CT_BAND_NORMAL < config.CT_BAND_HIGH
 
 
 def test_enable_flags_exist():
