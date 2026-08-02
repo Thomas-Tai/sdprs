@@ -421,8 +421,12 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
   // Manual-refresh button state (audit T2). Local to WeatherPage so the
   // spinner is scoped to this page — refetches all weather + related data.
   const [refreshing, setRefreshing] = useState_w(false);
+  // WXA-002: synchronous ref-latch to prevent double-click firing duplicate
+  // upstream API fan-outs. `refreshing` state can lag a React tick.
+  const refreshInFlightRef = React.useRef(false);
   const handleManualRefresh = async () => {
-    if (refreshing) return;
+    if (refreshInFlightRef.current || refreshing) return;
+    refreshInFlightRef.current = true;
     setRefreshing(true);
     try {
       // Force server-side re-tick so cached data is fresh, then let
@@ -444,6 +448,7 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
         showToast && showToast('天氣資料已重新載入', 'info');
       }
     } finally {
+      refreshInFlightRef.current = false;
       setRefreshing(false);
     }
   };
@@ -547,7 +552,12 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
                       dropped silently in the typhoon-active branch, which is
                       the highest-stakes moment for an operator to know the
                       typhoon track/distance reading might be old. */}
-                  距離 {w.typhoon.distance}km · 方位 {w.typhoon.direction} {w.typhoon.bearing}° · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}
+                  {/* WXA-007: guard distance/bearing against null — previously
+                      rendered "距離 km · 方位 °" when fields were absent. */}
+                  {w.typhoon.distance != null && <>距離 {w.typhoon.distance}km</>}
+                  {w.typhoon.distance != null && w.typhoon.direction != null && <> · </>}
+                  {w.typhoon.direction != null && <>方位 {w.typhoon.direction} {w.typhoon.bearing != null && <>{w.typhoon.bearing}°</>}</>}
+                  <> · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}</>
                 </div>
               </>
             ) : (
