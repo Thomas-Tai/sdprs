@@ -65,25 +65,9 @@ def _mk(action, state, flags, reason):
     return {"action": action, "next_state": state, "flags": flags, "reason": reason}
 
 
-def decide(readings, timing, ctrl_state, config):
-    """Return a pump decision from readings, elapsed-ms timers, and state.
-
-    Caller (pump_controller) contract — the pure function relies on the caller
-    to maintain these elapsed-ms timers in `timing` and reset them on the
-    transitions decide() signals via `next_state`:
-      - pump_on_elapsed_ms:    reset to 0 when the pump transitions to ON.
-      - level_low_elapsed_ms:  continuous ms the analog level has been <= low.
-      - rain_wet_elapsed_ms:   continuous ms rain has been asserted.
-      - burst_phase_elapsed_ms: reset to 0 when next_state["burst_phase"] changes.
-      - conflict_elapsed_ms:   reset to 0 when the conflict first latches.
-      - rest_elapsed_ms:       continuous-OFF duration — reset to 0 on each ON->OFF
-                               and cleared while ON, so the max-runtime rest measures
-                               ACTUAL rest (a conflict burst that runs the pump
-                               mid-rest restarts it rather than consuming it).
-    Failing to reset a timer on its transition causes chatter (e.g. the conflict
-    burst flapping every tick), so this contract is load-bearing.
-    """
-    state = dict(ctrl_state)
+def _preamble(readings, timing, config):
+    """Derive the mode-independent view of the world: sensor truth, vote
+    tally, conflict state, and the flags dict every layer annotates."""
     float_dry = readings.get("float_dry")  # True=dry(danger), False=safe, None=off
     rain_confirmed = _rain_confirmed(readings, timing, config)
     votes = _wet_votes(readings, config, rain_confirmed)
@@ -97,7 +81,21 @@ def decide(readings, timing, ctrl_state, config):
         "dry_run_protect": False,
         "max_runtime_rest": False,
     }
+    return float_dry, rain_confirmed, conflict_now, flags
 
+
+def _safety_guards(state, timing, config, float_dry, conflict_now, flags):
+    """Layers 1-3: the mode-INDEPENDENT safety core.
+
+    Returns a decision dict to return immediately, or None to fall through
+    to the mode's trigger layer. Mutates `state` in place on fall-through
+    paths (clearing latches), which the caller relies on.
+
+    Nothing in here may consult PUMP_MODE. Whether high water means "flood"
+    or "container full" is the trigger layer's business; whether the pump is
+    allowed to run at all is this function's, and the answer is the same in
+    both modes.
+    """
     # ---- Holdoff: ceiling was hit; stay OFF+alarm until sensors re-agree ----
     if state.get("conflict_holdoff"):
         if conflict_now:
@@ -162,7 +160,11 @@ def decide(readings, timing, ctrl_state, config):
         flags["max_runtime_rest"] = True
         return _mk("OFF", state, flags, MAX_RUNTIME_REST)
 
-    # ---- Layer 4: trigger + hysteresis ----
+    return None
+
+
+def _trigger_drain(readings, timing, state, config, flags, float_dry, rain_confirmed):
+    """Layers 4-5 for DRAIN: high water is an emergency, pump it out."""
     level = readings.get("level_pct")
     high_water = readings.get("high_water") is True
     on_threshold = config["rain_on_threshold"] if rain_confirmed else config["high_threshold"]
@@ -190,3 +192,35 @@ def decide(readings, timing, ctrl_state, config):
 
     # ---- Layer 5: standby ----
     return _mk("OFF", state, flags, STANDBY)
+
+
+def decide(readings, timing, ctrl_state, config):
+    """Return a pump decision from readings, elapsed-ms timers, and state.
+
+    DRAIN mode (the historical default). COLLECT lives in decide_collect();
+    both share _safety_guards().
+
+    Caller (pump_controller) contract — the pure function relies on the caller
+    to maintain these elapsed-ms timers in `timing` and reset them on the
+    transitions decide() signals via `next_state`:
+      - pump_on_elapsed_ms:    reset to 0 when the pump transitions to ON.
+      - level_low_elapsed_ms:  continuous ms the analog level has been <= low.
+      - rain_wet_elapsed_ms:   continuous ms rain has been asserted.
+      - burst_phase_elapsed_ms: reset to 0 when next_state["burst_phase"] changes.
+      - conflict_elapsed_ms:   reset to 0 when the conflict first latches.
+      - rest_elapsed_ms:       continuous-OFF duration — reset to 0 on each ON->OFF
+                               and cleared while ON, so the max-runtime rest measures
+                               ACTUAL rest (a conflict burst that runs the pump
+                               mid-rest restarts it rather than consuming it).
+    Failing to reset a timer on its transition causes chatter (e.g. the conflict
+    burst flapping every tick), so this contract is load-bearing.
+    """
+    state = dict(ctrl_state)
+    float_dry, rain_confirmed, conflict_now, flags = _preamble(readings, timing, config)
+
+    guarded = _safety_guards(state, timing, config, float_dry, conflict_now, flags)
+    if guarded is not None:
+        return guarded
+
+    return _trigger_drain(readings, timing, state, config, flags,
+                          float_dry, rain_confirmed)
