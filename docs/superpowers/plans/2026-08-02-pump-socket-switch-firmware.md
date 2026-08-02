@@ -255,7 +255,12 @@ import json
 import os
 
 import control_logic
-import golden_grid
+# NOT `import golden_grid`. conftest.py puts only edge_pump/ on sys.path and
+# tests/ is a package (it has __init__.py), so tests/ itself is NOT on the
+# path — a bare top-level import fails at COLLECTION time, taking both tests
+# in this file with it. The generator script gets away with `import
+# golden_grid` because it inserts tests/ into sys.path itself.
+from tests import golden_grid
 
 
 def _load_baseline():
@@ -288,6 +293,11 @@ def test_decide_matches_golden_baseline():
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests/test_decide_golden.py -q`
 Expected: FAIL — `test_decide_matches_golden_baseline` errors with "golden baseline missing". `test_grid_size_is_stable` should PASS.
+
+If instead you get `ModuleNotFoundError: No module named 'golden_grid'` and a
+**collection error** (both tests failing to run at all), the import in Step 3
+was written as `import golden_grid` rather than `from tests import
+golden_grid`. See the comment in that file.
 
 - [ ] **Step 5: Generate the baseline**
 
@@ -768,7 +778,8 @@ def test_ct_bands_ascend():
 - [ ] **Step 7: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 87 tests.
+Expected: PASS — 86 tests (72 + 10 profile + 4 config; `test_config.py` nets
+**four** new tests because Step 6 rewrites an existing one rather than adding it).
 
 - [ ] **Step 8: Commit**
 
@@ -985,7 +996,7 @@ In `apply()`, extend the pump-on/continuous-off block:
             self._on_since = None
 ```
 
-- [ ] **Step 8: Add a controller-level test**
+- [ ] **Step 8: Add the controller-level tests**
 
 Append to `edge_pump/tests/test_pump_controller.py`:
 
@@ -1006,6 +1017,43 @@ def test_min_off_timer_starts_on_off_transition():
     pump.apply({"action": "OFF", "next_state": off_state, "flags": {}, "reason": "STANDBY"})
     clock.advance(30000)
     assert pump.snapshot_timing({})["min_off_elapsed_ms"] == 30000
+
+
+def test_min_off_and_rest_timers_stay_in_lockstep():
+    """Invariant guard. `_min_off_since` and `_off_since` are deliberately
+    SEPARATE fields (spec §5.4) but are maintained by identical rules in the
+    same block of apply(), so they must hold identical values at every
+    instant. The separation buys a different None reading at the CONSUMER,
+    not different timing. If a future edit changes one transition and
+    forgets the other, the two silently diverge and Layer 3.5 starts
+    measuring something nobody designed — this test is what catches it."""
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+    clock = FakeClock()
+    pump = PumpController(FakePin(0), FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, clock)
+
+    def both():
+        t = pump.snapshot_timing({})
+        return t["rest_elapsed_ms"], t["min_off_elapsed_ms"]
+
+    on = dict(pump.ctrl_state, pump_state="ON")
+    off = dict(pump.ctrl_state, pump_state="OFF")
+
+    assert both()[0] == both()[1]                      # cold: both None
+    pump.apply({"action": "ON", "next_state": on, "flags": {}, "reason": "HIGH_WATER"})
+    clock.advance(5000)
+    assert both()[0] == both()[1]                      # running: both None
+    pump.apply({"action": "OFF", "next_state": off, "flags": {}, "reason": "STANDBY"})
+    clock.advance(7000)
+    r, m = both()
+    assert r == m == 7000
+    # A burst that runs the pump mid-rest must restart BOTH clocks.
+    pump.apply({"action": "ON", "next_state": dict(on), "flags": {}, "reason": "CONFLICT_BURST_ON"})
+    pump.apply({"action": "OFF", "next_state": dict(off), "flags": {}, "reason": "STANDBY"})
+    clock.advance(1000)
+    r, m = both()
+    assert r == m == 1000
 ```
 
 - [ ] **Step 9: Keep `build_config()` in step with `DEFAULT_CONFIG`**
@@ -1039,7 +1087,7 @@ Expected: `unexpected changes: 0 []`
 - [ ] **Step 11: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 97 tests.
+Expected: PASS — 97 tests (86 + 9 min-off + 2 controller).
 
 - [ ] **Step 12: Commit**
 
@@ -1075,7 +1123,7 @@ flag; no decision changed (the guard is inert at min_off_ms=0)."
 
 **Interfaces:**
 - Consumes: profile keys `boot_holdoff_ms`, `boot_holdoff_urgent_ms`, `boot_loop_holdoff_ms`, `boot_loop_threshold`, `boot_healthy_ms` (Task 3)
-- Produces: `persist.open_nvs() -> NVS | None`; `persist.read_boot_count(nvs) -> int`; `persist.register_boot(nvs) -> int`; `persist.clear_boot_count(nvs) -> None`; `boot_guard.is_reset_loop(boot_count, threshold) -> bool`; `boot_guard.holdoff_total_ms(profile, urgent, reset_loop) -> int`; `boot_guard.holdoff_remaining_ms(elapsed_ms, total_ms) -> int`; `boot_guard.is_boot_healthy(uptime_ms, profile) -> bool`; `fakes.FakeNVS`
+- Produces: `persist.open_nvs() -> NVS | None`; `persist.read_boot_count(nvs) -> int`; `persist.register_boot(nvs) -> int`; `persist.clear_boot_count(nvs) -> None`; `boot_guard.is_reset_loop(boot_count, threshold) -> bool`; `boot_guard.holdoff_total_ms(profile, urgent, reset_loop) -> int`; `boot_guard.holdoff_remaining_ms(elapsed_ms, total_ms) -> int`; `boot_guard.is_boot_healthy(uptime_ms, profile) -> bool`; `boot_guard.make_holdoff_tracker(profile, reset_loop) -> callable(uptime_ms, urgent) -> int`; `fakes.FakeNVS`
 
 > **Nothing calls any of this until Task 7.** This task ends with a green
 > suite and a hold-off that protects nothing — the modules exist, the unit
@@ -1263,11 +1311,25 @@ def read_boot_count(nvs):
 
 
 def register_boot(nvs):
-    """Increment the persisted boot counter. Call EXACTLY ONCE per boot.
+    """Increment the persisted boot counter. Call EXACTLY ONCE per boot,
+    and only on a profile that actually uses it (boot_loop_threshold > 0) —
+    every call costs a flash erase cycle.
 
-    Returns the new count, or 0 if it could not be persisted (in which case
-    reset-loop detection is inactive, which is the safe direction: it only
-    ever lengthens a hold-off).
+    Returns the new count, or 0 if it could not be persisted.
+
+    BE CLEAR ABOUT WHAT A 0 MEANS: it makes is_reset_loop() False, so the
+    node falls back to the NORMAL hold-off instead of the longer reset-loop
+    one. That is the UNSAFE direction — the detector reads "no anomaly"
+    when it simply cannot see. It is the same failure direction that got
+    RTC memory rejected in spec finding B2, reached by a different route
+    (unavailable or worn flash rather than a brownout clearing the store).
+
+    It is tolerated because the alternative — refusing to run without NVS —
+    would let a dead flash partition stop a pump during a flood, and that
+    is worse. It is NOT tolerated silently: publish `nvs_ok` so "counter is
+    zero" and "counter is unreadable" are distinguishable at the dashboard
+    (Task 11), because from the telemetry alone they otherwise look
+    identical.
     """
     n = read_boot_count(nvs) + 1
     return n if _write(nvs, BOOT_COUNT_KEY, n) else 0
@@ -1369,6 +1431,56 @@ def test_boot_healthy_after_the_window():
 def test_boot_healthy_is_false_when_disabled():
     # boot_healthy_ms == 0 means the counter is unused; never clear it.
     assert boot_guard.is_boot_healthy(999999, demo()) is False
+
+
+# ---- The tracker: the hold-off must never come BACK ----
+
+def test_tracker_counts_down_and_then_stays_released():
+    t = boot_guard.make_holdoff_tracker(mains(), reset_loop=False)
+    assert t(0, urgent=False) == 60000
+    assert t(20000, urgent=False) == 40000
+    assert t(60000, urgent=False) == 0
+    assert t(60001, urgent=False) == 0
+
+
+def test_tracker_does_not_reengage_when_urgency_ends():
+    """THE regression this tracker exists for.
+
+    Boot into a flood: high_water is True, so the hold-off shortens to 10s
+    and the pump starts. Thirty seconds later the pump has done its job and
+    high_water clears — which makes `urgent` False, which makes
+    holdoff_total_ms() return to 60000. Recomputing remaining time from
+    that would give 60000-40000 = 20000 and force a RUNNING pump off, and
+    under SOCKET_220V that ON->OFF transition starts a 180s min-off
+    lockout. A basement that pumped for 30 seconds would then refuse to
+    pump for another three minutes, in the exact scenario the urgent
+    shortening was added for (spec §5.6, finding A5).
+
+    Once released, released stays."""
+    t = boot_guard.make_holdoff_tracker(mains(), reset_loop=False)
+    assert t(0, urgent=True) == 10000        # flood: shortened
+    assert t(10000, urgent=True) == 0        # released, pump may start
+    assert t(40000, urgent=False) == 0       # water gone — must NOT come back
+    assert t(41000, urgent=False) == 0
+
+
+def test_tracker_still_shortens_when_urgency_appears_mid_holdoff():
+    # The shortening direction must keep working: water rises during a
+    # normal 60s hold-off and the response must not wait the full minute.
+    t = boot_guard.make_holdoff_tracker(mains(), reset_loop=False)
+    assert t(0, urgent=False) == 60000
+    assert t(15000, urgent=True) == 0        # 15s > the 10s urgent total
+
+
+def test_tracker_reset_loop_ignores_urgency():
+    t = boot_guard.make_holdoff_tracker(mains(), reset_loop=True)
+    assert t(0, urgent=True) == 300000
+    assert t(60000, urgent=True) == 240000
+
+
+def test_tracker_is_inert_on_the_demo_profile():
+    t = boot_guard.make_holdoff_tracker(demo(), reset_loop=False)
+    assert t(0, urgent=False) == 0
 ```
 
 - [ ] **Step 7: Run to verify it fails**
@@ -1434,17 +1546,50 @@ def is_boot_healthy(uptime_ms, profile):
     if window <= 0:
         return False
     return uptime_ms is not None and uptime_ms >= window
+
+
+def make_holdoff_tracker(profile, reset_loop):
+    """Return a callable (uptime_ms, urgent) -> remaining_ms that LATCHES.
+
+    holdoff_total_ms() is a function of `urgent`, and `urgent` can go from
+    True back to False — a flood clears, which is the SUCCESS case, not an
+    edge case. Recomputing the remaining time from a total that just grew
+    would re-impose a hold-off on an already-running pump. Under
+    SOCKET_220V that forced ON->OFF starts the 180s min-off lockout, so
+    the pump would refuse to run for three minutes immediately after
+    proving it works (spec §5.6, finding A5).
+
+    So: the hold-off may SHORTEN while it is running, but once it reaches
+    zero it is done for this boot. `machine.reset()` is what starts a new
+    one — which is exactly right, because that is the event it guards.
+
+    Kept here rather than as a closure inside main() so the latch is a pure
+    thing that can be tested; main() only supplies the uptime.
+    """
+    state = {"released": False}
+
+    def remaining(uptime_ms, urgent):
+        if state["released"]:
+            return 0
+        total = holdoff_total_ms(profile, urgent, reset_loop)
+        left = holdoff_remaining_ms(uptime_ms, total)
+        if left <= 0:
+            state["released"] = True
+            return 0
+        return left
+
+    return remaining
 ```
 
 - [ ] **Step 9: Run the boot-guard test**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests/test_boot_guard.py -q`
-Expected: PASS — 12 tests.
+Expected: PASS — 16 tests.
 
 - [ ] **Step 10: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 117 tests.
+Expected: PASS — 121 tests (97 + 8 persist + 16 boot-guard).
 
 - [ ] **Step 11: Confirm the spec already carries these parameters**
 
@@ -1717,7 +1862,7 @@ Expected: `unexpected changes: 0 []`
 - [ ] **Step 8: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 131 tests.
+Expected: PASS — 135 tests.
 
 - [ ] **Step 9: Commit**
 
@@ -1742,13 +1887,14 @@ DRAIN paths verified unchanged against the golden baseline."
 ## Task 7: Mode dispatch, profile wiring, and strict manual-ON rejection
 
 **Files:**
-- Modify: `edge_pump/main.py` (`build_config`, new `build_decider`, `apply_manual_override`, `main()` init)
+- Modify: `edge_pump/main.py` (`build_config`, new `build_decider`, new `resolve_runtime`, new `_run_config_error_loop`, `apply_manual_override`, new `apply_boot_holdoff`, `run_iteration`, `main()` init)
+- Modify: `edge_pump/control_logic.py` (`rest_remaining_ms` flag, `BOOT_HOLDOFF`, `CONFIG_ERROR`)
 - Modify: `edge_pump/tests/test_manual_override.py`
 - Modify: `edge_pump/tests/test_main_iteration.py`
 
 **Interfaces:**
 - Consumes: `profiles.get_profile`, `profiles.validate` (Task 3); `control_logic.decide_collect` (Task 6); `persist.open_nvs`, `persist.register_boot`, `persist.clear_boot_count` (Task 5); `boot_guard.is_reset_loop`, `boot_guard.holdoff_total_ms`, `boot_guard.holdoff_remaining_ms`, `boot_guard.is_boot_healthy` (Task 5)
-- Produces: `main.build_decider(mode) -> callable`; `main.build_config(profile)` gains `min_off_ms`; `main.apply_manual_override(decision, manual_state, clock, strict=False)`; `manual_state["last_rejected"]` and `manual_state["last_rejected_remaining_ms"]`; `main.apply_boot_holdoff(decision, remaining_ms) -> decision dict`; `run_iteration(..., boot_holdoff=None)` where `boot_holdoff` is a callable `(readings) -> remaining_ms`; `control_logic.BOOT_HOLDOFF`
+- Produces: `main.build_decider(mode) -> callable`; `main.resolve_runtime() -> (profile, decider, error_message|None)`; `main.build_config(profile)` gains `min_off_ms`; `main.apply_manual_override(decision, manual_state, clock, strict=False)`; `manual_state["last_rejected"]`, `["last_rejected_flag"]` and `["last_rejected_remaining_ms"]`; `main.apply_boot_holdoff(decision, remaining_ms) -> decision dict`; `run_iteration(..., boot_holdoff=None)` where `boot_holdoff` is a callable `(readings) -> remaining_ms`; `control_logic.BOOT_HOLDOFF`; `control_logic.CONFIG_ERROR`
 
 > **This task is where Task 5's `boot_guard` stops being dead code.** Task 5 builds and tests the module in isolation; nothing calls it until the wiring below. Do not mark Task 5 done and move on believing the hold-off is live — until Step 8 of this task lands, a reset loop restarts the motor on every boot exactly as if `boot_guard.py` had never been written.
 
@@ -1867,6 +2013,40 @@ def test_strict_mode_rejects_manual_on_during_boot_holdoff():
     out, new_manual = apply_manual_override(decision, manual, FakeClock(), strict=True)
     assert out["action"] == "OFF"
     assert new_manual["last_rejected_remaining_ms"] == 30000
+
+
+# ---- Configuration errors must report, not reset ----
+
+def test_resolve_runtime_returns_the_configured_profile():
+    import main
+    profile, decider, err = main.resolve_runtime()
+    assert err is None
+    assert profile["min_off_ms"] == 0        # PUMP_12V ships as the default
+    assert decider is not None
+
+
+def test_resolve_runtime_reports_an_unknown_mode_instead_of_raising(monkeypatch):
+    # A one-character typo in PUMP_MODE must not become a boot loop. The
+    # init block it used to raise inside ends in machine.reset(), and a
+    # config error recurs on every boot, so the node would vanish rather
+    # than report — before register_boot() ever runs, so without even a
+    # boot counter to show for it.
+    import config, main
+    monkeypatch.setattr(config, "PUMP_MODE", "SIPHON")
+    profile, decider, err = main.resolve_runtime()
+    assert err is not None and "SIPHON" in err
+    assert profile is not None and decider is not None   # inert stand-ins
+
+
+def test_resolve_runtime_reports_a_missing_watchdog_instead_of_raising(monkeypatch):
+    # WDT_ENABLED = False is a documented debugging step (config.py:60);
+    # under SOCKET_220V it is forbidden, and it must fail loudly-and-online
+    # rather than loudly-and-offline.
+    import config, main
+    monkeypatch.setattr(config, "ACTUATOR_PROFILE", "SOCKET_220V")
+    monkeypatch.setattr(config, "WDT_ENABLED", False)
+    profile, decider, err = main.resolve_runtime()
+    assert err is not None and "WDT_ENABLED" in err
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -2010,7 +2190,14 @@ Then add `apply_boot_holdoff` immediately after `apply_manual_override`:
 
 ```python
 def apply_boot_holdoff(decision, remaining_ms):
-    """Suppress pump-ON while the post-reset hold-off is still running.
+    """Force the pump OFF while the post-reset hold-off is still running.
+
+    NOTE THE ASYMMETRY WITH ITS NAME: this does not merely veto a *start*,
+    it drives the actuator OFF on any tick where time remains — including
+    a tick where the pump is already running. During the boot window that
+    is the same thing (the pump starts OFF), which is why the caller must
+    never let the hold-off come back after it has expired. See
+    `boot_guard.make_holdoff_tracker`.
 
     `_off_since` lives in RAM, so every reset makes the node believe the
     pump has never run and the min-off guard passes instantly. A WDT reset
@@ -2087,12 +2274,32 @@ In `main()`, inside the init `try:` block, before `if config.WDT_ENABLED:`:
         profiles.validate(profile, config.WDT_ENABLED)
         decider = build_decider(config.PUMP_MODE)
         nvs = persist.open_nvs()
-        boot_count = persist.register_boot(nvs)
+        # Only profiles that USE the counter pay for it. Under PUMP_12V,
+        # boot_loop_threshold is 0 (detection off) and boot_healthy_ms is 0
+        # (is_boot_healthy is never True, so clear_boot_count is never
+        # called) — registering there would burn one flash erase cycle per
+        # boot on a monotonic counter with no reset path, on exactly the
+        # bench nodes that get power-cycled most.
+        if profile["boot_loop_threshold"] > 0:
+            boot_count = persist.register_boot(nvs)
+        else:
+            boot_count = 0
         reset_loop = boot_guard.is_reset_loop(boot_count,
                                               profile["boot_loop_threshold"])
         print("[MAIN] profile=%s mode=%s boot_count=%d reset_loop=%s"
               % (config.ACTUATOR_PROFILE, config.PUMP_MODE, boot_count, reset_loop))
 ```
+
+> **Where this block goes matters for a reason the surrounding code makes
+> non-obvious.** The init `try:` in `main()` ends with
+> `except Exception: ... machine.reset()`. Anything raised in here therefore
+> becomes a **reset**, and a *configuration* error raised on every boot
+> becomes an unrecoverable boot loop that leaves no trace — `register_boot`
+> has not run yet, so even the boot counter stays silent. `WDT_ENABLED =
+> False` is a documented debugging step (`config.py:60`) and a `PUMP_MODE`
+> typo is a single character, so this is a likely mistake, not a theoretical
+> one; under the §4.8 split-bay decision the fix is a site visit. Step 6a
+> below moves the two config checks out of that path.
 
 Replace `cfg = build_config()` with:
 
@@ -2100,20 +2307,127 @@ Replace `cfg = build_config()` with:
     cfg = build_config(profile)
 ```
 
-- [ ] **Step 7: Build the hold-off closure**
+- [ ] **Step 6a: Keep configuration errors out of the reset path**
+
+Replace the two raising calls from Step 6 (`profiles.validate` and
+`build_decider`) with a wrapper that reports instead of raising. Add above
+`main()`:
+
+```python
+def resolve_runtime():
+    """Resolve (profile, decider) from config WITHOUT raising.
+
+    Returns (profile, decider, error_message|None).
+
+    Why this exists: main()'s init block ends in
+    `except Exception: ... machine.reset()`. A ValueError from
+    profiles.validate() or build_decider() is a CONFIGURATION error, so it
+    recurs on every boot — reset, re-raise, reset, forever. It also fires
+    before register_boot(), so the boot counter never moves and the node
+    leaves no trace of why it vanished. `WDT_ENABLED = False` is a
+    documented debugging step and `PUMP_MODE` is one typo away from
+    unknown, so this is a likely mistake; under the §4.8 split-bay decision
+    recovering from it means a site visit.
+
+    On error we return an INERT stand-in profile. It is not a fallback the
+    node runs on — main() refuses to enter the control loop at all. It
+    exists only so the rest of init can finish constructing the objects the
+    error loop needs (a PUMP_12V profile touches no CT or HOA pins and
+    no-ops the contactor counter), and so nothing downstream has to handle
+    `profile is None`.
+    """
+    try:
+        profile = profiles.get_profile(config.ACTUATOR_PROFILE)
+        profiles.validate(profile, config.WDT_ENABLED)
+        return profile, build_decider(config.PUMP_MODE), None
+    except (ValueError, KeyError) as e:
+        return profiles.get_profile("PUMP_12V"), control_logic.decide, str(e)
+```
+
+`profiles` must be importable at module level for this, so move
+`import profiles` to the top of `main.py` alongside `import control_logic`
+(it is pure — no `machine`, no `esp32` — so it is safe there). In the Step 6
+block, replace these three lines:
+
+```python
+        profile = profiles.get_profile(config.ACTUATOR_PROFILE)
+        profiles.validate(profile, config.WDT_ENABLED)
+        decider = build_decider(config.PUMP_MODE)
+```
+
+with:
+
+```python
+        profile, decider, config_error = resolve_runtime()
+```
+
+Then add the refusal loop. After the init `try/except` block and before
+`cfg = build_config(profile)`:
+
+```python
+    if config_error is not None:
+        _run_config_error_loop(pump, mqtt, wdt, config_error)
+        return
+```
+
+and define it above `main()`:
+
+```python
+def _run_config_error_loop(pump, mqtt, wdt, message):
+    """Hold the pump OFF and keep saying why, without ever resetting.
+
+    A configuration error is not transient — resetting reproduces it on the
+    next boot and the node disappears instead of reporting. OFF is already
+    the safe physical state (the coil is de-energised and the contactor
+    drops out), so the useful thing left to do is stay reachable and keep
+    publishing the reason. An operator seeing CONFIG_ERROR knows to reflash;
+    an operator seeing nothing at all has to drive out and open the box.
+    """
+    print("[MAIN] CONFIG ERROR (refusing to run): %s" % message)
+    off_state = dict(pump.ctrl_state)
+    off_state["pump_state"] = "OFF"
+    pump.apply({"action": "OFF", "next_state": off_state,
+                "flags": {"config_error": True},
+                "reason": control_logic.CONFIG_ERROR})
+    while True:
+        try:
+            mqtt.publish_status("OFF", 0.0, {"config_error": True},
+                                control_logic.CONFIG_ERROR)
+            mqtt.check_msg()
+        except Exception:
+            pass          # network trouble must not turn this into a reset
+        if wdt:
+            wdt.feed()
+        time.sleep(config.POLL_INTERVAL)
+```
+
+> The WDT is still fed here on purpose. A hung *loop* is what the watchdog
+> is for; a node that has correctly diagnosed its own misconfiguration and
+> parked the actuator OFF is not hung, and resetting it would only restart
+> the cycle this step exists to break.
+
+Add the reason constant in `control_logic.py` next to `BOOT_HOLDOFF`:
+
+```python
+CONFIG_ERROR = "CONFIG_ERROR"
+```
+
+- [ ] **Step 7: Build the hold-off tracker**
 
 Still in `main()`, after `cfg = build_config(profile)` and before the main
 loop. **This is the step that puts Task 5's `boot_guard` on the control path
 — without it the module is written, tested, and never called.**
 
 ```python
-    # Post-reset hold-off. Re-evaluated per tick because urgency can change:
+    # Post-reset hold-off. Re-evaluated per tick because urgency can SHORTEN
+    # it mid-run; the tracker is what stops it ever getting LONGER again.
     # `boot_started` is captured here rather than read from a timer the reset
     # cleared, which is the whole reason the counter had to move to NVS.
     boot_holdoff = None
     boot_cleared = False
     if profile["boot_holdoff_ms"] or profile["boot_loop_holdoff_ms"]:
         boot_started = clock.ticks_ms()
+        holdoff_tracker = boot_guard.make_holdoff_tracker(profile, reset_loop)
 
         def boot_holdoff(readings):
             nonlocal boot_cleared
@@ -2130,13 +2444,22 @@ loop. **This is the step that puts Task 5's `boot_guard` on the control path
                 # count climbs and the loop is detected.
                 persist.clear_boot_count(nvs)
                 boot_cleared = True
-            return boot_guard.holdoff_remaining_ms(
-                uptime, boot_guard.holdoff_total_ms(profile, urgent, reset_loop))
+            return holdoff_tracker(uptime, urgent)
 ```
 
 > A reset loop deliberately ignores `urgent`: a node rebooting every 30
 > seconds cannot vouch for the sensor reading that claims urgency
 > (`boot_guard.holdoff_total_ms`, Task 5).
+>
+> **Go through `make_holdoff_tracker` rather than calling
+> `holdoff_remaining_ms(uptime, holdoff_total_ms(...))` directly here.** The
+> total is a function of `urgent`, and `urgent` goes back to False the moment
+> the pump succeeds in clearing the high-water sensor. Recomputing from the
+> grown total would force a *running* pump off partway through a drain, and
+> under `SOCKET_220V` that ON→OFF transition immediately starts the 180s
+> min-off lockout — three minutes of refusing to pump, triggered by the pump
+> working. The tracker latches at zero so the hold-off can shorten but never
+> return (Task 5, `test_tracker_does_not_reengage_when_urgency_ends`).
 
 - [ ] **Step 8: Pass both into the loop**
 
@@ -2203,7 +2526,7 @@ def test_run_iteration_resumes_when_the_holdoff_expires():
 - [ ] **Step 10: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 143 tests.
+Expected: PASS — 150 tests (135 + 13 manual-override + 2 run_iteration).
 
 - [ ] **Step 11: Regenerate the baseline and check**
 
@@ -2423,10 +2746,20 @@ uncalibrated ESP32 ADC is +-10-20% and a published number gets believed
 **Files:**
 - Modify: `edge_pump/current_sense.py` (add `diagnose`)
 - Modify: `edge_pump/control_logic.py` (add `OVERLOAD_TRIP`)
-- Modify: `edge_pump/main.py` (add `apply_overload_interlock`, CT read in the loop)
+- Modify: `edge_pump/main.py` (add `apply_overload_interlock`, extend `build_sensor_config`)
 - Modify: `edge_pump/sensors.py` (CT + HOA readers)
 - Modify: `edge_pump/tests/test_current_sense.py`
 - Create: `edge_pump/tests/test_overload_interlock.py`
+
+> **This task ends with the interlock built, tested, and called by nothing.**
+> `apply_overload_interlock` is not wired into `run_iteration` here, and
+> nothing samples the `readers["ct"]` that Step 9 creates — that happens in
+> **Task 11 Step 4**. So a green suite at the end of this task is *not*
+> evidence that overload protection works, in exactly the way Task 5's
+> `boot_guard` was not evidence the hold-off worked. Say so in the handoff
+> rather than letting the passing tests imply otherwise, and do not flash
+> `SOCKET_220V` to a mains node believing the CT protects anything until
+> Task 11 has landed.
 
 **Interfaces:**
 - Consumes: `current_sense.classify_band` (Task 8)
@@ -2694,7 +3027,8 @@ Update both `build_sensor_config()` call sites in `main()` to `build_sensor_conf
 - [ ] **Step 10: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 155 tests.
+Expected: PASS — 171 tests (150 after Task 7, **+8 from Task 8** which has no
+full-suite step of its own, +7 diagnose, +6 interlock).
 
 - [ ] **Step 11: Compile-check**
 
@@ -2850,7 +3184,7 @@ In `edge_pump/main.py`, replace the `PumpController(...)` construction:
 - [ ] **Step 6: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 158 tests.
+Expected: PASS — 174 tests.
 
 - [ ] **Step 7: Commit**
 
@@ -2883,7 +3217,7 @@ stop the pump from running."
 
 **Interfaces:**
 - Consumes: `current_sense.classify_band`, `current_sense.diagnose` (Tasks 8–9); `persist.read_contactor_ops` (Task 5)
-- Produces: `build_payload(..., extra=None)` — `extra` is a dict of additive fields merged last; payload keys `actuator_profile`, `pump_mode`, `current_band`, `hoa_hand`, `contactor_ops`, `contactor_service_due`, `boot_count`, `ct_verdict`; `profiles.service_due(profile, ops) -> bool`
+- Produces: `build_payload(..., extra=None)` — `extra` is a dict of additive fields merged last, plus a widened flag pass-through; payload keys `actuator_profile`, `pump_mode`, `current_band`, `hoa_hand`, `contactor_ops`, `contactor_service_due`, `boot_count`, `nvs_ok`, `ct_verdict`, `manual_rejected`, `manual_rejected_remaining_ms`, and the timing flags `min_off_wait` / `max_runtime_rest` / `container_full` / `overload_trip` / `boot_holdoff` / `config_error` with their `*_remaining_ms` companions; `profiles.service_due(profile, ops) -> bool`
 
 > **`contactor_service_ops` becomes a real threshold here.** Task 3 puts the
 > number in the profile table and Task 10 counts operations against it, but
@@ -2935,6 +3269,33 @@ def test_no_precise_amp_field_is_published():
                       extra={"current_band": "normal"})
     assert "current_a" not in p
     assert "current_amps" not in p
+
+
+def test_timing_flags_and_remaining_times_are_published():
+    """Spec §5.7 promises the dashboard can say WHY a manual ON did nothing
+    and WHEN it will work. build_payload cherry-picks flags by name, so
+    every flag added since — min_off_wait, boot_holdoff, container_full,
+    overload_trip and the *_remaining_ms values — was being computed and
+    then dropped at this boundary. Without this the bench matrix item
+    'reject and report the remaining seconds' has nothing to observe."""
+    from mqtt_client import build_payload
+    p = build_payload("n1", "2026-08-02T00:00:00Z", "OFF", 0.0,
+                      {"min_off_wait": True, "min_off_remaining_ms": 120000},
+                      "MIN_OFF_WAIT")
+    assert p["min_off_wait"] is True
+    assert p["min_off_remaining_ms"] == 120000
+
+
+def test_falsy_timing_flags_are_omitted_rather_than_published_as_false():
+    # These flags are False on almost every tick. Publishing them all would
+    # roughly double a 2-second payload for no information.
+    from mqtt_client import build_payload
+    p = build_payload("n1", "2026-08-02T00:00:00Z", "ON", 50.0,
+                      {"min_off_wait": False, "container_full": False,
+                       "overload_trip": False},
+                      "HIGH_WATER")
+    for key in ("min_off_wait", "container_full", "overload_trip"):
+        assert key not in p
 ```
 
 And append to `edge_pump/tests/test_profiles.py`:
@@ -2972,6 +3333,13 @@ def test_service_due_tolerates_a_missing_count():
 > `persist` a way to signal "unavailable" separately from "zero", which
 > changes the contract every caller shares; it is not worth doing inside a
 > telemetry task. Logged in the deferrals table below.
+>
+> **The wear counter is the milder half of that.** The same coercion makes
+> `read_boot_count()` return 0, so `is_reset_loop()` is False and the node
+> falls back to the 60s hold-off instead of the 300s one — a *protection*
+> failing silent, and failing in the same direction spec finding B2 rejected
+> RTC memory for. The `nvs_ok` field added in Step 6 is the mitigation:
+> it does not restore the protection, it makes its absence visible.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -2991,6 +3359,19 @@ def build_payload(node_id, timestamp, pump_state, water_level, flags, reason,
 and before `return p`:
 
 ```python
+    # Operator-facing flags added since the original six. Still an explicit
+    # whitelist rather than `p.update(flags)` — flags also carries internal
+    # bookkeeping, and a payload that grows whenever someone adds a flag is
+    # how private state ends up on the wire. Included only when truthy: all
+    # of these are False on the overwhelming majority of ticks, and this
+    # payload goes out every 2 seconds.
+    for k in ("min_off_wait", "max_runtime_rest", "container_full",
+              "overload_trip", "boot_holdoff", "config_error",
+              "rest_remaining_ms", "min_off_remaining_ms",
+              "boot_holdoff_remaining_ms"):
+        if flags.get(k):
+            p[k] = flags[k]
+
     if extra:
         # Additive only. Core fields are re-asserted afterwards so a bug in
         # the extra-builder can never make telemetry misreport pump_state.
@@ -3081,12 +3462,21 @@ and extend the `publish_cb` call at the end of `run_iteration`:
 
 ```python
     pump.apply(decision)
+    # `manual_state` has already been updated in place above, so a rejection
+    # recorded this tick is visible here. Without these two keys the
+    # remaining time computed by apply_manual_override never leaves the
+    # device and spec §5.7's "tell the operator why the click did nothing"
+    # is not delivered by anything.
+    manual = manual_state or {}
     publish_cb(pump_state=pump.state,
                water_level=synthesize_display_level(readings),
                flags=decision["flags"], reason=decision["reason"],
                extra={"current_band": readings.get("_current_band"),
                       "hoa_hand": readings.get("_hoa_hand"),
-                      "ct_verdict": ct_verdict})
+                      "ct_verdict": ct_verdict,
+                      "manual_rejected": manual.get("last_rejected_flag"),
+                      "manual_rejected_remaining_ms":
+                          manual.get("last_rejected_remaining_ms")})
     return decision
 ```
 
@@ -3143,9 +3533,19 @@ Replace `publish_cb` in `main()`:
         now = time.ticks_ms()
         if time.ticks_diff(now, last_publish) >= config.PUBLISH_INTERVAL * 1000:
             battery_voltage, power_source = _read_power(battery_adc, power_source_pin)
+            # `nvs_ok` exists so "boot_count is 0" and "boot_count is
+            # unreadable" are distinguishable. persist._read() coerces every
+            # failure to 0, so without this a node with a dead flash
+            # partition reports boot_count=0 forever — which reads as a
+            # perfectly healthy node while reset-loop detection is silently
+            # off, the same failure DIRECTION that got RTC memory rejected
+            # in spec finding B2. This catches an unavailable namespace,
+            # not a partially-worn one; it narrows the blind spot rather
+            # than closing it.
             merged = {"actuator_profile": config.ACTUATOR_PROFILE,
                       "pump_mode": config.PUMP_MODE,
-                      "boot_count": boot_count}
+                      "boot_count": boot_count,
+                      "nvs_ok": nvs is not None}
             if profile["contactor_service_ops"]:
                 ops = persist.read_contactor_ops(nvs)
                 merged["contactor_ops"] = ops
@@ -3165,7 +3565,7 @@ Replace `publish_cb` in `main()`:
 - [ ] **Step 7: Run the full suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 165 tests.
+Expected: PASS — 183 tests (174 + 6 payload + 3 service-due).
 
 - [ ] **Step 8: Compile-check**
 
@@ -3282,11 +3682,29 @@ Create `docs/deployment/mains-box-commissioning.md`:
 
 ## 1. 採購前硬性關卡（規格 §10）
 
-- [ ] **現場迴路確認為 220V**（台灣民生為 110V）。實測電壓：______ V
-- [ ] 若為 110V：宣告最大值減半，BOM 全面重算，**本表作廢重來**
+### 1.1 供電拓樸（**決定極數，必須在下單前量測**）
+
+台灣民生 220V 多為**單相三線 110/220V**，負載跨 **L1–L2 兩條火線**，
+對地各 110V。若如此，**單極切換會讓插座在接觸器正常斷開時仍有一支腳
+帶 110V**，接觸器與 MPCB 都必須是雙極。若為三相四線 380/220V 則 L–N
+成立，單極切換符合慣例。**不量測就無法選型。**
+
+| 量測點 | 實測值 | 判定 |
+|---|---|---|
+| L1 – PE | ______ V | |
+| L2（或 N）– PE | ______ V | ≈0V → L–N；≈110V → **L–L** |
+| L1 – L2（或 L–N） | ______ V | 應為 ≈220V |
+
+- [ ] 拓樸判定：☐ L–N（單極可）　☐ **L–L（接觸器與 MPCB 皆須雙極）**
+- [ ] 若為 110V 單相：宣告最大值減半，BOM 全面重算，**本表作廢重來**
+
+### 1.2 其餘關卡
+
 - [ ] 宣告最大值已簽署核可：______ A / ______ W
 - [ ] 所購接觸器**資料表 AC3 欄位**額定：______ A（不是型號上的數字）
 - [ ] AC3 額定 ≥ 宣告最大電流
+- [ ] 接觸器主接點極數 ______ P、MPCB 極數 ______ P，與 §1.1 判定相符
+- [ ] 已納入突波保護器 SPD（規格 §4.2）
 
 ## 2. 電氣安全（每項必測，記錄實測值）
 
@@ -3299,6 +3717,8 @@ Create `docs/deployment/mains-box-commissioning.md`:
 | 5 | 絕緣電阻 L-PE | > 1 MΩ | | ☐ |
 | 6 | 絕緣電阻 N-PE | > 1 MΩ | | ☐ |
 | 7 | MPCB 過載設定值 | = 宣告最大電流 | | ☐ |
+| 7a | **接觸器斷開時插座對地電壓**（每一極） | L–L 供電且單極切換時此值 ≈110V＝**不合格** | | ☐ |
+| 7b | SPD 已安裝於 RCD 上游且指示窗正常 | 目視 | | ☐ |
 
 ## 2.1 CT 二次側開路防護（規格 §4.6.1）〔安全要求〕
 
@@ -3346,7 +3766,7 @@ Create `docs/deployment/mains-box-commissioning.md`:
 | 22 | HOA 輔助接點拔線 | 讀為 AUTO，熔接偵測**仍啟用** | ☐ |
 | 23 | ESP32 斷電（模擬當機） | 30s 內線圈失電（WDT） | ☐ |
 
-> **第 15 項的意義**：GPIO 在 MCU 當機時維持最後狀態，接觸器不會自行釋放。
+> **第 23 項的意義**：GPIO 在 MCU 當機時維持最後狀態，接觸器不會自行釋放。
 > 內部看門狗是唯一防線，最長非預期運轉 30 秒（規格 §7）。
 
 ## 5. CT 校正（規格 §8.3）
@@ -3439,8 +3859,10 @@ git checkout pump-fw-known-good-YYYYMMDD -- edge_pump/
 cd edge_pump && mpremote connect <port> fs cp *.py :
 ```
 
-> `mpremote` 需要 `resume`，且 CH340 板的自動重置不可靠——見
-> [ESP32 CH340 板設定](esp32-ch340-setup.md) 的手動 BOOT+RST 程序。
+> **CH340 板的自動重置不可靠。** `mpremote` 需要 `resume`；`esptool` 需要
+> `--before no-reset`。進燒錄模式要手動操作：按住 **BOOT** → 點一下
+> **RST** → 放開 BOOT，然後才下指令。若跳過這步，指令會逾時，看起來像
+> 節點壞了，其實只是沒進 bootloader。
 ```
 
 - [ ] **Step 5: Create the handover checklist**
@@ -3513,6 +3935,28 @@ CT 量測的是**插座的總電流**，不是水泵的電流。插上延長線�
 Run: `cd .. && ls -la docs/deployment/ && grep -c "^|" docs/deployment/mains-box-commissioning.md`
 Expected: the three new files exist; the commissioning record has at least 30 table rows.
 
+Then check that no relative link in the new docs dangles — a runbook that
+points at a missing file is worse than one that inlines the instruction,
+because the reader assumes the detail exists somewhere:
+
+```bash
+cd .. && for f in docs/deployment/pump-*.md docs/deployment/mains-box-commissioning.md; do
+  grep -o '](\([^)h][^)]*\))' "$f" | sed 's/](\(.*\))/\1/' | while read -r l; do
+    [ -e "docs/deployment/$l" ] || echo "DANGLING: $f -> $l"
+  done
+done
+```
+Expected: no output.
+
+Finally confirm the item numbering in the commissioning record is a clean
+run with no duplicates — the sections were renumbered once already and a
+duplicate number makes a signed record ambiguous about what was tested:
+
+```bash
+cd .. && grep -o '^| [0-9]\+[a-z]\? |' docs/deployment/mains-box-commissioning.md | sort -V | uniq -d
+```
+Expected: no output.
+
 - [ ] **Step 7: Commit**
 
 ```bash
@@ -3538,7 +3982,11 @@ never been executed and every configuration inherits it."
 - [ ] **Full edge_pump suite**
 
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
-Expected: PASS — 165 tests (70 baseline + 95 new).
+Expected: PASS — 183 tests (70 baseline + 113 new).
+
+Per-task checkpoints, for locating a drift rather than re-deriving it:
+72 · 72 · 86 · 97 · 121 · 135 · 150 · (158) · 171 · 174 · 183.
+Task 8 has no full-suite step, so its +8 lands inside Task 9's number.
 
 - [ ] **Full-tree sweep** (confirms nothing else broke)
 
@@ -3565,7 +4013,8 @@ These cannot be closed at the desk. Confirm each is written down rather than ass
 | Blocked item | Where it is recorded |
 |---|---|
 | §A sensor-polarity verification | Bench doc §H preconditions; spec §9.4, §10 item 2 |
-| Site has a 220V circuit | Mains record §1; spec §10 item 1 |
+| Site has a 220V circuit | Mains record §1.2; spec §10 item 1 |
+| **Whether that 220V is L–N or L–L** — decides contactor and MPCB pole count, so it gates the purchase, not just the build | Mains record §1.1; spec §4.1.1, §10 item 1 |
 | CT band thresholds are placeholder values | `config.py` comment; mains record §5 |
 | `contactor_service_ops` pending the purchased part's AC3 life | `profiles.py` comment; spec §10 item 5 |
 | 60ms CT sampling vs MQTT + 30s WDT | Bench doc §H item 12; spec §9.5 |
@@ -3575,7 +4024,8 @@ These cannot be closed at the desk. Confirm each is written down rather than ass
 | Limitation | Consequence | Why it is accepted here |
 |---|---|---|
 | `persist._read` coerces an unavailable NVS to `0` | A node with a dead flash partition reports `contactor_ops: 0` forever and never reports service-due. Wear tracking fails silent. | Distinguishing "unavailable" from "zero" changes a contract shared by every `persist` caller. Out of scope for a telemetry task; revisit if flash failures are ever observed in the fleet. |
-| No external watchdog | A hung ESP32 holds the contactor closed for up to 30s (`WDT_TIMEOUT`). The internal WDT is the only defence. | Spec §7, explicitly traded. `WDT_ENABLED = False` is forbidden under `SOCKET_220V` — `profiles.validate` enforces it. |
+| No external watchdog | A hung ESP32 holds the contactor closed for up to 30s (`WDT_TIMEOUT`). The internal WDT is the only defence. | Spec §7, explicitly traded. `WDT_ENABLED = False` is forbidden under `SOCKET_220V` — `profiles.validate` enforces it, and `resolve_runtime` makes that refusal reportable instead of a boot loop. |
+| `nvs_ok` detects an unavailable namespace, not a partially-worn one | A flash partition that opens but fails writes still reports `nvs_ok: true` while `register_boot` silently returns 0, so reset-loop detection is off and nothing says so. | Narrowing the blind spot was cheap; closing it means `persist` distinguishing "unavailable" from "zero" for every caller. Same deferral as the row above. |
 
 ---
 
