@@ -169,14 +169,19 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         <div className="absolute z-10 top-2 right-2 bg-black/60 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
           {node.type === 'camera' ? 'CAM' : node.type === 'webcam' ? 'WEB' : 'PUMP'}
         </div>
-        {/* Source badge — webcam client (blue) vs edge cam (grey). */}
+        {/* Source badge — webcam client (blue) vs edge cam (grey). OPS-012:
+            used to sit at top-1 left-1, directly under/behind the status dot
+            (top-2 left-2) and the alert-count badge (top-2 left-7, h-5) —
+            all three occupied the same top-left corner on every camera tile.
+            Dropped below that whole row (top-9 clears the dot's bottom edge
+            at ~20px and the alert badge's at ~28px) instead. */}
         {isWebcam && (
-          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
+          <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
             Webcam
           </span>
         )}
         {!isWebcam && node.type === 'camera' && (
-          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
+          <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
             Edge Cam
           </span>
         )}
