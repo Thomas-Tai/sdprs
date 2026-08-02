@@ -65,11 +65,19 @@ const LIVE_POLL_TIMEOUT_MS = 30000; // give up and return to 'off' after this
 // A playlist that exists but lists no segment yet is just the header
 // (#EXTM3U/#EXT-X-TARGETDURATION…) — mounting <video> against it is exactly the
 // black-tile case. "Ready" means at least one media segment URI is listed.
+// OPS-011: only recognized classic MPEG-TS (.ts) segments. mediamtx can also
+// be configured to serve fMP4/CMAF, whose media segments end .m4s (or a bare
+// .mp4) instead — on that config this probe never found a "segment", so the
+// tile sat on 連線中 until LIVE_POLL_TIMEOUT_MS and silently fell back to
+// snapshots even though the stream was genuinely live. Tag lines (starting
+// with '#', e.g. #EXT-X-MAP:URI="init.mp4") are already excluded above by the
+// `charAt(0) !== '#'` guard, so broadening the extension list doesn't risk
+// mistaking an init-segment reference for a media segment.
 function playlistHasSegment(text) {
   if (!text || typeof text !== 'string') return false;
   return text.split(/\r?\n/).some(line => {
     const l = line.trim();
-    return l !== '' && l.charAt(0) !== '#' && /\.ts(\?.*)?$/i.test(l);
+    return l !== '' && l.charAt(0) !== '#' && /\.(ts|m4s|mp4)(\?.*)?$/i.test(l);
   });
 }
 
