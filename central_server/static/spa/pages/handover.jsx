@@ -43,7 +43,7 @@ function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, 
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-[110] bg-slate-950/70 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[110] bg-black/70 flex items-center justify-center p-4"
       onClick={onCancel}
       onKeyDown={handleDialogKeyDown}
       role="dialog"
@@ -52,15 +52,15 @@ function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, 
       aria-describedby="handover-confirm-message"
     >
       <div
-        className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl"
+        className="bg-surface-panel border border-border-subtle rounded-2xl p-6 max-w-md w-full shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="handover-confirm-title" className="text-slate-100 text-lg font-semibold mb-2">{title}</h3>
-        <p id="handover-confirm-message" className="text-slate-300 text-sm mb-5 whitespace-pre-line">{message}</p>
+        <h3 id="handover-confirm-title" className="text-ink-primary text-lg font-semibold mb-2">{title}</h3>
+        <p id="handover-confirm-message" className="text-ink-secondary text-sm mb-5 whitespace-pre-line">{message}</p>
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-4 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800"
+            className="px-4 py-1.5 rounded-lg text-ink-secondary hover:bg-surface-elevated"
             autoFocus
           >取消</button>
           <button
@@ -118,7 +118,7 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-[110] bg-slate-950/70 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[110] bg-black/70 flex items-center justify-center p-4"
       onClick={onCancel}
       onKeyDown={handleDialogKeyDown}
       role="dialog"
@@ -127,23 +127,23 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
       aria-describedby="handover-conflict-message"
     >
       <div
-        className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-2xl w-full shadow-2xl"
+        className="bg-surface-panel border border-border-subtle rounded-2xl p-6 max-w-2xl w-full shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="handover-conflict-title" className="text-slate-100 text-lg font-semibold mb-2">儲存衝突</h3>
-        <p id="handover-conflict-message" className="text-slate-300 text-sm mb-4">
+        <h3 id="handover-conflict-title" className="text-ink-primary text-lg font-semibold mb-2">儲存衝突</h3>
+        <p id="handover-conflict-message" className="text-ink-secondary text-sm mb-4">
           您編輯期間，其他操作員已儲存了新的交接備註。請選擇要保留哪個版本：
         </p>
         <div className="grid grid-cols-2 gap-3 mb-5">
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-1">伺服器目前版本</div>
-            <div className="bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
+            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1">伺服器目前版本</div>
+            <div className="bg-surface-base border border-border-subtle rounded p-2 text-xs text-ink-secondary whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
               {serverText || '(空白)'}
             </div>
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-1">您的草稿</div>
-            <div className="bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
+            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1">您的草稿</div>
+            <div className="bg-surface-base border border-border-subtle rounded p-2 text-xs text-ink-secondary whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
               {draftText || '(空白)'}
             </div>
           </div>
@@ -151,7 +151,7 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-4 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800"
+            className="px-4 py-1.5 rounded-lg text-ink-secondary hover:bg-surface-elevated"
             autoFocus
           >稍後決定</button>
           <button
