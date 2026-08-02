@@ -296,9 +296,13 @@ ${HLS_SHIM_RESTORE}
       A('OPS-018 setup: initial rank order is warn(CAM-B) before online(CAM-A)', JSON.stringify(idOrder()) === JSON.stringify(['CAM-B', 'CAM-A']), idOrder());
 
       // --- FOCUS freeze: focusing a card must freeze order across a re-sort-worthy update ---
-      const firstCard = container.querySelector('[tabindex="0"]') || container.querySelectorAll('button')[0];
-      const focusTarget = Array.from(container.querySelectorAll('*')).find(e => e.getAttribute && e.getAttribute('tabindex') === '0') || firstCard;
-      focusTarget.dispatchEvent(new window.FocusEvent('focus', { bubbles: true }));
+      // React attaches onFocus/onBlur via the native 'focusin'/'focusout'
+      // events (which bubble), not 'focus'/'blur' (which don't) — a real
+      // .focus() call is what actually exercises the delegated listener in
+      // jsdom, exactly as a Tab keypress would in a real browser.
+      const focusTarget = Array.from(container.querySelectorAll('*')).find(e => e.getAttribute && e.getAttribute('tabindex') === '0');
+      A('OPS-018 setup: a focusable (tabindex=0) card exists in the grid', !!focusTarget);
+      focusTarget.focus();
       await tick();
       nodes = [mk('CAM-A', 'critical'), mk('CAM-B', 'warn')]; // would flip order to A,B if NOT frozen
       render();
@@ -306,11 +310,14 @@ ${HLS_SHIM_RESTORE}
       A('OPS-018 focusing inside the grid freezes order across a status-rank-changing update', JSON.stringify(idOrder()) === JSON.stringify(['CAM-B', 'CAM-A']), idOrder());
 
       // --- blur (focus leaves the grid entirely) releases the freeze ---
-      grid().dispatchEvent(new window.FocusEvent('blur', { bubbles: true, relatedTarget: document.body }));
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus(); // moves focus OUT of the grid, giving onBlur a real relatedTarget
       await tick();
       render();
       await settle();
       A('OPS-018 blurring out of the grid releases the freeze (resorts by rank)', JSON.stringify(idOrder()) === JSON.stringify(['CAM-A', 'CAM-B']), idOrder());
+      document.body.removeChild(outside);
 
       // --- TOUCH freeze: a touchstart must freeze order the same way hover does ---
       nodes = [mk('CAM-A', 'critical'), mk('CAM-B', 'warn')];

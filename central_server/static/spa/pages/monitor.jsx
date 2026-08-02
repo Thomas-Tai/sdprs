@@ -529,7 +529,20 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
       )}
       <div className="flex-1 overflow-y-auto scroll-thin p-3"
         onMouseEnter={() => setGridHover(true)}
-        onMouseLeave={() => setGridHover(false)}>
+        onMouseLeave={() => setGridHover(false)}
+        // OPS-018: the freeze (see useStableSort above) was mouse-only —
+        // a keyboard operator tabbing through cards, or a touch operator
+        // scrolling/tapping the wall on a touchscreen NOC display, got no
+        // protection at all and could have a card reshuffle out from under
+        // their in-flight interaction. onFocus/onBlur mirror hover for
+        // keyboard (any card in the grid gaining focus counts as "over the
+        // grid"; onBlur only releases once focus actually leaves the grid,
+        // not when it merely moves between two cards inside it — checked via
+        // relatedTarget). onTouchStart/onTouchEnd mirror it for touch.
+        onFocus={() => setGridHover(true)}
+        onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setGridHover(false); }}
+        onTouchStart={() => setGridHover(true)}
+        onTouchEnd={() => setGridHover(false)}>
         {sorted.length === 0 ? (
           <div className="h-full flex items-center justify-center">
             <EmptyState icon={Icon.Camera} title="尚無節點資料"
