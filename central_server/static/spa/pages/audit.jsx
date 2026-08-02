@@ -220,6 +220,7 @@ const AuditPage = ({ auditLog = [] }) => {
         <div className="flex-1"></div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setMeOnly(!meOnly)}
+            aria-pressed={meOnly}
             title="僅顯示我在近 12 小時內的操作"
             className={`inline-flex items-center gap-1 h-7 px-2 rounded text-xs border transition-colors ${meOnly ? 'bg-sev-info/15 border-sev-info/40 text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
             <Icon.User size={12}/> 本班 · 我的動作
@@ -227,39 +228,39 @@ const AuditPage = ({ auditLog = [] }) => {
           </button>
           <div className="inline-flex items-center">
             <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>
-              操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.ChevronDown size={10}/>
+              操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {operatorFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除操作者篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setOperatorFilter('all'); }}
               >×</button>
             )}
           </div>
           <div className="inline-flex items-center">
             <FilterChip active={actionFilter !== 'all'} onClick={cycleAction}>
-              動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.ChevronDown size={10}/>
+              動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {actionFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除動作篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setActionFilter('all'); }}
               >×</button>
             )}
           </div>
           <div className="inline-flex items-center">
             <FilterChip active={dateFilter !== 'all'} onClick={cycleDate}>
-              日期: {dateLabel} <Icon.ChevronDown size={10}/>
+              日期: {dateLabel} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {dateFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除日期篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setDateFilter('all'); }}
               >×</button>
             )}
@@ -347,7 +348,17 @@ const AuditPage = ({ auditLog = [] }) => {
                   </td>
                   <td className="px-4 py-2 font-mono text-ink-secondary">{a.target}</td>
                   <td className="px-4 py-2 font-mono text-[10px] text-ink-muted">
-                    {JSON.stringify(a.detail)}
+                    {/* AUD-002 / NEW-UX-020: format detail as readable key-value pairs
+                        instead of raw JSON.stringify (which dumps "{}" noise and causes
+                        unbounded row stretching). */}
+                    {a.detail && typeof a.detail === 'object'
+                      ? Object.entries(a.detail).map(([k, v]) => (
+                          <span key={k} className="inline-block mr-2">
+                            <span className="text-ink-dim">{k}:</span>{' '}
+                            <span className="text-ink-secondary">{String(v)}</span>
+                          </span>
+                        ))
+                      : (a.detail != null ? String(a.detail) : '—')}
                   </td>
                 </tr>
               );
