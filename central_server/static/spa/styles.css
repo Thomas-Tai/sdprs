@@ -208,7 +208,7 @@ html.light .scroll-thin::-webkit-scrollbar-thumb { background: #CBD5E1; }
 html.light .scroll-thin::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
 /* Focus rings */
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, [role="button"][tabindex="0"]:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [role="button"][tabindex="0"]:focus-visible {
   outline: 2px solid #3B82F6;
   outline-offset: 2px;
   border-radius: 2px;
