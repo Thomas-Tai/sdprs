@@ -7,6 +7,11 @@
 
 // ---- Static operator config (not backed by an API) ----------------------
 
+// FIX-024: single source of truth for the build label displayed in the
+// NavRail footer. Not auto-generated — update manually on each release
+// so the operator can identify which build is running on the wall display.
+window.__SDPRS_BUILD = 'build 2026.08.02';
+
 const RESOLVE_TEMPLATES = [
   '誤報 — 環境因素',
   '已派員處理',

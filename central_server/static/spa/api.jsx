@@ -11,6 +11,11 @@
 // then refreshLive() on a timer and on every relevant WebSocket event.
 
 (function () {
+  // FIX-024: WebSocket connection state for UI indicators. Initialized
+  // false; set true in ws.onopen, false in ws.onclose. Mirrors the
+  // __SDPRS_SESSION_EXPIRED global idiom already in this file.
+  window.__SDPRS_WS_CONNECTED = false;
+
   // ---- low-level fetch ---------------------------------------------------
 
   const FETCH_TIMEOUT_MS = 10_000;
@@ -1376,6 +1381,7 @@
       try { ws = new WebSocket(proto + '//' + location.host + '/ws'); }
       catch (e) { reconnectTimer = setTimeout(connect, retry); return; }
       ws.onopen = () => {
+        window.__SDPRS_WS_CONNECTED = true;
         // Delay backoff reset — see _WS_STABLE_MS comment.
         clearStable();
         stableTimer = setTimeout(() => { retry = 1000; stableTimer = null; }, _WS_STABLE_MS);
@@ -1407,6 +1413,7 @@
         }
       };
       ws.onclose = (ev) => {
+        window.__SDPRS_WS_CONNECTED = false;
         clearStable();
         if (closed) return;
         // 1008 = policy violation / auth-expiry: the session is gone, so
