@@ -184,14 +184,28 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
       };
     }
   }, [liveMode, node.id]);
+  // NEW-UX-001: this wrapper used to unconditionally carry
+  // role="button"/tabIndex/onKeyDown (a synthetic interactive widget) — fine
+  // for a non-webcam tile (nothing else inside is focusable), but a webcam
+  // tile also renders REAL <button>s (▶ 即時, ● LIVE ✕, the OPS-004 error
+  // dismiss) inside it: an interactive control nested inside another
+  // interactive control, which WCAG 4.1.2 forbids and which real screen
+  // readers/browsers handle inconsistently (double activation, unreachable
+  // inner controls). Only drop the synthetic button semantics on webcam
+  // tiles, where the nesting actually occurs — a non-webcam tile keeps its
+  // card-level Enter/Space affordance since there is nothing to nest it
+  // with. Click-to-open still works everywhere either way (the real
+  // <button>s already stopPropagation(), so their clicks never reach this
+  // onClick); on a webcam tile, opening the card via keyboard now happens by
+  // Tab-ing to it like any other button rather than via a card-wide widget.
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onSelect(node)}
-      onKeyDown={e => {
+      role={isWebcam ? undefined : 'button'}
+      tabIndex={isWebcam ? undefined : 0}
+      onKeyDown={isWebcam ? undefined : (e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(node); }
-      }}
+      })}
+      onClick={() => onSelect(node)}
       className={`bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors group cursor-pointer`}>
       <div className={`relative aspect-video snapshot-placeholder ${frozen ? 'snapshot-frozen' : ''}`}>
         {/* Status dot — z-10 so it stays above SnapshotImage which paints later */}
