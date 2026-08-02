@@ -943,7 +943,9 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 // (resolved/acked timestamp) + `type` is what this data
                 // actually has for identity — no backend id exists on these
                 // rows — combined with the index only to break ties.
-                <div key={`${h.t}-${h.type}-${i}`} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong cursor-pointer transition-colors`}>
+                // NEW-UX-019: removed cursor-pointer + hover:border — no onClick,
+                // so those were a false affordance (informational cards only).
+                <div key={`${h.t}-${h.type}-${i}`} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden transition-colors`}>
                   <div className={`relative aspect-video snapshot-placeholder`}>
                     {/* ALR-L7: `h.snapshot_url` was the same always-dead field
                         as the alert-level snapshot above — never populated,
@@ -1101,7 +1103,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         {alert.state === 'acknowledged' && alert.ackAgeSec > 1500 && (
           <div className="flex items-center gap-2 text-xs px-2 py-1.5 bg-sev-warn/10 border border-sev-warn/30 rounded text-sev-warn">
             <Icon.Clock size={12}/>
-            <span>已認領 <span className="font-mono tnum font-semibold">{window.fmtAge(alert.ackAgeSec)}</span> by {alert.ackBy} — 仍未解決</span>
+            <span>已認領 <span className="font-mono tnum font-semibold">{window.fmtAge(alert.ackAgeSec)}</span> 由 {alert.ackBy} — 仍未解決</span>
           </div>
         )}
 
@@ -1172,7 +1174,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           )}
           {alert.state === 'resolved' && (
             <div className="flex-1 h-9 bg-sev-ok/10 border border-sev-ok/30 text-sev-ok rounded font-medium text-sm flex items-center justify-center gap-2">
-              <Icon.CheckCircle size={14}/> 已解決於 {alert.resAt} by {alert.resBy}
+              <Icon.CheckCircle size={14}/> 已解決於 {alert.resAt} 由 {alert.resBy}
             </div>
           )}
           {alert.state !== 'resolved' && (

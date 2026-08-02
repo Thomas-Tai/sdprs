@@ -246,10 +246,10 @@
       });
     }
     if (e.acknowledged_at) {
-      timeline.push({ t: fmtClock(parseTs(e.acknowledged_at)), label: 'ACKNOWLEDGED', detail: 'by ' + (e.acknowledged_by || '—') });
+      timeline.push({ t: fmtClock(parseTs(e.acknowledged_at)), label: 'ACKNOWLEDGED', detail: '由 ' + (e.acknowledged_by || '—') });
     }
     if (e.resolved_at) {
-      timeline.push({ t: fmtClock(parseTs(e.resolved_at)), label: 'RESOLVED', detail: 'by ' + (e.resolved_by || '—') });
+      timeline.push({ t: fmtClock(parseTs(e.resolved_at)), label: 'RESOLVED', detail: '由 ' + (e.resolved_by || '—') });
     }
 
     let message = '玻璃震動偵測';
