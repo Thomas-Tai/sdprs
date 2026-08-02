@@ -432,6 +432,9 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
       const t = e.target;
       const tag = t && t.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+      // NEW-RT-002: if any overlay (drawer/modal) is open on top, Escape
+      // belongs to it — don't also silently wipe the bulk selection.
+      if (window.__SDPRS_OVERLAY_STACK && window.__SDPRS_OVERLAY_STACK.length > 0) return;
       setChecked(new Set());
       setBulkNote('');
       disarmResolve();
@@ -512,11 +515,16 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         {/* Tabs + filters */}
         <div className="border-b border-border-subtle bg-surface-panel">
           <div className="flex items-center px-3 pt-2.5">
-            <div className="flex gap-1 text-sm">
-              <button onClick={() => setTab('active')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors flex items-center gap-2 ${tab === 'active' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
+            {/* NEW-UX-018: the filtered list below is one shared DOM subtree
+                whose DATA changes with `tab` (not a distinct per-tab panel
+                element), so wiring aria-controls/tabpanel here would
+                misrepresent the structure — ship the core tablist/tab/
+                aria-selected semantics only. */}
+            <div className="flex gap-1 text-sm" role="tablist">
+              <button onClick={() => setTab('active')} role="tab" aria-selected={tab === 'active'} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors flex items-center gap-2 ${tab === 'active' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
                 作用中 <span className={`text-[10px] font-mono tnum px-1.5 rounded ${tab==='active' ? 'bg-sev-critical text-white' : 'bg-surface-elevated text-ink-muted'}`}>{activeAlertsCount}</span>
               </button>
-              <button onClick={() => setTab('history')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors ${tab === 'history' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
+              <button onClick={() => setTab('history')} role="tab" aria-selected={tab === 'history'} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors ${tab === 'history' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
                 歷史
               </button>
             </div>
@@ -999,13 +1007,14 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
 
       {/* Timeline / node info / processing log — real tabs */}
       <div className="px-4 py-4 flex-1 overflow-y-auto scroll-thin">
-        <div className="flex items-center gap-3 mb-3 text-xs border-b border-border-subtle pb-2">
+        <div className="flex items-center gap-3 mb-3 text-xs border-b border-border-subtle pb-2" role="tablist">
           {[
             { id: 'timeline', label: '事件時間軸' },
             { id: 'node',     label: '節點資訊' },
             { id: 'log',      label: '處理紀錄' },
           ].map(t => (
-            <button key={t.id} onClick={() => setDetailTab(t.id)}
+            <button key={t.id} id={`detail-tab-${t.id}`} onClick={() => setDetailTab(t.id)}
+              role="tab" aria-selected={detailTab === t.id} aria-controls={`detail-tabpanel-${t.id}`}
               className={detailTab === t.id
                 ? 'font-semibold text-ink-primary border-b-2 border-sev-info pb-1.5 -mb-2'
                 : 'text-ink-muted hover:text-ink-secondary'}>
@@ -1014,7 +1023,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           ))}
         </div>
         {detailTab === 'timeline' && (
-          <div className="relative pl-5">
+          <div className="relative pl-5" id="detail-tabpanel-timeline" role="tabpanel" aria-labelledby="detail-tab-timeline">
             <div className="absolute left-1.5 top-1 bottom-1 w-px bg-border-strong"></div>
             {alert.timeline?.map((ev, i) => (
               <div key={i} className="relative pb-3 last:pb-0">
@@ -1043,7 +1052,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </div>
         )}
         {detailTab === 'node' && (
-          <dl className="text-xs grid grid-cols-[6rem_1fr] gap-y-1.5 gap-x-3">
+          <dl className="text-xs grid grid-cols-[6rem_1fr] gap-y-1.5 gap-x-3" id="detail-tabpanel-node" role="tabpanel" aria-labelledby="detail-tab-node">
             <dt className="text-ink-muted">節點 ID</dt><dd className="font-mono tnum text-ink-primary">{alert.node}</dd>
             <dt className="text-ink-muted">類型</dt><dd className="text-ink-secondary">{node ? (node.type === 'camera' ? '攝影機' : '抽水站') : '—'}</dd>
             <dt className="text-ink-muted">名稱</dt><dd className="text-ink-secondary">{node?.name || '—'}</dd>
@@ -1070,7 +1079,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </dl>
         )}
         {detailTab === 'log' && (
-          <div className="text-xs space-y-2">
+          <div className="text-xs space-y-2" id="detail-tabpanel-log" role="tabpanel" aria-labelledby="detail-tab-log">
             {alert.state === 'pending' && <div className="text-ink-muted">尚未處理。</div>}
             {alert.ackAt && (
               <div className="bg-surface-panel border border-border-subtle rounded p-2">
@@ -1226,18 +1235,21 @@ const Floorplan = ({ highlightNode, nodes = [] }) => {
         </div>
       ) : (
       <svg viewBox="0 0 320 170" className="w-full h-24" preserveAspectRatio="xMidYMid meet">
-        {/* Rooms */}
-        <rect x="10" y="10" width="140" height="70" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="160" y="10" width="150" height="55" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="10" y="90" width="100" height="70" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="120" y="75" width="100" height="50" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1" strokeDasharray="2,2"/>
-        <rect x="220" y="80" width="90" height="80" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
+        {/* Rooms — NEW-UX-006: fills come from the theme-aware .floorplan-room
+            / .floorplan-label classes (styles.css) instead of a hardcoded
+            dark-navy fill that nearly vanished against the light-theme
+            (white) panel background. */}
+        <rect x="10" y="10" width="140" height="70" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="160" y="10" width="150" height="55" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="10" y="90" width="100" height="70" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="120" y="75" width="100" height="50" className="floorplan-room" stroke="#334155" strokeWidth="1" strokeDasharray="2,2"/>
+        <rect x="220" y="80" width="90" height="80" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
         {/* Labels */}
-        <text x="20" y="25" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">西側走廊</text>
-        <text x="170" y="25" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">北側出入口</text>
-        <text x="20" y="105" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">機房</text>
-        <text x="130" y="92" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">集水井區</text>
-        <text x="230" y="95" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">東側大廳</text>
+        <text x="20" y="25" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">西側走廊</text>
+        <text x="170" y="25" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">北側出入口</text>
+        <text x="20" y="105" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">機房</text>
+        <text x="130" y="92" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">集水井區</text>
+        <text x="230" y="95" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">東側大廳</text>
         {/* Pins */}
         {Object.entries(PINS).map(([id, p]) => {
           const node = nodes.find(n => n.id === id);
@@ -1248,7 +1260,7 @@ const Floorplan = ({ highlightNode, nodes = [] }) => {
             <g key={id}>
               {isHi && <circle cx={p.x} cy={p.y} r="9" fill={color} opacity="0.25" className="animate-live-blink"/>}
               <circle cx={p.x} cy={p.y} r={isHi ? 5 : 3} fill={color} stroke={isHi ? '#FFF' : 'none'} strokeWidth={isHi ? 1.5 : 0}/>
-              {isHi && <text x={p.x + 8} y={p.y + 3} fill="#F8FAFC" fontSize="8" fontFamily="JetBrains Mono" fontWeight="600">{id}</text>}
+              {isHi && <text x={p.x + 8} y={p.y + 3} className="floorplan-label-pin" fontSize="8" fontFamily="JetBrains Mono" fontWeight="600">{id}</text>}
             </g>
           );
         })}

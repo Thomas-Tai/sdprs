@@ -278,3 +278,15 @@ html.light.focus-mode .text-sev-stale { color: #94A3B8 !important; }
   white-space: nowrap;
   border: 0;
 }
+
+/* Floorplan (alerts.jsx) — theme-aware room/label fills. The room fill was a
+   hardcoded dark-navy rgba() and the labels a fixed slate/near-white fill,
+   both tuned only for the dark-theme panel. html.light swaps the panel
+   background to white (see .bg-surface-panel above), which left the same
+   fixed fills illegible on light theme (WCAG contrast fail). NEW-UX-006. */
+.floorplan-room { fill: rgba(30, 41, 59, 0.4); }
+html.light .floorplan-room { fill: rgba(148, 163, 184, 0.35); }
+.floorplan-label { fill: #64748B; }
+html.light .floorplan-label { fill: #334155; }
+.floorplan-label-pin { fill: #F8FAFC; }
+html.light .floorplan-label-pin { fill: #0F172A; }
