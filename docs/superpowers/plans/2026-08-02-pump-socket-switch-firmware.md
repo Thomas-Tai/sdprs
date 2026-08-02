@@ -33,10 +33,25 @@ Copied verbatim from the spec (`docs/superpowers/specs/2026-08-02-pump-socket-sw
 
 | Excluded | Why | Where it lives |
 |---|---|---|
-| Physical mains box assembly | Electrician work, not code; gated on spec §10 open items 1, 2, 6 | Task 12 writes the procedure; the build itself is a bench session |
+| Physical mains box assembly | Electrician work, not code; gated on spec §10 open items 1, 2 | Task 12 writes the procedure; the build itself is a bench session |
 | Server / SPA telemetry, 5 alert types | Spec §6 sequences this behind the in-flight SPA lane to avoid file collisions | A separate Phase 2 plan |
+| OTA firmware update (spec §4.8 option C) | Deliberately deferred, not dropped — see below | Spec §10 item 7; needs its own spec because it reopens §8.3/§8.4 |
 
 Tasks 1–11 are firmware. Task 12 is the documentation set the spec makes a delivery requirement (§8.2, §8.3, §8.4, §12.2, §12.3).
+
+### Serviceability route — spec §4.8 requires this plan to name one
+
+**Option A (split compartment). Decided 2026-08-02, user-approved, recorded in spec §4.8.1.**
+
+The box build is out of scope for this plan, but the *decision* cannot be, because A is the only option whose cost is asymmetric in time — roughly NT$200–400 during fabrication, a box rebuild afterwards. Leaving it unstated means it gets decided by default by whoever assembles the enclosure, and the default is "sealed". B (external USB gland) is rejected: an ingress and corrosion path on an outdoor typhoon enclosure. C (OTA) is deferred: MicroPython's A/B rollback on ESP32 is weak, and OTA lets firmware change without the §8.3 signed acceptance record or §8.4 configuration control, so adopting it reopens both sections.
+
+Three build constraints follow, and they bind Task 12's commissioning document even though the build itself does not appear in any task here:
+
+1. **CT burden resistor and TVS clamp permanently soldered at the CT secondary; any service connector downstream of them** (spec §4.6.1). A split bay means people will routinely work in the low-voltage compartment while the primary is live. An open CT secondary on a live primary develops hundreds of volts to low kV. This is the risk option A introduces, and two components eliminate it.
+2. **Enclosure-door sensing is telemetry only — never an interlock.** A "door open → inhibit pump" wiring creates a corroded-microswitch path to a pump that refuses to run during a flood. Same reasoning as the pull-toward-de-asserted idiom in `sensors.build_readers`.
+3. **SMPS primary stays in the mains bay.** Only the 24V secondary, the ESP32 and the CT front-end cross into the low-voltage bay, or the "openable without isolating mains" label is false — worse than having no split at all.
+
+Task 12's mains-box commissioning document must carry all three as sign-off items; spec §8.3 now lists them.
 
 **Task ordering is not arbitrary.** Task 1 must precede Task 2 (the fixture is worthless captured after the refactor). Task 2 must precede Tasks 4 and 6 (spec §5.4 mandates the two-commit sequence). Tasks 8–10 depend on Task 3's profile table.
 
@@ -1431,15 +1446,12 @@ Expected: PASS — 12 tests.
 Run: `cd edge_pump && /c/Python314/python -m pytest tests -q`
 Expected: PASS — 117 tests.
 
-- [ ] **Step 11: Update the spec with the concrete constant**
+- [ ] **Step 11: Confirm the spec already carries these parameters**
 
-`boot_loop_holdoff_ms` is a new profile parameter this plan introduces to make §5.6's "extended hold-off" concrete. Keep the spec authoritative.
+Nothing to write — this step is a check. `boot_holdoff_urgent_ms`, `boot_loop_holdoff_ms` and `contactor_service_ops` were folded into spec §5.2 on 2026-08-02, so the spec is authoritative and the profile table in Task 3 must match it.
 
-In `docs/superpowers/specs/2026-08-02-pump-socket-switch-design.md` §5.2, add a row after `boot_holdoff_ms`:
-
-```markdown
-| `boot_loop_holdoff_ms` | 0 | 300000 | 確認重置迴圈時的延長保留；此情境下**不套用**高水位縮短條款（§5.6） |
-```
+Run: `cd .. && grep -c "boot_holdoff_urgent_ms\|boot_loop_holdoff_ms\|contactor_service_ops" docs/superpowers/specs/2026-08-02-pump-socket-switch-design.md`
+Expected: `3` or more. If it reports 0, the spec has regressed — stop and reconcile before continuing, because Task 3's values would then have no authority behind them.
 
 - [ ] **Step 12: Commit**
 
@@ -3288,6 +3300,31 @@ Create `docs/deployment/mains-box-commissioning.md`:
 | 6 | 絕緣電阻 N-PE | > 1 MΩ | | ☐ |
 | 7 | MPCB 過載設定值 | = 宣告最大電流 | | ☐ |
 
+## 2.1 CT 二次側開路防護（規格 §4.6.1）〔安全要求〕
+
+> **一次側帶電時二次側開路會產生數百伏至千伏高壓。** 分艙設計（§4.8 A 案）
+> 使維修人員例行在一次側帶電時於低壓艙作業，因此以下三項為**強制**，
+> 且箱體完成後無法補救。
+
+| # | 項目 | 需求 | 通過 |
+|---|---|---|---|
+| 8 | 負擔電阻與 TVS 箝位**永久焊接**於 CT 二次線端 | 目視；不得位於可插拔接頭另一側 | ☐ |
+| 9 | 維修連接器位於負擔電阻**下游** | 拔除接頭後量測二次側仍為閉迴路：______ Ω | ☐ |
+| 10 | CT 線組已標示「一次側帶電時不得斷開」 | 目視 | ☐ |
+
+## 2.2 分艙完整性（規格 §4.8.1）
+
+| # | 項目 | 需求 | 通過 |
+|---|---|---|---|
+| 11 | 低壓艙可在**不隔離市電**的情況下開啟 | 實際操作確認 | ☐ |
+| 12 | SMPS **一次側不在**低壓艙內 | 目視 | ☐ |
+| 13 | 低壓艙內僅有：24V 二次側、ESP32、CT 前端 | 目視 | ☐ |
+| 14 | 艙門標示「開啟本艙門並未隔離市電」 | 目視 | ☐ |
+| 15 | 若裝有艙門開關：確認**僅上報遙測**，不影響水泵動作 | 開門後水泵仍可正常啟停 | ☐ |
+
+> 第 15 項是刻意的方向：「箱門開啟 → 抑制水泵」會製造出「微動開關腐蝕 →
+> 淹水時水泵拒絕啟動」的新失效路徑。告警可以，互鎖不行。
+
 ## 3. 熱測試（規格 §4.7）
 
 密閉箱體內約 10W 損耗，台灣夏季環境可達 40°C。SMPS 與接觸器多在 45-50°C
@@ -3295,19 +3332,19 @@ Create `docs/deployment/mains-box-commissioning.md`:
 
 | # | 項目 | 實測值 | 通過 |
 |---|---|---|---|
-| 8 | 環境溫度 | | ☐ |
-| 9 | 連續運轉 1 小時後箱內溫度 | | ☐ |
-| 10 | 箱內溫度 < 所有元件降額起點 | | ☐ |
+| 16 | 環境溫度 | | ☐ |
+| 17 | 連續運轉 1 小時後箱內溫度 | | ☐ |
+| 18 | 箱內溫度 < 所有元件降額起點 | | ☐ |
 
 ## 4. 功能互動
 
 | # | 項目 | 預期 | 通過 |
 |---|---|---|---|
-| 11 | HOA → HAND | 水泵運轉，**無** CRITICAL 熔接告警 | ☐ |
-| 12 | HOA → STOP | 水泵停止 | ☐ |
-| 13 | HOA → AUTO | 恢復自動控制 | ☐ |
-| 14 | HOA 輔助接點拔線 | 讀為 AUTO，熔接偵測**仍啟用** | ☐ |
-| 15 | ESP32 斷電（模擬當機） | 30s 內線圈失電（WDT） | ☐ |
+| 19 | HOA → HAND | 水泵運轉，**無** CRITICAL 熔接告警 | ☐ |
+| 20 | HOA → STOP | 水泵停止 | ☐ |
+| 21 | HOA → AUTO | 恢復自動控制 | ☐ |
+| 22 | HOA 輔助接點拔線 | 讀為 AUTO，熔接偵測**仍啟用** | ☐ |
+| 23 | ESP32 斷電（模擬當機） | 30s 內線圈失電（WDT） | ☐ |
 
 > **第 15 項的意義**：GPIO 在 MCU 當機時維持最後狀態，接觸器不會自行釋放。
 > 內部看門狗是唯一防線，最長非預期運轉 30 秒（規格 §7）。
@@ -3532,7 +3569,6 @@ These cannot be closed at the desk. Confirm each is written down rather than ass
 | CT band thresholds are placeholder values | `config.py` comment; mains record §5 |
 | `contactor_service_ops` pending the purchased part's AC3 life | `profiles.py` comment; spec §10 item 5 |
 | 60ms CT sampling vs MQTT + 30s WDT | Bench doc §H item 12; spec §9.5 |
-| §4.8 serviceability option not yet chosen | Spec §10 item 6 |
 
 **Accepted design limitations** (not blocked on hardware — decided, and left as they are):
 
