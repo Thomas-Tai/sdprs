@@ -395,10 +395,29 @@ function orderWallAlerts(alerts) {
   });
 }
 
+// OPS-015: shared error-text normalizer so every page's toast handler can
+// route backend errors through zh-TW labels instead of raw English err.message.
+// Previously defined only inside app.jsx's closure — unreachable from pages
+// like status.jsx that also need it. Pure function, no app.jsx state.
+function actionErrorText(e) {
+  if (!e) return '未知錯誤';
+  if (e.timeout || e.status === 0) return '連線逾時 — 指令可能已送出，請重新整理後確認狀態';
+  if (e.status === 401) return '登入階段已逾時，請重新登入';
+  if (e.status === 403) return '權限不足，無法執行此操作';
+  if (e.status === 409) return e.detail ? String(e.detail) : '此警報已被其他操作員處理';
+  if (e.detail) return Array.isArray(e.detail) ? e.detail.join('; ') : String(e.detail);
+  // Prefer the error's own message over a generic HTTP-status label — apiFetch
+  // stamps useful context into .message (e.g. "HTTP 403 on /api/audit"), while
+  // "伺服器錯誤 (HTTP 500)" tells the operator nothing they can act on.
+  if (e.message) return String(e.message);
+  if (e.status) return '伺服器錯誤 (HTTP ' + e.status + ')';
+  return String(e);
+}
+
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
   fmtAge, fmtAgeOrDash, ageColor, sevMeta, alertTypeMap,
-  stateMeta, detectorHealthMeta,
+  stateMeta, detectorHealthMeta, actionErrorText,
 });
 
 window.alertTypeLabel = alertTypeLabel;

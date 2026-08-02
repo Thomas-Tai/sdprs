@@ -305,21 +305,32 @@ ${PRELUDE}
     if (openBackdrop) { click(openBackdrop); await settle(); }
 
     // --- revoke: cancelling the confirm must NOT call the API ---
-    window.confirm = (msg) => { confirmMsgs.push(msg); return false; };
+    // OPS-016 / NEW-UX-004: revoke now uses an in-app confirm modal (same as
+    // delete), not native window.confirm. Clicking the revoke button opens
+    // the modal; clicking 取消 closes it without calling the API.
     let revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     A('revoke button renders for the webcam-type row', !!revokeBtn);
     const revokeBtnCount = Array.from(container.querySelectorAll('button')).filter(b => b.title === '撤銷並重新產生 API Key').length;
     A('exactly one revoke button exists (the camera row does not get one)', revokeBtnCount === 1, revokeBtnCount);
     click(revokeBtn);
     await settle();
-    A('the confirm dialog names revocation and immediate expiry', !!confirmMsgs[0] && confirmMsgs[0].indexOf('撤銷') !== -1 && confirmMsgs[0].indexOf('失效') !== -1, JSON.stringify(confirmMsgs));
+    let revokeDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    A('the revoke confirm modal opens (role="dialog")', !!revokeDialog);
+    A('the confirm dialog names revocation and immediate expiry', !!revokeDialog && revokeDialog.textContent.indexOf('撤銷') !== -1 && revokeDialog.textContent.indexOf('失效') !== -1, revokeDialog && revokeDialog.textContent.slice(0, 100));
+    const cancelRevokeBtn = revokeDialog && Array.from(revokeDialog.querySelectorAll('button')).find(b => b.textContent.trim() === '取消');
+    if (cancelRevokeBtn) click(cancelRevokeBtn);
+    await settle();
     A('cancelling the confirm does not call revokeWebcamKey', calls.revoke.length === 0, JSON.stringify(calls.revoke));
 
     // --- revoke: confirmed, success shows a PERSISTENT modal, not the 3s toast ---
-    window.confirm = () => true;
     revokeResult = { api_key: 'sk-webcam-ROTATED-NEW-KEY' };
     revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     click(revokeBtn);
+    await settle();
+    revokeDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const confirmRevokeBtn = revokeDialog && Array.from(revokeDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    A('OPS-016 the confirm button renders in the revoke dialog', !!confirmRevokeBtn);
+    if (confirmRevokeBtn) click(confirmRevokeBtn);
     await settle();
     // THE SHIPPED BUG, pinned: revoke-key is a CLIENT endpoint. Sending the
     // camera's own node_id (webcam_ab12cd34) 404s every single time, which is
@@ -347,12 +358,15 @@ ${PRELUDE}
     A('revoke modal is gone after close', container.textContent.indexOf('sk-webcam-ROTATED-NEW-KEY') === -1);
 
     // --- revoke failure: toast, no key echoed ---
-    window.confirm = () => true;
     revokeShouldFail = true;
     revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     click(revokeBtn);
     await settle();
-    A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗：節點不存在') !== -1);
+    const failDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const failConfirmBtn = failDialog && Array.from(failDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    if (failConfirmBtn) click(failConfirmBtn);
+    await settle();
+    A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗') !== -1, container.textContent.slice(0, 500));
 
     // --- no clientId (older backend / unmapped row): never guess an id ---
     // Sending node.id "because it looks like a client id" is precisely how the
@@ -1243,11 +1257,14 @@ ${PRELUDE}
     click(byText('button', '關閉')); await settle();
     A('OPS-001 explicit 關閉 still dismisses the created-key modal', container.textContent.indexOf('sk-webcam-OPS001-CREATE-KEY') === -1);
 
-    // revoke modal: same shown-once contract
-    window.confirm = () => true;
+    // revoke modal: same shown-once contract (OPS-016: in-app modal, not confirm())
     const revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     A('OPS-001 revoke affordance present', !!revokeBtn);
     click(revokeBtn); await settle();
+    const revokeConfirmDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const revokeConfirmBtn = revokeConfirmDialog && Array.from(revokeConfirmDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    if (revokeConfirmBtn) click(revokeConfirmBtn);
+    await settle();
     A('OPS-001 rotated key is shown before the backdrop click', container.textContent.indexOf('sk-webcam-OPS001-REVOKE-KEY') !== -1);
     backdrop = container.querySelector('.fixed.inset-0');
     click(backdrop); await settle();

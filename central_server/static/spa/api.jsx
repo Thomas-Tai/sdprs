@@ -1063,6 +1063,14 @@
     };
   }
 
+  // OPS-013: getStreamHealth(nodeId) hits /api/stream/health every call but
+  // returns only ONE node's entry. With N cameras on the Status page that's N
+  // identical fetches. getStreamHealthAll returns the bridge-level response
+  // once so the caller can extract every node's entry locally.
+  async function getStreamHealthAll() {
+    return apiFetch('/api/stream/health');
+  }
+
   // Audit CSV export — preflight against the sibling GET /api/audit endpoint
   // (same admin-only gate as export.csv, see api/audit.py) to detect 401/403
   // BEFORE the anchor-click download, otherwise the browser would silently
@@ -1421,7 +1429,7 @@
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
-    startStream, stopStream, getStreamHealth,
+    startStream, stopStream, getStreamHealth, getStreamHealthAll,
     startWebcamStream, stopWebcamStream, renewWebcamStream, getWebcamPlaylist,
     createWebcamClient, revokeWebcamKey, deleteWebcamClient,
     extendSession,
