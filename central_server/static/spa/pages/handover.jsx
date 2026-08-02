@@ -214,6 +214,9 @@ const HandoverPage = () => {
   // effect's comment for why.
   const [updatedAtToken, setUpdatedAtToken] = useState_p(() => (window.HANDOVER && window.HANDOVER.updatedAt) || null);
   const [saving, setSaving] = useState_p(false);
+  // HDO-001: synchronous ref-latch to prevent same-tick double-fire on save.
+  // `saving` state can lag a React tick behind a fast double-click.
+  const saveInFlightRef = React.useRef(false);
   const [dirty, setDirty] = useState_p(() => readDraft() != null);
   const [confirm, setConfirm] = useState_p(null);
   // WHA-M8: populated when saveHandover() 409s — carries the server's
@@ -395,6 +398,8 @@ const HandoverPage = () => {
   // `text`/`updatedAtToken`. `!= null` / `!== undefined` distinguish "not
   // provided" from a legitimate empty-string note or null token.
   const performSave = async (overrideNote, overrideExpected) => {
+    if (saveInFlightRef.current) return; // HDO-001: same-tick double-fire guard
+    saveInFlightRef.current = true;
     // WHA-C1: snapshot exactly what we're sending. `text` keeps changing via
     // keystrokes during the await below (setTextTracked runs freely while
     // saving), but this closured value stays fixed for this save's lifetime.
@@ -470,6 +475,7 @@ const HandoverPage = () => {
         setPageToast({ tone: 'error', msg: '儲存失敗: ' + (e.message || e) });
       }
     }
+    saveInFlightRef.current = false;
     setSaving(false);
   };
 
@@ -520,6 +526,7 @@ const HandoverPage = () => {
     }
     const latest = (window.HANDOVER && window.HANDOVER.current) || '';
     if (latest !== baseline && latest !== text) {
+      saveInFlightRef.current = false;
       setSaving(false);
       openConfirm({
         title: '覆蓋對方版本？',
@@ -599,6 +606,14 @@ const HandoverPage = () => {
         <textarea
           value={text}
           onChange={e => setTextTracked(e.target.value)}
+          onKeyDown={e => {
+            // HDO-007: Ctrl+Enter (or ⌘+Enter) saves, matching the rest of
+            // the dashboard's save shortcut convention.
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && dirty && !saving && !overLimit) {
+              e.preventDefault();
+              save();
+            }
+          }}
           rows="14"
           maxLength={HANDOVER_MAX_LEN}
           aria-label="班次交接備註（單筆全域備註，24 小時後自動失效，上限 2000 字）"
