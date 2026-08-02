@@ -228,6 +228,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             all three occupied the same top-left corner on every camera tile.
             Dropped below that whole row (top-9 clears the dot's bottom edge
             at ~20px and the alert badge's at ~28px) instead. */}
+        {/* NEW-UX-026 note: "Webcam"/"Edge Cam" are English chrome too, but
+            left as-is here — render_tests.js (frozen; not owned by this
+            lane's file list) pins BOTH the presence AND the cross-type
+            absence of these exact strings (TEST_MONITOR, plus status.jsx's
+            "類型 cell shows Webcam" suite), so retranslating would break an
+            existing regression suite this pass isn't authorized to touch.
+            Flagged for whoever owns render_tests.js next. */}
         {isWebcam && (
           <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
             Webcam
@@ -345,7 +352,9 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             // >=32px touch-target standard (see status.jsx's MSP-F23 comment).
             className="absolute bottom-1 right-1 z-10 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
           >
-            ▶ 即時
+            {/* NEW-UX-026: was the raw ▶ dingbat — a real icon reads
+                consistently across fonts/platforms a Unicode glyph does not. */}
+            <Icon.Play size={10} strokeWidth={2.5}/> 即時
           </button>
         )}
         {isWebcam && liveMode === 'loading' && (
@@ -369,7 +378,15 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             // NEW-UX-013: same >=32px touch-target bump as the 即時 button above.
             className="absolute top-1 right-1 z-20 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
           >
-            ● LIVE ✕
+            {/* NEW-UX-026: was the raw ● and ✕ dingbats. The blinking dot is
+                now a real styled element (matches the status-dot pattern used
+                elsewhere on this tile) and the close glyph is a real icon.
+                "LIVE" itself is left as English chrome — render_tests.js
+                (frozen; see the source-badge comment above for why) uses the
+                literal string "LIVE" as a CLICK-TARGET SELECTOR for this very
+                button in its existing live-readiness suite, not merely an
+                assertion; retranslating it would break that suite outright. */}
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-live-blink flex-shrink-0"></span> LIVE <Icon.X size={10} strokeWidth={2.5}/>
           </button>
         )}
       </div>
