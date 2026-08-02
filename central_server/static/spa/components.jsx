@@ -667,7 +667,10 @@ const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShor
             <span className="text-ink-dim">|</span>
             <span className="flex items-center gap-1 text-ink-secondary tnum">
               <Icon.CloudRain size={12}/>
-              <span className="font-mono">{window.WEATHER.rain.now}<span className="text-ink-muted">mm/h</span></span>
+              {/* NEW-UX-007: hide the rain chip when rain.now is permanently null
+                  (backend has no sub-24h rain buckets — api.jsx always maps now=null). */}
+              {window.WEATHER.rain.now != null && <span className="font-mono">{window.WEATHER.rain.now}<span className="text-ink-muted">mm/h</span></span>}
+              {window.WEATHER.rain.now == null && <span className="font-mono text-ink-muted">—</span>}
             </span>
             {window.WEATHER.lightning && window.WEATHER.lightning.count > 0 && (
               <>
@@ -756,7 +759,9 @@ const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShor
             <div className="text-xs font-medium">{window.SDPRS_USER || '—'}</div>
             <div className="text-[10px] text-ink-muted font-mono tnum">已登入</div>
           </div>
-          <Icon.ChevronDown size={12} className="text-ink-muted"/>
+          {/* NEW-UX-023: removed ChevronDown (implied a dropdown menu, but the
+              button opens a single-action confirm dialog — the title tooltip
+              "點擊登出" is the correct affordance). */}
         </button>
       </div>
       {logoutConfirmOpen && (
@@ -877,8 +882,11 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
           ))}
         </div>
         <div className="text-[10px] text-ink-muted font-mono px-1 pt-1 flex justify-between">
-          <span>build 2026.05.18-r4</span>
-          <span className="text-sev-ok">●</span>
+          {/* NEW-UX-024: build string sourced from window.__SDPRS_BUILD (falls
+              back to a constant), status dot bound to the WS connection signal
+              (window.__SDPRS_WS_CONNECTED) instead of unconditionally green. */}
+          <span>{(window.__SDPRS_BUILD || 'build —')}</span>
+          <span className={window.__SDPRS_WS_CONNECTED ? 'text-sev-ok' : 'text-ink-muted'}>●</span>
         </div>
       </div>
     </>
@@ -1201,8 +1209,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     setTestFeedback('');
     setUnsnoozing(new Set());
     setUnsnoozingAll(false);
-    inFlightRef.current = new Set();
-    allInFlightRef.current = false;
+    // NEW-RT-005: do NOT reset inFlightRef/allInFlightRef here — they guard
+    // against duplicate in-flight requests. Wiping them on reopen allows a
+    // genuine duplicate if the original request was still pending when the
+    // drawer closed. Only display-only state (errors, feedback) is cleared.
   }, [open]);
 
   // CMP-F13: clear any pending test-feedback timer on unmount.
@@ -1361,7 +1371,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
         role="dialog"
         aria-modal="true"
         aria-label="音效抑制 / 音量"
-        className="w-[380px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        className="w-[380px] max-w-[100vw] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10">
@@ -1499,7 +1509,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                   );
                 })}
                 {unsnoozeErr && (
-                  <div role="status" aria-live="polite" className="text-[10px] text-sev-critical mt-1 px-1">
+                  <div role="alert" aria-live="assertive" className="text-[10px] text-sev-critical mt-1 px-1">
                     {unsnoozeErr.nid ? `${unsnoozeErr.nid}: ` : ''}{unsnoozeErr.msg}
                   </div>
                 )}
@@ -1816,7 +1826,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
 
   // Build searchable items
   const items = [
-    ...window.NAV_ITEMS.map(n => ({ kind: 'nav', id: n.id, label: `頁面: ${n.label}`, hint: `Hotkey ${n.hotkey}`, icon: n.Icon })),
+    ...window.NAV_ITEMS.map(n => ({ kind: 'nav', id: n.id, label: `頁面: ${n.label}`, hint: `快捷鍵 ${n.hotkey}`, icon: n.Icon })),
     ...alerts.map(a => ({ kind: 'alert', id: a.id, label: `${a.id} · ${window.alertTypeLabel(a.type)}`, hint: `${a.node} · ${a.state}`, sev: a.sev })),
     ...nodeList.map(n => ({ kind: 'node', id: n.id, label: `節點: ${n.id} · ${n.name}`, hint: n.location, status: n.status })),
     { kind: 'cmd', id: 'mute-all', label: '指令: 開啟音效抑制面板', hint: 'M', icon: Icon.VolumeX },
@@ -1947,7 +1957,8 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
                       {nodeStatusLabel(it.status)}
                     </span>
                   )}
-                  <span className="text-[10px] text-ink-dim uppercase font-mono tnum w-12 text-right flex-shrink-0">{it.kind}</span>
+                  {/* NEW-UX-025: map raw kind enum to zh-TW labels */}
+                  <span className="text-[10px] text-ink-dim uppercase font-mono tnum w-12 text-right flex-shrink-0">{{ nav: '頁面', alert: '警報', node: '節點', cmd: '指令' }[it.kind] || it.kind}</span>
                 </button>
               );
             })
@@ -2098,7 +2109,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
         role="dialog"
         aria-modal="true"
         aria-label={`節點詳情 ${node.id}`}
-        className="w-[420px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        className="w-[420px] max-w-[100vw] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
         onClick={e => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10 flex items-center justify-between">
@@ -2395,6 +2406,11 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
   const videoRef = React.useRef(null);
   const hlsRef = React.useRef(null);
   const retryCount = React.useRef(0);
+  // NEW-RT-004: idempotency guard — destroy() is called from both the fatal-
+  // error fallback (3rd retry) and the effect cleanup. When the fatal-error
+  // path fires first, it triggers onFallback which unmounts HlsPlayer,
+  // running the cleanup on the already-destroyed instance.
+  const destroyedRef = React.useRef(false);
   // COMP-030: `onFallback` was read from the closure but NOT listed in the
   // effect's deps ([nodeId] only) — deliberately, since app.jsx recreates
   // this callback on every render and adding it would tear down/recreate
@@ -2466,7 +2482,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       if (data.fatal) {
         retryCount.current += 1;
         if (retryCount.current >= 3) {
-          hls.destroy();
+          if (!destroyedRef.current) { destroyedRef.current = true; hls.destroy(); }
           hlsRef.current = null;
           if (onFallbackRef.current) onFallbackRef.current();
         } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -2486,7 +2502,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
     });
 
     return () => {
-      hls.destroy();
+      if (!destroyedRef.current) { destroyedRef.current = true; hls.destroy(); }
       hlsRef.current = null;
     };
   }, [nodeId]);
@@ -2497,6 +2513,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       autoPlay
       muted
       playsInline
+      aria-label={nodeId ? `${nodeId} 即時影像` : '即時影像'}
       className="absolute inset-0 w-full h-full object-cover"
     />
   );
