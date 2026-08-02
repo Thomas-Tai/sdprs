@@ -316,6 +316,10 @@ function App({ initialError = null }) {
   // has some (but not all) loaders reject. Drives the warning banner below the
   // status strip so the operator knows which feeds are stale or unavailable.
   const [dataWarnings, setDataWarnings] = useStateA([]);
+  // FLOW-005: track dismissed warning keys so the 20s poll doesn't re-show
+  // the same banner the operator just closed. Only NEW failures (feeds that
+  // broke since dismissal) re-trigger the banner.
+  const dismissedWarningsRef = useRefA(new Set());
   const [audioReplayIn, setAudioReplayIn] = useStateA(30);
 
   // Refs used by callbacks below (declared here so JSX/hooks can reference
@@ -618,7 +622,16 @@ function App({ initialError = null }) {
         // array is not evidence that everything succeeded — treat it as a
         // total failure rather than clearing the stale-data banner. See the
         // catch below and the api.jsx handoff noted there.
-        setDataWarnings(Array.isArray(r?.failures) ? r.failures : _LOADER_KEYS.slice());
+        // FLOW-005: filter out warnings the operator already dismissed —
+        // only NEW failures (not in the dismissed set) re-show the banner.
+        // If a previously-dismissed feed recovers and breaks again, the
+        // dismissal is cleared (see the dismiss handler's effect below).
+        const rawWarnings = Array.isArray(r?.failures) ? r.failures : _LOADER_KEYS.slice();
+        const fresh = rawWarnings.filter(k => !dismissedWarningsRef.current.has(k));
+        // Clear dismissal tracking for feeds that recovered (no longer failing)
+        // so a future re-break will re-show the banner.
+        dismissedWarningsRef.current.forEach(k => { if (!rawWarnings.includes(k)) dismissedWarningsRef.current.delete(k); });
+        setDataWarnings(fresh);
       } catch (e) {
         // SHL-12: a wholesale refresh failure is precisely when the operator
         // most needs the "displaying cached data" banner — silently logging
@@ -838,6 +851,24 @@ function App({ initialError = null }) {
     window.addEventListener('pageshow', onPageShow);
     return () => window.removeEventListener('pageshow', onPageShow);
   }, []);
+
+  // FLOW-003: cross-tab sync for mute/theme via the storage event.
+  // When another tab changes the theme or mute state, the localStorage
+  // 'storage' event fires in THIS tab (not the originating one).
+  // Read the updated tweaks and apply them so the operator doesn't have
+  // one tab in dark/alarm mode while another is in light/muted.
+  useEffectA(() => {
+    const onStorage = (e) => {
+      if (e.key !== 'sdprs.tweaks' || !e.newValue) return;
+      try {
+        const next = JSON.parse(e.newValue);
+        if (next.theme && next.theme !== tweaks.theme) setTweak('theme', next.theme);
+        if (next.muted !== undefined && next.muted !== tweaks.muted) setTweak('muted', next.muted);
+      } catch (_) { /* malformed JSON — ignore */ }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [tweaks.theme, tweaks.muted, setTweak]);
 
   // Offline / online detection — toast the operator when connectivity changes
   // and trigger a refresh when the connection comes back so stale data is
@@ -1752,7 +1783,13 @@ function App({ initialError = null }) {
           </span>
           {/* SHELL-012: this glyph-only button had no accessible name — a
               screen-reader user heard nothing but "button". */}
-          <button onClick={() => setDataWarnings([])} aria-label="關閉此警示" className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
+          <button onClick={() => {
+            // FLOW-005: remember which warnings were dismissed so the next poll
+            // doesn't re-show the same banner. Clear the set if the feed
+            // recovers and breaks again later.
+            dataWarnings.forEach(k => dismissedWarningsRef.current.add(k));
+            setDataWarnings([]);
+          }} aria-label="關閉此警示" className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
         </div>
       )}
       {/* SHELL-003: #root (styles.css, CMP-F18) migrated to 100dvh so the
