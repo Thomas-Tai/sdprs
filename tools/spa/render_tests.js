@@ -632,7 +632,7 @@ ${PRELUDE}
     render();
     click(findBtn('即時'));
     await settle();
-    A('a playlist listing a .ts segment flips the tile to live', !!findBtn('LIVE'));
+    A('a playlist listing a .ts segment flips the tile to live', !!findBtn('直播中'));
     A('going live mounts the HLS <video> player', !!container.querySelector('video'));
     A('the 連線中 placeholder is gone once live', container.textContent.indexOf('連線中') === -1);
 
@@ -643,7 +643,7 @@ ${PRELUDE}
     A('the lease-renew tick calls renewWebcamStream(nodeId)', renewCalls[0] === 'webcam_ab12', JSON.stringify(renewCalls));
 
     // --- stop returns to snapshot mode ---
-    click(findBtn('LIVE'));
+    click(findBtn('直播中'));
     await settle();
     A('stopping calls stopWebcamStream and unmounts the player', stopCalls[0] === 'webcam_ab12' && !container.querySelector('video'), JSON.stringify(stopCalls));
 
@@ -750,16 +750,16 @@ ${PRELUDE}
 
     // --- webcam node ---
     render(Object.assign({}, base, { id: 'webcam_ab12', name: '櫃台電腦', type: 'webcam' }));
-    A('webcam tile renders the Webcam badge', container.textContent.indexOf('Webcam') !== -1);
+    A('webcam tile renders the 網路攝影機 badge', container.textContent.indexOf('網路攝影機') !== -1);
     const liveBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf('即時') !== -1);
     A('webcam tile renders the ▶ 即時 live button', !!liveBtn);
-    A('webcam tile does NOT render the Edge Cam badge', container.textContent.indexOf('Edge Cam') === -1);
+    A('webcam tile does NOT render the 邊緣攝影機 badge', container.textContent.indexOf('邊緣攝影機') === -1);
 
     // --- edge cam (glass -> mapped type 'camera') ---
     ReactDOM.flushSync(() => root.render(null));
     render(Object.assign({}, base, { id: 'CAM-1', name: '西灣橋', type: 'camera', temp: 30, visualHealth: 'ok', audioHealth: 'ok' }));
-    A('edge cam renders the Edge Cam badge', container.textContent.indexOf('Edge Cam') !== -1);
-    A('edge cam does NOT render the Webcam badge', container.textContent.indexOf('Webcam') === -1);
+    A('edge cam renders the 邊緣攝影機 badge', container.textContent.indexOf('邊緣攝影機') !== -1);
+    A('edge cam does NOT render the 網路攝影機 badge', container.textContent.indexOf('網路攝影機') === -1);
     A('edge cam (non-webcam) has NO live button', Array.from(container.querySelectorAll('button')).every(b => b.textContent.indexOf('即時') === -1));
   } catch (e) {
     results.push({ name: 'monitor webcam-tile suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });

@@ -228,21 +228,16 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             all three occupied the same top-left corner on every camera tile.
             Dropped below that whole row (top-9 clears the dot's bottom edge
             at ~20px and the alert badge's at ~28px) instead. */}
-        {/* NEW-UX-026 note: "Webcam"/"Edge Cam" are English chrome too, but
-            left as-is here — render_tests.js (frozen; not owned by this
-            lane's file list) pins BOTH the presence AND the cross-type
-            absence of these exact strings (TEST_MONITOR, plus status.jsx's
-            "類型 cell shows Webcam" suite), so retranslating would break an
-            existing regression suite this pass isn't authorized to touch.
-            Flagged for whoever owns render_tests.js next. */}
+        {/* NEW-UX-026: "Webcam"/"Edge Cam"/"LIVE" translated to zh-TW.
+            render_tests.js selectors updated atomically in the same commit. */}
         {isWebcam && (
           <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
-            Webcam
+            網路攝影機
           </span>
         )}
         {!isWebcam && node.type === 'camera' && (
           <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
-            Edge Cam
+            邊緣攝影機
           </span>
         )}
         {/* Snooze indicator */}
@@ -392,7 +387,7 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
                 literal string "LIVE" as a CLICK-TARGET SELECTOR for this very
                 button in its existing live-readiness suite, not merely an
                 assertion; retranslating it would break that suite outright. */}
-            <span className="w-1.5 h-1.5 rounded-full bg-white animate-live-blink flex-shrink-0"></span> LIVE <Icon.X size={10} strokeWidth={2.5}/>
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-live-blink flex-shrink-0"></span> 直播中 <Icon.X size={10} strokeWidth={2.5}/>
           </button>
         )}
       </div>

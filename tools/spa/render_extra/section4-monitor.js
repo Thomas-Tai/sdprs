@@ -427,7 +427,7 @@ ${HLS_SHIM}
         A('NEW-UX-026 setup: the tile is live', !!container.querySelector('video'));
         A('NEW-UX-026 the live-stop button no longer uses the raw ● dingbat', btn.textContent.indexOf('●') === -1, btn.textContent);
         A('NEW-UX-026 the live-stop button no longer uses the raw ✕ dingbat', btn.textContent.indexOf('✕') === -1, btn.textContent);
-        A('NEW-UX-026 the live-stop button still says LIVE (frozen render_tests.js click-selector — see scope note)', btn.textContent.indexOf('LIVE') !== -1, btn.textContent);
+        A('NEW-UX-026 the live-stop button still says 直播中 (translated from LIVE in Queue F)', btn.textContent.indexOf('直播中') !== -1, btn.textContent);
         A('NEW-UX-026 an icon element replaces the removed ✕ dingbat', !!btn.querySelector('svg'), btn.innerHTML);
       } finally {
 ${HLS_SHIM_RESTORE}
