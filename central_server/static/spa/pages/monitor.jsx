@@ -626,13 +626,16 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             <div className="absolute top-1 left-1 text-[8px] font-bold px-1 py-0.5 rounded bg-sev-stale/20 text-sev-stale tracking-wide">離線</div>
           )}
           {/* Trend arrow — MSP-F14: api.jsx's `trend` is always null (not yet
-              computed server-side); showing a fixed "→" claimed a real,
-              flat reading. Render an honest dash instead of a fabricated
-              direction — this still lights up correctly if trend data ever
-              ships. */}
-          <div className="absolute bottom-0.5 right-0.5 text-[10px] font-mono">
-            {node.trend === 'up' ? <span className="text-sev-warn">↑</span> : node.trend === 'down' ? <span className="text-sev-ok">↓</span> : <span className="text-ink-dim">—</span>}
-          </div>
+              computed server-side). OPS-030: rendering a permanent "—"
+              placeholder box for a slot with zero live data is dead UI on
+              every single pump card — hide the slot entirely while null and
+              let it appear the moment real trend data ships, instead of
+              occupying a corner with a dash nobody can act on. */}
+          {node.trend && (
+            <div className="absolute bottom-0.5 right-0.5 text-[10px] font-mono">
+              {node.trend === 'up' ? <span className="text-sev-warn">↑</span> : <span className="text-sev-ok">↓</span>}
+            </div>
+          )}
         </div>
 
         {/* RIGHT — Stats */}
@@ -659,13 +662,19 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             )}
           </div>
 
-          {/* Flow + power row */}
-          <div className="grid grid-cols-2 gap-1 text-[10px] font-mono tnum">
-            <div className="flex items-center gap-1">
-              <Icon.ArrowDown size={9} className="text-sev-info"/>
-              <span className="text-ink-muted">流量</span>
-              <span className="text-ink-secondary ml-auto">{node.flow ?? '—'}<span className="text-ink-dim ml-0.5">L/m</span></span>
-            </div>
+          {/* Flow + power row. OPS-030: `flow` has no producer yet (server
+              never populates it) — a permanent "流量 — L/m" on every card
+              trains operators to ignore the label. Hide the whole slot when
+              null so it appears (and grid-cols-2 balances again) only once
+              real flow data ships. */}
+          <div className={`grid ${node.flow != null ? 'grid-cols-2' : 'grid-cols-1'} gap-1 text-[10px] font-mono tnum`}>
+            {node.flow != null && (
+              <div className="flex items-center gap-1">
+                <Icon.ArrowDown size={9} className="text-sev-info"/>
+                <span className="text-ink-muted">流量</span>
+                <span className="text-ink-secondary ml-auto">{node.flow}<span className="text-ink-dim ml-0.5">L/m</span></span>
+              </div>
+            )}
             <div className="flex items-center gap-1">
               <Icon.Battery size={9} className={node.voltage != null && node.voltage < 12 ? 'text-sev-warn' : 'text-ink-muted'}/>
               <span className={node.voltage != null && node.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{node.voltage != null ? node.voltage + 'V' : '—'}</span>
