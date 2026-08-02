@@ -357,8 +357,14 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             <Icon.Play size={10} strokeWidth={2.5}/> 即時
           </button>
         )}
+        {/* OPS-035: was tiny static text with no other affordance — during
+            the up-to-30s readiness poll (LIVE_POLL_TIMEOUT_MS) an operator
+            had nothing to distinguish "still warming up" from "stuck/dead".
+            Same CSS-only spinner primitive already used by app.jsx's loading
+            states, sized down to fit this small pill. */}
         {isWebcam && liveMode === 'loading' && (
-          <div className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-surface-overlay/80 text-ink-secondary text-[10px]">
+          <div className="absolute bottom-1 right-1 z-10 min-h-[32px] px-3 flex items-center gap-1.5 rounded bg-surface-overlay/80 text-ink-secondary text-[10px]">
+            <span className="w-3 h-3 rounded-full border-2 border-border-subtle border-t-sev-info animate-spin flex-shrink-0" aria-hidden="true"></span>
             連線中...
           </div>
         )}
