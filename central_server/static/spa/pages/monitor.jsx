@@ -161,7 +161,7 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         } ring-2 ring-black/50 ${stateTone === 'critical' ? 'animate-live-blink' : ''}`}></div>
         {/* Active alert badge */}
         {nodeAlerts.length > 0 && (
-          <div className={`absolute z-10 top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
+          <div className={`absolute z-10 top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum ${hasCritical ? 'bg-sev-critical text-white animate-live-blink' : 'bg-sev-warn text-black'}`}>
             <Icon.Bell size={9} strokeWidth={2.5}/>{nodeAlerts.length}
           </div>
         )}
@@ -546,7 +546,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
         <span className="font-mono text-sm font-bold tnum">{node.id}</span>
         <span className="text-xs text-ink-secondary truncate flex-1">{node.name}</span>
         {nodeAlerts.length > 0 && (
-          <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 h-4 rounded text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
+          <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 h-4 rounded ${hasCritical ? 'bg-sev-critical text-white animate-live-blink' : 'bg-sev-warn text-black'}`}>
             <Icon.Bell size={9} strokeWidth={2.5}/>{nodeAlerts.length}
           </span>
         )}

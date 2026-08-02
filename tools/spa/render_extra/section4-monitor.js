@@ -95,7 +95,7 @@ module.exports = [
       ReactDOM.flushSync(() => root.render(null));
       ReactDOM.flushSync(() => root.render(React.createElement(NodeCard, { node: Object.assign({}, camNode, { status: 'critical' }), onSelect: () => {}, nodeAlerts: [{ sev: 'critical' }] })));
       await settle();
-      let critBadge = Array.from(container.querySelectorAll('div')).find(d => d.className.indexOf('bg-sev-critical') !== -1 && d.className.indexOf('animate-live-blink') !== -1);
+      let critBadge = Array.from(container.querySelectorAll('div')).find(d => d.className.indexOf('bg-sev-critical') !== -1 && d.className.indexOf('left-7') !== -1);
       A('NEW-UX-002 NodeCard critical alert badge IS text-white', !!critBadge && critBadge.className.indexOf('text-white') !== -1, critBadge && critBadge.className);
 
       // PumpCard alert-count badge
