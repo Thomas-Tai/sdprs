@@ -210,7 +210,7 @@ const StreamHealthCell = ({ node, health: healthProp }) => {
   const tone = mbps < 0.5 ? 'text-sev-critical' : mbps < 1 ? 'text-sev-warn' : 'text-sev-ok';
   return (
     <span className={tone}>
-      {mbps.toFixed(1)}Mbps{drops != null && <span className="text-ink-muted"> · {drops} drops</span>}
+      {mbps.toFixed(1)}Mbps{drops != null && <span className="text-ink-muted"> · {drops} 丟包</span>}
     </span>
   );
 };
@@ -605,7 +605,9 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                             time. Honest dash instead of a fabricated
                             direction (still lights up if trend data ships). */}
                         {n.trend === 'up' ? <Icon.ArrowUp size={10} className="text-sev-warn"/> : n.trend === 'down' ? <Icon.ArrowDown size={10} className="text-sev-ok"/> : <span className="text-ink-dim">—</span>}
-                        <span className={n.level > 85 ? 'text-sev-critical font-semibold' : n.level > 70 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.level}%</span>
+                        {/* OPS-024: title shows reading age so operators know how
+                            stale the water-level percentage is. */}
+                        <span title={n.heartbeat != null ? '水位讀取於 ' + window.fmtAgeOrDash(n.heartbeat) + ' 前' : undefined} className={n.level > 85 ? 'text-sev-critical font-semibold' : n.level > 70 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.level}%</span>
                         <span className="text-ink-muted ml-1">· {n.cycles}×</span>
                       </span>
                     )}

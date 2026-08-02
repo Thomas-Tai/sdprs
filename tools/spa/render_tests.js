@@ -1458,7 +1458,7 @@ ${PRELUDE}
     await settle();
     A('OPS-002 串流健康 shows the real bitrate from getStreamHealth', container.textContent.indexOf('2.5Mbps') !== -1);
     A('OPS-002 串流健康 is NOT the always-0 node.bitrate', container.textContent.indexOf('0.0Mbps') === -1);
-    A('OPS-002 串流健康 shows drops from getStreamHealth', container.textContent.indexOf('3 drops') !== -1);
+    A('OPS-002 串流健康 shows drops from getStreamHealth', container.textContent.indexOf('3 丟包') !== -1);
 
     // Unknown health (bridge up, no scraped sample yet / edge silent) → neutral —,
     // never a red 0.0 that reads as "every camera broken".
