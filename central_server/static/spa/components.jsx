@@ -723,10 +723,12 @@ const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShor
             type="button"
             onClick={() => { try { window.SDPRS_AUDIO.arm(); } catch (_) {} }}
             title={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效 (瀏覽器需要一次使用者互動)'}
+            aria-label={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效'}
             disabled={audioArmed}
-            className={`hidden md:inline-flex flex-shrink-0 items-center gap-1 h-8 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
+            className={`inline-flex flex-shrink-0 items-center gap-1 h-8 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
           >
-            {audioArmed ? '🔊 音效已啟用' : '🔇 點擊啟用音效'}
+            <span aria-hidden="true">{audioArmed ? '🔊' : '🔇'}</span>
+            <span className="hidden md:inline">{audioArmed ? ' 音效已啟用' : ' 點擊啟用音效'}</span>
           </button>
         )}
         <button
