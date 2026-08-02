@@ -169,7 +169,19 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         const api = window.SDPRS_API;
         if (api && api.renewWebcamStream) api.renewWebcamStream(node.id).catch(() => {});
       }, 30000);
-      return () => clearInterval(iv);
+      return () => {
+        clearInterval(iv);
+        // OPS-007: this effect's cleanup fires on EVERY path off 'live' —
+        // the ● LIVE ✕ click, HlsPlayer.onFallback (setLiveMode('off')), AND
+        // the tile unmounting (grid filter change, nav away). Only the first
+        // of those used to release the server lease; the other two left it
+        // armed until it lapsed on its own (~LEASE_TTL_SECONDS ≈90s), with
+        // the field PC encoding a stream nobody was watching the whole time.
+        // Best-effort/idempotent: a redundant stop (e.g. the ✕ button already
+        // called it) is harmless.
+        const api = window.SDPRS_API;
+        if (api && api.stopWebcamStream) api.stopWebcamStream(node.id).catch(() => {});
+      };
     }
   }, [liveMode, node.id]);
   return (
