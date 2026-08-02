@@ -13,12 +13,18 @@ const SHIFT_WINDOW_MS = 12 * 60 * 60 * 1000;
 // HH:MM:SS with no date. Uses the browser's LOCAL Date getters only — `ts`
 // is already-correct epoch ms (parseTs upstream), so this is a pure display
 // conversion, not a compensating offset (see forecast-timezone contract).
+// AUD-004: include the year when the row is not in the current year, so
+// multi-day / cross-year audit reviews remain unambiguous. Uses browser-local
+// Date getters only — no manual UTC offset (would reintroduce API-F1-class
+// timezone bug).
 const formatAuditTs = (ts) => {
   if (ts == null) return null;
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return null;
   const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const thisYear = new Date().getFullYear();
+  const prefix = d.getFullYear() !== thisYear ? `${d.getFullYear()}-` : '';
+  return `${prefix}${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
 const AuditPage = ({ auditLog = [] }) => {
@@ -308,6 +314,10 @@ const AuditPage = ({ auditLog = [] }) => {
                       <EmptyState icon={Icon.ShieldAlert}
                         title="無權限查看稽核紀錄,請聯絡管理員"
                         hint="需具備管理員權限才能檢視稽核紀錄"/>
+                    ) : meOnly && !_sessionUser ? (
+                      <EmptyState icon={Icon.User}
+                        title="無法辨識目前使用者"
+                        hint="系統無法確認您的身分，請確認登入狀態"/>
                     ) : (
                       <EmptyState icon={Icon.ClipboardList}
                         title={filtersActive ? '無符合條件的稽核紀錄' : '尚無稽核紀錄'}
@@ -317,14 +327,17 @@ const AuditPage = ({ auditLog = [] }) => {
                 </td>
               </tr>
             )}
-            {records.map((a) => {
+            {records.map((a, i) => {
               const m = actionMeta[a.action] || { tone: 'stale', label: a.action };
               // WHA-L6 fix (2026-07-20): was keyed on array index, which
               // shifts every time a new row is prepended by a refresh —
               // React then reuses/misattributes DOM nodes across unrelated
               // rows. Synthesize a stable-enough key from the row's own
               // content (no backend row id is mapped through mapAuditRow).
-              const rowKey = `${a.ts != null ? a.ts : 'na'}-${a.by}-${a.action}-${a.target}`;
+              // AUD-006: append array index as a tiebreaker so two bulk-op
+              // rows with identical ts/by/action/target don't collide on key.
+              // Index-only keys were the WHA-L6 bug — content+index is stable.
+              const rowKey = `${a.ts != null ? a.ts : 'na'}-${a.by}-${a.action}-${a.target}-${i}`;
               return (
                 <tr key={rowKey} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60">
                   {/* WHA-H2 fix (2026-07-20): `a.t` is a time-only HH:MM:SS

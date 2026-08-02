@@ -217,7 +217,15 @@ const HandoverPage = () => {
   // HDO-001: synchronous ref-latch to prevent same-tick double-fire on save.
   // `saving` state can lag a React tick behind a fast double-click.
   const saveInFlightRef = React.useRef(false);
-  const [dirty, setDirty] = useState_p(() => readDraft() != null);
+  // HDO-004: only mark dirty when the restored draft actually DIFFERS from
+  // the server's current text — restoring an identical draft must not show
+  // "未儲存變更" or arm the beforeunload prompt for no change.
+  const [dirty, setDirty] = useState_p(() => {
+    const draft = readDraft();
+    if (draft == null) return false;
+    const serverText = (window.HANDOVER && window.HANDOVER.current) || '';
+    return draft !== serverText;
+  });
   const [confirm, setConfirm] = useState_p(null);
   // WHA-M8: populated when saveHandover() 409s — carries the server's
   // current text/token plus the draft we tried to send, so the
@@ -530,7 +538,7 @@ const HandoverPage = () => {
       setSaving(false);
       openConfirm({
         title: '覆蓋對方版本？',
-        message: '伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎？取消可先預覽對方版本。',
+        message: '伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎？取消可保留目前草稿稍後再決定。',
         confirmLabel: '仍要儲存',
         tone: 'danger',
         onConfirm: () => {
@@ -543,7 +551,7 @@ const HandoverPage = () => {
     await performSave();
   };
   return (
-    <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
+    <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 gap-6">
       {pageToast && (
         <div role="status" aria-live="polite"
           className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-3 py-2 rounded shadow-lg text-xs border ${
@@ -645,14 +653,10 @@ const HandoverPage = () => {
         </div>
       </div>
       <div>
-        <h2 className="text-sm font-semibold mb-3 text-ink-secondary">歷史備註</h2>
-        {/* WHA-M10: window.HANDOVER.history is permanently [] — api.jsx's
-            loadHandover() hardcodes it and no backend endpoint exists to
-            populate it. The old "尚無歷史備註" ("no history yet") copy
-            falsely implied the feature works and is simply empty. Report
-            this as a real gap (hide-or-be-honest) rather than building a
-            fake history list against data that will never arrive. */}
-        <div className="text-xs text-ink-muted bg-surface-panel border border-border-subtle rounded p-3">
+        {/* HDO-006: history is permanently unavailable (WHA-M10) — don't
+            reserve a large section for it. Compact the notice. */}
+        <div className="text-xs text-ink-muted bg-surface-panel border border-border-subtle rounded px-3 py-2 flex items-center gap-2">
+          <Icon.Info size={12} className="flex-shrink-0"/>
           歷史備註功能尚未提供
         </div>
       </div>

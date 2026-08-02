@@ -52,6 +52,7 @@ const WindArrow = ({ degree, size = 16 }) => {
       className="inline-block text-ink-secondary"
       style={{ transform: `rotate(${rot}deg)`, transition: 'transform 400ms ease' }}
       aria-label={`風向 ${degree}度（吹向 ${rot} 度）`}
+      role="img"
     >
       <path d="M10 2 L15 15 L10 12 L5 15 Z" fill="currentColor" stroke="currentColor" strokeLinejoin="round"/>
     </svg>
@@ -121,8 +122,17 @@ const WeatherSettings = ({ onSaved, showToast }) => {
   // error message and the Save-disabled state share one source of truth.
   const latEntered = config.site_lat != null && config.site_lat !== '';
   const lonEntered = config.site_lon != null && config.site_lon !== '';
+  // WXA-005: range check — min/max HTML attrs don't block typed values, so
+  // lat 999 or lon 999 would save without validation. Check both paired-ness
+  // AND range (-90..90 / -180..180).
+  const latOutOfRange = latEntered && (Number(config.site_lat) < -90 || Number(config.site_lat) > 90);
+  const lonOutOfRange = lonEntered && (Number(config.site_lon) < -180 || Number(config.site_lon) > 180);
   const latLonError = latEntered !== lonEntered
     ? '緯度和經度必須同時設定或同時留空'
+    : latOutOfRange
+    ? '緯度必須在 -90 到 90 之間'
+    : lonOutOfRange
+    ? '經度必須在 -180 到 180 之間'
     : null;
   // WHA-M3 fix (2026-07-20): Save is now blocked while the config GET is
   // known to have failed — defaults showing on screen must not be saveable
@@ -318,8 +328,8 @@ const WeatherSettings = ({ onSaved, showToast }) => {
                     placeholder="22.19 (澳門)"
                     value={config.site_lat != null ? config.site_lat : ''}
                     onChange={e => setConfig({...config, site_lat: e.target.value})}
-                    className={inputCls + (latLonError && lonEntered && !latEntered ? ' border-sev-warn/60' : '')}
-                    aria-invalid={latLonError && lonEntered && !latEntered}
+                    className={inputCls + ((latLonError && latEntered) ? ' border-sev-warn/60' : '')}
+                    aria-invalid={latLonError && latEntered}
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -331,8 +341,8 @@ const WeatherSettings = ({ onSaved, showToast }) => {
                     placeholder="113.55 (澳門)"
                     value={config.site_lon != null ? config.site_lon : ''}
                     onChange={e => setConfig({...config, site_lon: e.target.value})}
-                    className={inputCls + (latLonError && latEntered && !lonEntered ? ' border-sev-warn/60' : '')}
-                    aria-invalid={latLonError && latEntered && !lonEntered}
+                    className={inputCls + ((latLonError && lonEntered) ? ' border-sev-warn/60' : '')}
+                    aria-invalid={latLonError && lonEntered}
                   />
                 </label>
               </div>
@@ -484,6 +494,11 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
   const windValues = fc.map(f => f.wind).filter(v => Number.isFinite(v));
   const maxWind = windValues.length ? Math.max(1, ...windValues) : 1;
   const maxRain = rainValues.length ? Math.max(1, ...rainValues) : 1;
+  // WXA-003: real-max for peak badge display — independent of the axis floor
+  // (1) used for bar heights. When every forecast hour is genuinely 0, the
+  // badge must show "0", not "1".
+  const realMaxWind = windValues.length ? Math.max(...windValues) : 0;
+  const realMaxRain = rainValues.length ? Math.max(...rainValues) : 0;
   // WHA-L2 fix (2026-07-20): maxRain/maxWind fold in a `1` axis-scaling floor
   // to avoid divide-by-zero when every hour is genuinely 0. The peak badges
   // below used to reuse that same floor as a "no data" sentinel
@@ -718,8 +733,8 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
               hunting the chart. Reuses maxRain/maxWind already computed. */}
           {fc.length > 0 && (
             <div className="flex items-center gap-3 text-[10px] text-ink-muted font-mono tnum">
-              <span>峰值雨量 <span className="text-sev-info">{hasRainData ? maxRain : '—'} mm/h</span></span>
-              <span>峰值風速 <span className="text-sev-warn">{hasWindData ? maxWind : '—'} km/h</span></span>
+              <span>峰值雨量 <span className="text-sev-info">{hasRainData ? realMaxRain : '—'} mm/h</span></span>
+              <span>峰值風速 <span className="text-sev-warn">{hasWindData ? realMaxWind : '—'} km/h</span></span>
             </div>
           )}
         </div>

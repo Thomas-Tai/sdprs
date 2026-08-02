@@ -1075,8 +1075,10 @@ function App({ initialError = null }) {
 
   const onSnooze = useCallbackA(async (id, mins) => {
     const a = alerts.find(x => x.id === id);
-    if (!a) return;
-    if (alertBusyRef.current) return;
+    // ALR-002: throw on guard paths instead of silent return — SnoozeMenu's
+    // catch keeps the menu open so the operator sees nothing was sent.
+    if (!a) throw new Error('ALR-002: alert not found');
+    if (alertBusyRef.current) throw new Error('ALR-002: busy');
     alertBusyRef.current = true;
     setAlertBusy(true);
     try {
@@ -1093,6 +1095,30 @@ function App({ initialError = null }) {
       }
       setMuteState(prev => ({ ...prev, nodes: prev.nodes.includes(a.node) ? prev.nodes : [...prev.nodes, a.node] }));
       showToast(`${a.node} 通知已靜音 ${mins} 分鐘`, 'warn');
+      await refresh();
+    } finally {
+      alertBusyRef.current = false;
+      setAlertBusy(false);
+    }
+  }, [showToast, alerts, refresh]);
+
+  // ALR-010: mirror onSnooze — unsnooze a currently-muted node via the
+  // backend's unsnoozeNode endpoint, then refresh.
+  const onUnsnooze = useCallbackA(async (id) => {
+    const a = alerts.find(x => x.id === id);
+    if (!a) throw new Error('ALR-010: alert not found');
+    if (alertBusyRef.current) throw new Error('ALR-010: busy');
+    alertBusyRef.current = true;
+    setAlertBusy(true);
+    try {
+      try {
+        await window.SDPRS_API.unsnoozeNode(a.node);
+      } catch (e) {
+        showToast('解除靜音失敗: ' + actionErrorText(e), 'warn');
+        throw e;
+      }
+      setMuteState(prev => ({ ...prev, nodes: prev.nodes.filter(n => n !== a.node) }));
+      showToast(`${a.node} 已解除靜音`, 'info');
       await refresh();
     } finally {
       alertBusyRef.current = false;
@@ -1629,7 +1655,7 @@ function App({ initialError = null }) {
     // Alerts/Status isn't the page that just crashed, so it's never a no-op.
     const wrap = (el) => <ErrorBoundary key={page} onEscape={() => setPage(page === 'alerts' ? 'status' : 'alerts')}>{el}</ErrorBoundary>;
     switch (page) {
-      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
+      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onUnsnooze={onUnsnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
       case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
       case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);

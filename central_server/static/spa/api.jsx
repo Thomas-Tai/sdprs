@@ -644,8 +644,15 @@
   }
 
   async function loadHistory() {
-    const rows = await apiFetch('/api/alerts?status_filter=RESOLVED&limit=80');
-    return (Array.isArray(rows) ? rows : []).map(mapAlert);
+    const _HISTORY_LIMIT = 80;
+    const rows = await apiFetch('/api/alerts?status_filter=RESOLVED&limit=' + _HISTORY_LIMIT);
+    const arr = Array.isArray(rows) ? rows : [];
+    const list = arr.map(mapAlert);
+    // ALR-004: expose truncation metadata so alerts.jsx can mirror the active
+    // tab's truncation banner for history (more rows exist on the server).
+    list.truncated = arr.length >= _HISTORY_LIMIT;
+    list.totalAvailable = list.truncated ? _HISTORY_LIMIT : arr.length;
+    return list;
   }
 
   async function loadRate() {
