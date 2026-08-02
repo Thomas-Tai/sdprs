@@ -341,7 +341,9 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
                 })
                 .finally(() => { liveStartInFlightRef.current = false; });
             }}
-            className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
+            // NEW-UX-013: was px-2 py-1 (~20-22px tall) — below the app's own
+            // >=32px touch-target standard (see status.jsx's MSP-F23 comment).
+            className="absolute bottom-1 right-1 z-10 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
           >
             ▶ 即時
           </button>
@@ -364,7 +366,8 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
                 Promise.resolve(api.stopWebcamStream(node.id)).catch(() => {});
               }
             }}
-            className="absolute top-1 right-1 z-20 px-2 py-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
+            // NEW-UX-013: same >=32px touch-target bump as the 即時 button above.
+            className="absolute top-1 right-1 z-20 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
           >
             ● LIVE ✕
           </button>
