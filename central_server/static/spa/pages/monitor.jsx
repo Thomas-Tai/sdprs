@@ -18,15 +18,13 @@ const ClockDisplay = React.memo(() => {
   );
 });
 
-// MSP-F19/F8: heartbeat/upload ages are now `null` for a never-reported node
-// (the old 999 sentinel is gone). window.fmtAge (data.jsx) does `sec || 0`,
-// which would silently print "0s" for null — a fabricated reading, exactly
-// the bug this replaces. Guard first, then reuse the app-wide humanizer
-// (data.jsx fmtAge) so "86400s" reads as "1d 0h" like every other age in
-// the dashboard, instead of a raw, unreadable seconds count.
-function fmtAgeOrDash(sec) {
-  return sec == null ? '—' : window.fmtAge(sec);
-}
+// OPS-037: fmtAgeOrDash used to be defined HERE and merely re-exported for
+// status.jsx to reach across files for — a fragile cross-file dependency
+// (status.jsx fell back to a cruder inline formatter whenever monitor.jsx
+// hadn't loaded first; see status.jsx's heartbeat/upload cells). It is now
+// the shared humanizer published by data.jsx (MSP-F19/F8: null → '—' rather
+// than fmtAge's `sec || 0` fabricating "0s" for a never-reported node); this
+// file just consumes window.fmtAgeOrDash like every other page does.
 
 // MSP-F10: status-rank used both to freely re-sort (pointer not over the
 // grid) and to seed the "newcomer" order for nodes not yet seen while frozen.
@@ -203,7 +201,7 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
             <div className="bg-sev-critical text-xs font-bold px-2 py-1 rounded">
               {/* MSP-F19: raw seconds ("86400s") for a node offline for days is
                   unreadable — humanize via the shared age formatter. */}
-              畫面凍結 {fmtAgeOrDash(node.upload)}
+              畫面凍結 {window.fmtAgeOrDash(node.upload)}
             </div>
           </div>
         )}
@@ -294,13 +292,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         <div className="flex flex-col">
           <span className="text-ink-muted">心跳</span>
           <span className={node.heartbeat > 30 ? 'text-sev-critical font-semibold' : node.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {fmtAgeOrDash(node.heartbeat)}
+            {window.fmtAgeOrDash(node.heartbeat)}
           </span>
         </div>
         <div className="flex flex-col">
           <span className="text-ink-muted">上傳</span>
           <span className={node.upload > 60 ? 'text-sev-critical font-semibold' : node.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {fmtAgeOrDash(node.upload)}
+            {window.fmtAgeOrDash(node.upload)}
           </span>
         </div>
         {node.type === 'camera' ? (
@@ -683,7 +681,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             {/* Contract A: heartbeat is `number | null` — was rendered with no
                 null guard, printing the literal string "心跳 nulls" for a
                 never-reported pump. */}
-            <span className="ml-auto">心跳 {fmtAgeOrDash(node.heartbeat)}</span>
+            <span className="ml-auto">心跳 {window.fmtAgeOrDash(node.heartbeat)}</span>
           </div>
         </div>
       </div>
@@ -703,7 +701,4 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
     prev.compact === next.compact;
 });
 
-// fmtAgeOrDash exported explicitly (not relied on as an implicit sloppy-mode
-// global — see SHL-17) so status.jsx can reuse the same age humanizer for a
-// consistent "raw seconds" fix across both pages (MSP-F19/F20).
-Object.assign(window, { MonitorPage, fmtAgeOrDash });
+Object.assign(window, { MonitorPage });

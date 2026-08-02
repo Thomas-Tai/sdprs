@@ -131,6 +131,17 @@ const fmtAge = (sec) => {
   const h = Math.floor((sec % 86400) / 3600);
   return d + 'd ' + h + 'h';
 };
+// OPS-037: was defined/exported only from pages/monitor.jsx, with status.jsx
+// reaching across files for it via a runtime `window.fmtAgeOrDash ? ... : ...`
+// guard (see status.jsx's heartbeat/upload cells) — a fragile dependency on
+// monitor.jsx happening to load first, silently falling back to a cruder
+// inline formatter (no day/hour humanization) whenever it didn't (e.g. any
+// test harness or future page that doesn't load monitor.jsx). It is a pure
+// function with zero monitor.jsx-specific state, so it belongs in the shared
+// helpers file every page already depends on. `sec == null` (never-reported
+// node, MSP-F19/F8) renders '—' instead of fabricating "0s" via fmtAge's
+// `sec || 0`.
+const fmtAgeOrDash = (sec) => (sec == null ? '—' : fmtAge(sec));
 const ageColor = (sec) => {
   if (sec == null) return 'text-ink-muted';
   if (sec < 300) return 'text-ink-secondary';
@@ -386,7 +397,7 @@ function orderWallAlerts(alerts) {
 
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
-  fmtAge, ageColor, sevMeta, alertTypeMap,
+  fmtAge, fmtAgeOrDash, ageColor, sevMeta, alertTypeMap,
   stateMeta, detectorHealthMeta,
 });
 
