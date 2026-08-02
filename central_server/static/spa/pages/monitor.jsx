@@ -103,6 +103,19 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // Hold a short reason string, shown inline on the tile while 'off', cleared on
   // the next retry.
   const [liveError, setLiveError] = useState_p(null);
+  // OPS-026: synchronous in-flight latch for the ▶ 即時 click handler — a
+  // `useRef` read-after-write within the same synchronous handler sees a
+  // second click in the SAME tick immediately, regardless of when React
+  // actually commits the `liveMode` state update. Mirrors StreamRowButton's
+  // `inFlightRef` in status.jsx (its MSP-F7 comment).
+  const liveStartInFlightRef = React.useRef(false);
+  // NEW-RT-001: mirrors `liveMode` into a ref so the startWebcamStream
+  // rejection handler (an async callback that can land well after the
+  // readiness poll has already promoted the tile to 'live') can tell
+  // whether it is still safe to revert. A stale closure over `liveMode`
+  // would always see the value from the click's own render.
+  const liveModeRef = React.useRef(liveMode);
+  React.useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
   // Live-view timers are lifecycle-managed off liveMode so BOTH the warm-up
   // transition and the lease renewal auto-clean on unmount/stop (state is the
   // single source of truth — no dangling setTimeout after the tile unmounts).
@@ -269,6 +282,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           <button
             onClick={(e) => {
               e.stopPropagation();
+              // OPS-026: same-tick double-click guard. React batches the
+              // 'loading' state update, so a second click dispatched before
+              // React re-renders (removing this button) reaches this SAME
+              // handler again — without the ref latch it double-fires
+              // startWebcamStream.
+              if (liveStartInFlightRef.current) return;
+              liveStartInFlightRef.current = true;
               // Optimistic-first: enter 'loading' so the useEffect owns the
               // playlist-readiness poll → 'live' transition (and its cleanup).
               // A failed start returns to 'off', leaving no dangling timer.
@@ -276,11 +296,24 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
               // Same defensive guard the status-page rows use: without the API
               // bundle there is nothing to start, so stay 'off' rather than
               // sticking the tile on 「連線中...」 until the poll times out.
-              if (!(api && api.startWebcamStream)) return;
+              if (!(api && api.startWebcamStream)) { liveStartInFlightRef.current = false; return; }
               setLiveError(null);   // OPS-004: clear any prior failure on retry
               setLiveMode('loading');
               Promise.resolve(api.startWebcamStream(node.id))
-                .catch(() => { setLiveMode('off'); setLiveError('直播啟動失敗，請重試'); });
+                .catch(() => {
+                  // NEW-RT-001: a late rejection can land after the readiness
+                  // poll already found a real segment and promoted the tile
+                  // to 'live' — the stream IS working. Reverting unconditionally
+                  // force-killed a working player and orphaned the lease (no
+                  // stopWebcamStream call, since the UI now believed it was
+                  // 'off' and never renews/stops it). Only revert while still
+                  // 'loading'; once live, this rejection is a stale no-op.
+                  if (liveModeRef.current === 'loading') {
+                    setLiveMode('off');
+                    setLiveError('直播啟動失敗，請重試');
+                  }
+                })
+                .finally(() => { liveStartInFlightRef.current = false; });
             }}
             className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
           >
