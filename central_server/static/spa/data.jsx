@@ -282,7 +282,7 @@ async function probeSessionOnce(extendSession) {
 // WAL-H5: wall pill + StatusStrip share one label so the wall degrades its
 // text during an outage (not just its color).
 function liveClockLabel(liveSec) {
-  if (liveSec < 10) return 'Live \u00b7 ' + liveSec + 's';
+  if (liveSec < 10) return '\u5373\u6642 \u00b7 ' + liveSec + 's';
   if (liveSec < 30) return '\u91cd\u65b0\u9023\u7dda\u4e2d\u2026 ' + liveSec + 's';
   return '\u9023\u7dda\u4e2d\u65b7 ' + liveSec + 's';
 }

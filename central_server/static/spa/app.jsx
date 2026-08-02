@@ -1667,7 +1667,8 @@ function App({ initialError = null }) {
             <div className="text-xl tracking-widest">SDPRS · 正在載入即時資料…</div>
           </div>
         ) : (
-          <WallView alerts={alerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
+          // NEW-UX-016: pass activeAlerts (excludes resolved), not raw alerts.
+          <WallView alerts={activeAlerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
         )}
       </ErrorBoundary>
       {/* SHL-2: the exit. Deliberately rendered OUTSIDE the ErrorBoundary
@@ -1953,7 +1954,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
           </div>
           <div className="whitespace-nowrap">
             <div className="text-xl font-bold tracking-wider">SDPRS</div>
-            <div className="text-[10px] font-mono text-ink-muted -mt-0.5">NOC WALL · v2.4</div>
+            <div className="text-[10px] font-mono text-ink-muted -mt-0.5">監控牆 · v2.4</div>
           </div>
         </div>
         <div className="w-px h-10 bg-border-subtle flex-shrink-0"></div>
@@ -2032,7 +2033,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
             <div className="flex justify-center pt-2 flex-shrink-0">
               <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-panel/80 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
                 <span className="w-1.5 h-1.5 rounded-full bg-ink-muted/60"></span>
-                +{sorted.length - 9} more
+                +{sorted.length - 9} 更多
               </span>
             </div>
           )}
@@ -2063,7 +2064,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
               <div className="px-3 py-2 flex justify-center">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
                   <span className="w-1.5 h-1.5 rounded-full bg-sev-critical/60 animate-live-blink"></span>
-                  +{alerts.length - 12} more alerts
+                  +{alerts.length - 12} 更多警報
                 </span>
               </div>
             )}

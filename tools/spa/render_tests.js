@@ -1487,8 +1487,8 @@ ${PRELUDE}
     // --- WAL-H5: liveClockLabel ---
     var lcl = window.liveClockLabel;
     A('WAL-H5 liveClockLabel is exported', typeof lcl === 'function');
-    A('WAL-H5 liveClockLabel(3) === Live · 3s', lcl(3) === 'Live \\u00b7 3s', lcl(3));
-    A('WAL-H5 liveClockLabel(9) still Live (boundary <10)', lcl(9).indexOf('Live') === 0, lcl(9));
+    A('WAL-H5 liveClockLabel(3) uses zh-TW 即時', lcl(3) === '即時 · 3s', lcl(3));
+    A('WAL-H5 liveClockLabel(9) still 即時 (boundary <10)', lcl(9).indexOf('即時') === 0, lcl(9));
     A('WAL-H5 liveClockLabel(10) degrades to reconnecting', lcl(10).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(10));
     A('WAL-H5 liveClockLabel(15) contains reconnecting', lcl(15).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(15));
     A('WAL-H5 liveClockLabel(29) still reconnecting (boundary <30)', lcl(29).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(29));
