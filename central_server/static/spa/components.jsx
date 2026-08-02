@@ -1675,8 +1675,11 @@ const StaleAckPill = ({ count, onClick }) => {
 
 // ---------- New Alert Banner (floating, when scrolled past) ----------
 
-const NewAlertBanner = ({ count, onClick }) => {
+const NewAlertBanner = ({ count, onClick, stacked }) => {
   if (!count) return null;
+  // NEW-UX-008: when the full-width dataWarnings bar (app.jsx, top-12) is
+  // showing, this banner needs to drop below it instead of overlapping.
+  const topCls = stacked ? 'top-24' : 'top-16';
   // CMP-F18: `role="alert"` on the <button> overrode its button role, so
   // screen readers announced the text but never that it was operable — and an
   // element that is its own live region re-announces itself on every count
@@ -1690,7 +1693,7 @@ const NewAlertBanner = ({ count, onClick }) => {
       </div>
       <button type="button" onClick={onClick}
         aria-label={`${count} 個新警報 — 點擊或按上鍵跳轉`}
-        className="new-alert-banner fixed top-16 left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 h-8 px-3 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors">
+        className={`new-alert-banner fixed ${topCls} left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 h-8 px-3 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors`}>
         <Icon.ArrowUp size={14} strokeWidth={2.5} aria-hidden="true"/>
         <span className="text-sm font-semibold tnum" aria-hidden="true">{count} 新警報</span>
         <Kbd aria-hidden="true">↑</Kbd>
@@ -1701,7 +1704,10 @@ const NewAlertBanner = ({ count, onClick }) => {
 
 // ---------- Shift Banner (start/end of shift) ----------
 
-const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
+const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover, stacked }) => {
+  // NEW-UX-008: when the full-width dataWarnings bar (app.jsx, top-12) is
+  // showing, this banner needs to drop below it instead of overlapping.
+  const topCls = stacked ? 'top-24' : 'top-14';
   const s = shiftSummary || {};
   const operator = s.operator ?? window.SDPRS_USER ?? '—';
   // Field-name flex: try the audit-suggested name first, then fall back to
@@ -1717,7 +1723,7 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
   const recent = s.recentIncident
     ?? (Array.isArray(s.highlights) && s.highlights.length ? s.highlights.join(' · ') : '尚無交接事項');
   return (
-    <div className="fixed top-14 right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden">
+    <div className={`fixed ${topCls} right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden`}>
       <div className="px-4 py-2.5 bg-sev-info/15 border-b border-sev-info/30 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sev-info">
           <Icon.ClipboardList size={14}/>

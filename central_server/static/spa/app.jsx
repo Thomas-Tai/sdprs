@@ -1707,6 +1707,12 @@ function App({ initialError = null }) {
     );
   }
 
+  // NEW-UX-008: NewAlertBanner and ShiftBanner are independently-conditioned
+  // `fixed` banners that used to overlap the full-width dataWarnings bar
+  // below (top-12) whenever both were showing. When the bar is present, both
+  // floating banners drop from their normal offsets to top-24, clearing it.
+  const bannersStacked = dataWarnings.length > 0;
+
   return (<LiveClockProvider registerReset={registerClockReset}>
   {bootstrapError ? bootstrapErrorUI : tweaks.wallMode ? (
     <div className="relative h-full w-full bg-black">
@@ -1825,7 +1831,7 @@ function App({ initialError = null }) {
       {/* FLOW-004: new-alert banner now shows on ALL pages, not just Alerts.
           Operators on the Monitor wall were missing new incoming alerts. */}
       {newAlertBannerCount > 0 && (
-        <window.NewAlertBanner count={newAlertBannerCount} onClick={() => {
+        <window.NewAlertBanner count={newAlertBannerCount} stacked={bannersStacked} onClick={() => {
           setNewAlertBannerCount(0);
           const firstUnseen = alerts.find(a => !a.seen);
           if (firstUnseen) setSelectedId(firstUnseen.id);
@@ -1833,7 +1839,7 @@ function App({ initialError = null }) {
       )}
 
       {/* Shift onboarding banner */}
-      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
+      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} stacked={bannersStacked} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
 
       <window.ShortcutsModal open={shortcutsOpen} onClose={onCloseShortcuts}/>
       <window.MuteDrawer open={muteDrawerOpen} onClose={onCloseMuteDrawer} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
