@@ -57,3 +57,17 @@ def test_overlay_falls_back_to_settings_site(monkeypatch):
     weather._overlay_lightning({})
     s = weather.get_settings()
     assert seen["lat"] == s.SITE_LAT and seen["lon"] == s.SITE_LON
+
+
+def test_overlay_never_raises_when_config_db_errors(monkeypatch):
+    # A transient DB error in get_weather_config must NOT propagate — the
+    # weather endpoint stays up and the tile degrades to bare "—" (no source).
+    monkeypatch.setattr(weather, "get_lightning_service",
+                        lambda: _StubLightning({"count": 5, "nearest": 2.0, "source": "Blitzortung.org"}))
+    def _boom():
+        raise RuntimeError("db down")
+    monkeypatch.setattr(weather, "get_weather_config", _boom)
+    payload = {"sources": {"temperature_c": "SMG"}}
+    weather._overlay_lightning(payload)  # must NOT raise
+    assert payload["lightning"] == {"count": None, "nearest": None}
+    assert "lightning" not in payload["sources"]  # bare "—", no misleading source chip

@@ -261,20 +261,26 @@ async def list_hko_stations(
 def _overlay_lightning(payload: Dict[str, Any]) -> None:
     """Overlay a FRESH lightning read onto a serialized weather payload.
 
-    Never raises (get_lightning is safe; this only adds dict keys). Service
-    absent -> bare null-shape with NO sources.lightning (tile shows a bare
-    "—"); service present -> {count, nearest} + sources.lightning label."""
+    Never raises: service absent -> bare null-shape with NO sources.lightning
+    (tile shows a bare "—"); service present -> {count, nearest} +
+    sources.lightning label, with the config/getter branch guarded so a
+    transient DB error also degrades to the bare null-shape instead of
+    propagating out and 500-ing the whole weather endpoint."""
     lsvc = get_lightning_service()
     if lsvc is None:
         payload["lightning"] = {"count": None, "nearest": None}
         return
-    cfg = get_weather_config() or {}
-    settings = get_settings()
-    lat = cfg.get("site_lat") if cfg.get("site_lat") is not None else settings.SITE_LAT
-    lon = cfg.get("site_lon") if cfg.get("site_lon") is not None else settings.SITE_LON
-    ll = lsvc.get_lightning(lat, lon)
-    payload["lightning"] = {"count": ll.get("count"), "nearest": ll.get("nearest")}
-    payload.setdefault("sources", {})["lightning"] = ll.get("source", "Blitzortung.org")
+    try:
+        cfg = get_weather_config() or {}
+        settings = get_settings()
+        lat = cfg.get("site_lat") if cfg.get("site_lat") is not None else settings.SITE_LAT
+        lon = cfg.get("site_lon") if cfg.get("site_lon") is not None else settings.SITE_LON
+        ll = lsvc.get_lightning(lat, lon)
+        payload["lightning"] = {"count": ll.get("count"), "nearest": ll.get("nearest")}
+        payload.setdefault("sources", {})["lightning"] = ll.get("source", "Blitzortung.org")
+    except Exception as e:
+        logger.warning(f"lightning overlay failed: {e}")
+        payload["lightning"] = {"count": None, "nearest": None}
 
 
 @router.get("/weather/current")
