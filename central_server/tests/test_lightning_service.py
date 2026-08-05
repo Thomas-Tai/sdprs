@@ -62,3 +62,12 @@ def test_haversine_zero_and_known():
     assert L._haversine_km(22.2, 113.5, 22.2, 113.5) < 1e-6
     d = L._haversine_km(22.0, 113.5, 23.0, 113.5)  # ~1 deg latitude
     assert 110 < d < 112
+
+
+def test_parse_strike_out_of_range_time_returns_none():
+    # Untrusted feed: an overflowing epoch must return None, never raise
+    # (never-raises invariant). float('inf') makes fromtimestamp raise
+    # OverflowError, which the original narrow except tuple did NOT catch.
+    import json
+    assert L._parse_strike({"time": float("inf"), "lat": 1.0, "lon": 2.0}) is None
+    assert L._decode_message(json.dumps({"time": float("inf"), "lat": 1.0, "lon": 2.0})) is None

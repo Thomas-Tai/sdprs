@@ -88,7 +88,7 @@ def _parse_strike(msg: dict) -> Optional[Strike]:
         lon = float(msg["lon"])
         ts = _epoch_ns_to_naive_utc(msg["time"])
         return Strike(lat=lat, lon=lon, ts=ts)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
         return None
 
 
