@@ -115,6 +115,13 @@ if PYDANTIC_AVAILABLE:
         WEATHER_REFRESH_SECONDS: int = 600
         WEATHER_CACHE_STALE_SECONDS: int = 3600
 
+        # WXA-004 lightning (Blitzortung.org). Self-degrading; on is safe.
+        LIGHTNING_ENABLED: bool = True
+        LIGHTNING_COUNT_RADIUS_KM: float = 50.0     # radius for the "次/hr" count
+        LIGHTNING_NEAREST_WINDOW_MIN: int = 30      # trailing window for proximity / 警戒
+        LIGHTNING_COUNT_WINDOW_MIN: int = 60        # trailing window for the "/hr" count
+        LIGHTNING_STALE_AFTER_S: int = 300          # no message this long => feed stale => "—"
+
         # mediamtx Prometheus scrape (item 14) — empty = stream-health UI hidden
         MEDIAMTX_METRICS_URL: str = "http://localhost:9998/metrics"
 
@@ -201,6 +208,11 @@ else:
         SITE_LON: float
         WEATHER_REFRESH_SECONDS: int
         WEATHER_CACHE_STALE_SECONDS: int
+        LIGHTNING_ENABLED: bool
+        LIGHTNING_COUNT_RADIUS_KM: float
+        LIGHTNING_NEAREST_WINDOW_MIN: int
+        LIGHTNING_COUNT_WINDOW_MIN: int
+        LIGHTNING_STALE_AFTER_S: int
         MEDIAMTX_METRICS_URL: str
         HLS_STORAGE_PATH: str
         HLS_MAX_SEGMENTS: int
@@ -235,6 +247,11 @@ else:
             self.SITE_LON = _get_env_float("SITE_LON", 113.55)
             self.WEATHER_REFRESH_SECONDS = _get_env_int("WEATHER_REFRESH_SECONDS", 600)
             self.WEATHER_CACHE_STALE_SECONDS = _get_env_int("WEATHER_CACHE_STALE_SECONDS", 3600)
+            self.LIGHTNING_ENABLED = _get_env_bool("LIGHTNING_ENABLED", True)
+            self.LIGHTNING_COUNT_RADIUS_KM = _get_env_float("LIGHTNING_COUNT_RADIUS_KM", 50.0)
+            self.LIGHTNING_NEAREST_WINDOW_MIN = _get_env_int("LIGHTNING_NEAREST_WINDOW_MIN", 30)
+            self.LIGHTNING_COUNT_WINDOW_MIN = _get_env_int("LIGHTNING_COUNT_WINDOW_MIN", 60)
+            self.LIGHTNING_STALE_AFTER_S = _get_env_int("LIGHTNING_STALE_AFTER_S", 300)
             self.MEDIAMTX_METRICS_URL = _get_env_str("MEDIAMTX_METRICS_URL", "http://localhost:9998/metrics")
             self.HLS_STORAGE_PATH = _get_env_str("HLS_STORAGE_PATH", "./storage/hls")
             self.HLS_MAX_SEGMENTS = _get_env_int("HLS_MAX_SEGMENTS", 5)
