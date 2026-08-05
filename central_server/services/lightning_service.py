@@ -110,3 +110,58 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlam = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlam / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
+
+
+class LightningService:
+    """Singleton-style; the module-level instance is created by
+    init_lightning_service()."""
+
+    def __init__(self, settings) -> None:
+        self._settings = settings
+        self._enabled = getattr(settings, "LIGHTNING_ENABLED", True)
+        self._count_radius_km = float(getattr(settings, "LIGHTNING_COUNT_RADIUS_KM", 50.0))
+        self._nearest_window_min = int(getattr(settings, "LIGHTNING_NEAREST_WINDOW_MIN", 30))
+        self._count_window_min = int(getattr(settings, "LIGHTNING_COUNT_WINDOW_MIN", 60))
+        self._stale_after_s = int(getattr(settings, "LIGHTNING_STALE_AFTER_S", 300))
+        # Bounding-box center: the configured site. The deque is a cheap
+        # pre-filter (~1 deg ~ 111 km); get_lightning uses the request's exact
+        # site for correctness. A site relocated >100 km from this center would
+        # fall outside the retained box — out of scope for this deployment.
+        self._site_lat = float(getattr(settings, "SITE_LAT", 22.19))
+        self._site_lon = float(getattr(settings, "SITE_LON", 113.55))
+        self._bbox_deg = 1.0
+        self._strikes = deque()
+        self._last_msg_at: Optional[datetime] = None
+        self._connected = False
+        self._task: Optional[asyncio.Task] = None
+        self._stop: Optional[asyncio.Event] = None
+
+    # ---- public surface ----------------------------------------------------
+    def get_lightning(self, site_lat, site_lon) -> dict:
+        """Fresh in-memory read; NEVER raises. Returns
+        {"count", "nearest", "source"}."""
+        try:
+            if site_lat is None or site_lon is None:
+                site_lat, site_lon = self._site_lat, self._site_lon
+            now = utcnow()
+            if self._last_msg_at is None or \
+                    (now - self._last_msg_at).total_seconds() > self._stale_after_s:
+                return {"count": None, "nearest": None, "source": SOURCE_LABEL}
+            count_cutoff = now - timedelta(minutes=self._count_window_min)
+            near_cutoff = now - timedelta(minutes=self._nearest_window_min)
+            count = 0
+            nearest = None
+            for s in list(self._strikes):
+                d = _haversine_km(site_lat, site_lon, s.lat, s.lon)
+                if s.ts >= count_cutoff and d <= self._count_radius_km:
+                    count += 1
+                if s.ts >= near_cutoff and (nearest is None or d < nearest):
+                    nearest = d
+            return {
+                "count": count,
+                "nearest": round(nearest, 1) if nearest is not None else None,
+                "source": SOURCE_LABEL,
+            }
+        except Exception:
+            logger.exception("get_lightning failed; returning safe default")
+            return {"count": None, "nearest": None, "source": SOURCE_LABEL}

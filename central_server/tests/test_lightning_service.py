@@ -71,3 +71,100 @@ def test_parse_strike_out_of_range_time_returns_none():
     import json
     assert L._parse_strike({"time": float("inf"), "lat": 1.0, "lon": 2.0}) is None
     assert L._decode_message(json.dumps({"time": float("inf"), "lat": 1.0, "lon": 2.0})) is None
+
+
+import types
+from datetime import timedelta
+from central_server.timeutil import utcnow
+
+
+def _svc(**over):
+    s = types.SimpleNamespace(
+        LIGHTNING_ENABLED=True, LIGHTNING_COUNT_RADIUS_KM=50.0,
+        LIGHTNING_NEAREST_WINDOW_MIN=30, LIGHTNING_COUNT_WINDOW_MIN=60,
+        LIGHTNING_STALE_AFTER_S=300, SITE_LAT=22.19, SITE_LON=113.55,
+    )
+    for k, v in over.items():
+        setattr(s, k, v)
+    return L.LightningService(s)
+
+
+def _add(svc, lat, lon, age_min):
+    svc._strikes.append(L.Strike(lat=lat, lon=lon, ts=utcnow() - timedelta(minutes=age_min)))
+
+
+def test_getter_unknown_when_never_connected():
+    svc = _svc()
+    assert svc.get_lightning(22.19, 113.55) == {"count": None, "nearest": None, "source": "Blitzortung.org"}
+
+
+def test_getter_quiet_when_connected_no_strikes():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    assert svc.get_lightning(22.19, 113.55) == {"count": 0, "nearest": None, "source": "Blitzortung.org"}
+
+
+def test_getter_stale_returns_unknown():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow() - timedelta(seconds=400)  # > 300s
+    r = svc.get_lightning(22.19, 113.55)
+    assert r["count"] is None and r["nearest"] is None
+
+
+def test_count_radius_edge():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    _add(svc, 22.29, 113.55, 5)   # ~11 km  -> inside 50
+    _add(svc, 22.79, 113.55, 5)   # ~66 km  -> outside 50 (still inside 1-deg bbox)
+    assert svc.get_lightning(22.19, 113.55)["count"] == 1
+
+
+def test_count_window_edge():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    _add(svc, 22.29, 113.55, 30)  # within 60 min
+    _add(svc, 22.29, 113.55, 90)  # outside 60 min
+    assert svc.get_lightning(22.19, 113.55)["count"] == 1
+
+
+def test_nearest_window_excludes_old_but_count_includes():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    _add(svc, 22.24, 113.55, 40)  # ~5.5 km, 40 min old: counts to hour, outside 30-min proximity
+    r = svc.get_lightning(22.19, 113.55)
+    assert r["count"] == 1
+    assert r["nearest"] is None
+
+
+def test_nearest_returns_min_distance():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    _add(svc, 22.29, 113.55, 5)   # ~11 km
+    _add(svc, 22.22, 113.55, 5)   # ~3.3 km
+    r = svc.get_lightning(22.19, 113.55)
+    assert r["nearest"] is not None and r["nearest"] < 5.0
+
+
+def test_getter_never_raises_on_corrupt_state():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    svc._strikes.append("not-a-strike")  # corrupt entry must not crash the request path
+    r = svc.get_lightning(22.19, 113.55)
+    assert r["count"] is None  # safe default on internal error
+    assert r["source"] == "Blitzortung.org"
+
+
+def test_getter_falls_back_to_configured_site_when_args_none():
+    svc = _svc()
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    _add(svc, 22.20, 113.55, 5)   # ~1 km from the 22.19/113.55 default
+    r = svc.get_lightning(None, None)  # None args -> use configured site
+    assert r["count"] == 1
