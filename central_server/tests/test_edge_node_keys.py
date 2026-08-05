@@ -101,3 +101,23 @@ async def test_verify_api_key_or_session_accepts_per_node(monkeypatch):
                               session={}, headers={})
     assert await auth.verify_api_key_or_session(r, out["api_key"]) == out["api_key"]
     assert r.state.edge_auth_node == "glass_node_13"
+
+
+@pytest.mark.asyncio
+async def test_alert_binding_rejects_cross_node(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    from central_server import auth
+    from central_server.api import alerts as alerts_api
+    out = database.provision_edge_node_key("glass_node_15")
+
+    # Build a request already authed as glass_node_15 (per-node key).
+    req = types.SimpleNamespace(state=types.SimpleNamespace(edge_auth_node="glass_node_15"))
+    # Cross-node claim -> 403.
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        auth.verify_node_binding(req, "glass_node_99")
+    assert ei.value.status_code == 403
+    # Same-node claim -> ok (no raise).
+    auth.verify_node_binding(req, "glass_node_15")
+    # Shared-key (unbound) -> ok for any node.
+    auth.verify_node_binding(types.SimpleNamespace(state=types.SimpleNamespace(edge_auth_node=None)), "glass_node_99")

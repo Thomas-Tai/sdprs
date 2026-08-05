@@ -158,6 +158,19 @@ def verify_node_id(node_id: str) -> None:
         )
 
 
+def verify_node_binding(request: Request, claimed_node_id: str) -> None:
+    """Enforce that a per-node key may only act under its own node_id.
+
+    request.state.edge_auth_node is the authenticated node (set by
+    verify_api_key). If it is a specific node and differs from the claimed
+    node_id, reject with 403. A None value (shared-key / grace period, or
+    session auth) skips the check. Call AFTER verify_node_id."""
+    bound = getattr(getattr(request, "state", None), "edge_auth_node", None)
+    if bound is not None and bound != claimed_node_id:
+        logger.warning(f"Node binding mismatch: key bound to {bound!r}, claimed {claimed_node_id!r}")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Node key/id mismatch")
+
+
 # ===== Session Authentication =====
 
 # SEC-001: absolute session lifetime. ``login_at`` is stamped once at login and
@@ -307,6 +320,7 @@ async def verify_webcam_api_key(request: Request) -> str:
 __all__ = [
     "verify_api_key",
     "verify_node_id",
+    "verify_node_binding",
     "verify_api_key_or_session",
     "verify_webcam_api_key",
     "get_current_user",
