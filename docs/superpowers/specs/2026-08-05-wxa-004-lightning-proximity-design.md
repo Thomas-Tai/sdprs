@@ -44,7 +44,7 @@ There is **no backend lightning source at all** — the field is a permanent pla
 
 ## 3. Data model & semantics
 
-The `/api/weather` payload gains a `lightning` object and a `sources.lightning` label:
+The `/api/weather/current` payload (served by `api/weather.py::get_current_weather`, mounted at `/api`) gains a `lightning` object and a `sources.lightning` label:
 
 ```jsonc
 {
@@ -119,20 +119,22 @@ And on shutdown, `await lightning_svc.stop()` inside a try/except, next to the w
 
 ## 5. Endpoint & SPA integration
 
-### 5a. `api/weather.py` — stitch lightning in FRESH, outside the throttle cache
-`/api/weather` is guarded by `_ThrottleGate`, which serves a cached serialized payload within a min-interval. Lightning must **not** be frozen into that cache — a strike 3 km away should surface on the next request, not after the throttle interval. So:
-- The throttled path continues to build/serve the weather portion as today.
-- **After** the gate returns its (possibly cached) weather dict, overlay a **fresh** `get_lightning(site_lat, site_lon)` read and set `payload["lightning"]` + `payload["sources"]["lightning"]`. This is an in-memory dict read — nanoseconds — so it's safe to run on every request.
-- `site_lat` / `site_lon` come from the same weather-config source the gate already reads (`site_lat` / `site_lon` in weather config).
-- If `get_lightning_service()` is `None` (flag off / init failed), set `lightning: {count: null, nearest: null}` — the exact current behavior, so the tile degrades to "—" and nothing breaks.
+> **Correction (2026-08-05, during plan grounding):** the tile is fed by three separate routes — `GET /api/weather/current|forecast|typhoon` — which `api.jsx::loadWeather` fetches in parallel and combines via `mapWeather`. There is **no** single `/api/weather` route, and `/api/weather/current` is **not** `_ThrottleGate`-gated (only the two station-list routes and `POST /weather/refresh` are). So there is no throttle cache to work around: `get_current_weather` already returns a **fresh** per-request read of the in-memory weather cache. The lightning overlay is likewise a fresh per-request in-memory read — the "outside the throttle cache" intent is satisfied for free. §5a below is the corrected wiring.
 
-### 5b. `api.jsx` — replace the two hardcoded nulls
-- `api.jsx:533` (real `mapWeather` path): `lightning: current.lightning || { count: null, nearest: null }` and add `lightning` to the `sources` map it builds.
-- `api.jsx:474` (fallback path): same defensive default. When the backend can't be reached at all, "—" is the correct tile state, so the literal null default stays as the fallback.
+### 5a. `api/weather.py::get_current_weather` — overlay a fresh lightning read
+The `/api/weather/current` handler serializes `svc.get_current()` (the weather cache, refreshed by the background poll) on every request. Overlay lightning onto that dict before returning:
+- After `_serialize(cur)`, read `get_lightning_service()`; if present, call `get_lightning(site_lat, site_lon)` (a fresh in-memory deque read — microseconds) and set `payload["lightning"] = {"count": …, "nearest": …}` + `payload.setdefault("sources", {})["lightning"] = <source>`.
+- `site_lat` / `site_lon` come from `get_weather_config()` (keys `site_lat` / `site_lon`); when unset, fall back to `settings.SITE_LAT` / `settings.SITE_LON` (the same Macau default the weather poller uses).
+- If `get_lightning_service()` is `None` (flag off / init failed), set `payload["lightning"] = {"count": None, "nearest": None}` and **do not** set `sources.lightning` — the tile degrades to a bare "—", exactly today's behavior. (A *labelled* "—" therefore means "service on, no data / stale"; a *bare* "—" means "service off" — a free honest signal.)
 
-### 5c. `weather.jsx` — no logic change
-- The tile already renders `count` / `nearest` and computes `alarming = near < 20`. It needs **no logic change**.
-- Delete the stale `weather.jsx:684-686` comment ("no backend source yet…") and let the tile show the `sources.lightning` label the same way the other weather fields show theirs.
+### 5b. `api.jsx` — replace the hardcoded null + expose the loader for testability
+- `api.jsx:533` (real `mapWeather` path): `lightning: current.lightning || { count: null, nearest: null }`. `sources` already flows through untouched (`sources: backendSources` at L541 carries `current.sources.lightning`), so no separate sources wiring is needed here.
+- `api.jsx:474` (fallback path): unchanged. When `/api/weather/current` is unreachable/503, `current` is null and "—" is the correct tile state, so the literal null default stays.
+- **Add `loadWeather` to the `window.SDPRS_API` export object** (L1440-1451), mirroring `refreshLive`. `mapWeather`/`loadWeather` live inside api.jsx's IIFE and are only observable through that public surface — the render-test harness concatenates the target after the IIFE has already returned, so the SPA render test drives `loadWeather` over a stubbed `window.fetch` (it cannot call `mapWeather` directly).
+
+### 5c. `weather.jsx` — show the source chip like every sibling tile
+- The tile logic (`count`/`nearest`/`alarming = near < 20`) is **unchanged**.
+- Replace the stale `weather.jsx:684-686` comment ("no backend source yet…") with `<SourceChip label={sources.lightning}/>` — the same component every other tile uses (e.g. `sources.rainfall_24h_mm` at L665). `SourceChip` returns `null` on a falsy label, so it stays invisible until the backend supplies `sources.lightning`.
 
 ### 5d. Dependency
 - `websockets` is already installed transitively via `uvicorn[standard]`. Declare it **directly** in `requirements.txt` (`websockets>=12.0`) so the new module's import is an explicit, honest dependency rather than an accidental transitive one. No new install.
@@ -174,7 +176,7 @@ No API key, no credentials — Blitzortung's community feed is unauthenticated. 
 
 Strict RED→GREEN; **no live WebSocket in CI** (the socket and decoder are injected/mocked). Test list:
 
-1. **`_decode_strike` against a captured fixture** — a real Blitzortung frame sample committed as a fixture; assert it decodes to the expected `(lat, lon, epoch)`. RED first (no decoder), then GREEN.
+1. **Decoder (deterministic, no live frame)** — split into two pure functions: `_decompress(raw)` (the community LZW port) tested with an ASCII-identity vector plus two hand-computed dictionary-branch vectors (`"AB"+chr(256) → "ABAB"`, `"A"+chr(256) → "AAA"`); and `_parse_strike(msg_dict)` tested with a plain `{"time","lat","lon"}` dict → `Strike` with naive-UTC ts. A real captured frame is committed as an **optional, non-CI** regression fixture during the manual smoke test (spec §10 Q1) — the CI-blocking tests never need a live socket.
 2. **`count` radius edge** — strikes just inside / just outside `COUNT_RADIUS_KM`; assert only the inside ones count.
 3. **`count` window edge** — strikes just inside / just outside the 60-min window; assert pruning.
 4. **`nearest` window edge** — a strike 40 min ago (counts toward hour, outside 30-min proximity) ⇒ `count ≥ 1` but `nearest is None`.
@@ -182,9 +184,9 @@ Strict RED→GREEN; **no live WebSocket in CI** (the socket and decoder are inje
 6. **Empty-state: quiet** — connected, `_last_msg_at` recent, no strikes ⇒ `{count: 0, nearest: None}`.
 7. **Empty-state: unknown** — never connected ⇒ `{count: None, nearest: None}`; and stale (`_last_msg_at` old) ⇒ same.
 8. **Never raises** — feed a decode exception / malformed frame; assert `get_lightning` still returns a safe shape and the task survives.
-9. **Endpoint merge** — `/api/weather` includes `lightning` + `sources.lightning`, stitched fresh (assert it's not frozen by the throttle cache: mutate the deque, second request reflects it).
-10. **Flag off** — `LIGHTNING_ENABLED=false` ⇒ `start()` no-op, endpoint returns null-shape.
-11. **SPA render** (`tools/spa/render_extra/`) — tile shows "警戒" when `nearest < 20`, "無偵測" when `count:0/nearest:null`, "—" when both null; source label appears. Run via `node tools/spa/render_tests.js`, gate via `node tools/spa/run_all.js`.
+9. **Endpoint merge** — `get_current_weather` overlays `lightning` + `sources.lightning` onto the serialized weather dict (monkeypatch `get_lightning_service`/`get_weather_service`/`get_weather_config`); assert the overlay is a fresh read each call (mutate the stub's return, second call reflects it).
+10. **Flag off** — `LIGHTNING_ENABLED=false` ⇒ `start()` no-op, `get_lightning_service()` is `None`, endpoint returns bare null-shape with no `sources.lightning`.
+11. **SPA render** (`tools/spa/render_extra/wxa004-lightning.js`, `target: 'api.jsx'`) — drive `SDPRS_API.loadWeather()` over a stubbed `window.fetch` whose `/api/weather/current` payload carries `lightning:{count:3,nearest:5}` + `sources.lightning`; assert the mapped `w.lightning` and `w.sources.lightning` flow through (RED before the L533 fix). Run via `node tools/spa/render_tests.js`, gate via `node tools/spa/run_all.js`.
 
 Optional manual smoke test (not in CI): run the service locally against the live feed for a few minutes and eyeball the tile.
 
