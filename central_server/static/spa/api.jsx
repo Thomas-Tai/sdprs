@@ -454,6 +454,13 @@
       // edge pushes a new snapshot, so the browser refetches only then. Null
       // when the node has never uploaded a snapshot (offline / pump / new node).
       snapshotTimestamp: n.snapshot_timestamp || null,
+      // Track 1 per-node edge keys: whether this node currently has a
+      // provisioned API key. true/false for glass/pump nodes; null for
+      // webcam rows (the key concept doesn't apply there — webcams use
+      // createWebcamClient/revokeWebcamKey instead). `?? null` (not `||`)
+      // so a real `false` (no key) is preserved rather than collapsed to
+      // null — Task 11 gates its provision/clear controls on this field.
+      hasKey: (n.has_key ?? null),
     };
   }
 
@@ -1333,6 +1340,20 @@
   const deleteWebcamClient = (nodeId) => apiFetch('/api/nodes/webcam/' + encodeURIComponent(nodeId),
     { method: 'DELETE' });
 
+  // ---- per-node edge API keys (Track 1) ----------------------------------
+  // Provisions (or rotates) a per-node API key for a glass/pump edge node.
+  // Server contract: 201 { node_id, api_key } — the raw key is shown exactly
+  // once, same handling rules as createWebcamClient/revokeWebcamKey (never
+  // logged, never put in a title attribute).
+  async function provisionNodeKey(nodeId) {
+    return apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/key', jsonBody('POST', {}));
+  }
+  // Clears a node's provisioned key. Server contract: 204 on success, 404 if
+  // the node has no key — callers should treat the 404 like deleteWebcamClient's
+  // does (already-gone, not an error).
+  const clearNodeKey = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/key',
+    { method: 'DELETE' });
+
   // ---- websocket ---------------------------------------------------------
 
   // Backend event types dispatched to `onEvent(type, data)`. `new_alert` is
@@ -1449,6 +1470,7 @@
     startStream, stopStream, getStreamHealth, getStreamHealthAll,
     startWebcamStream, stopWebcamStream, renewWebcamStream, getWebcamPlaylist,
     createWebcamClient, revokeWebcamKey, deleteWebcamClient,
+    provisionNodeKey, clearNodeKey,
     extendSession,
     openSocket,
   };
