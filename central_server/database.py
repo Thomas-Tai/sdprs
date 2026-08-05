@@ -170,7 +170,8 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             snoozed_until  DATETIME,
             snooze_reason  TEXT,
             battery_voltage REAL,
-            power_source    TEXT
+            power_source    TEXT,
+            api_key_hash    TEXT
         );
     """)
     # Migration: add columns to existing nodes tables
@@ -188,6 +189,8 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE nodes ADD COLUMN battery_voltage REAL;")
     if "power_source" not in existing_cols:             # item 12
         cursor.execute("ALTER TABLE nodes ADD COLUMN power_source TEXT;")
+    if "api_key_hash" not in existing_cols:            # per-node edge keys
+        cursor.execute("ALTER TABLE nodes ADD COLUMN api_key_hash TEXT;")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pump_readings (
@@ -322,6 +325,7 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
     # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
     # looks up by api_key_hash — index it so that lookup is not a full scan.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_api_key_hash ON nodes(api_key_hash);")
 
 
 def _create_tables_postgresql(conn):
@@ -359,7 +363,8 @@ def _create_tables_postgresql(conn):
             snoozed_until  TIMESTAMP,
             snooze_reason  TEXT,
             battery_voltage REAL,
-            power_source    TEXT
+            power_source    TEXT,
+            api_key_hash    TEXT
         );
     """))
     # PG supports IF NOT EXISTS on ADD COLUMN since 9.6 — safe migration
@@ -369,6 +374,7 @@ def _create_tables_postgresql(conn):
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS snooze_reason TEXT;"))
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS battery_voltage REAL;"))
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS power_source TEXT;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS api_key_hash TEXT;"))
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS pump_readings (
             id          SERIAL PRIMARY KEY,
@@ -464,6 +470,7 @@ def _create_tables_postgresql(conn):
     # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
     # looks up by api_key_hash — index it so that lookup is not a full scan.
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_nodes_api_key_hash ON nodes(api_key_hash);"))
 
 
 # =============================================================================
