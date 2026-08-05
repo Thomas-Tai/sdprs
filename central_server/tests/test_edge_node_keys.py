@@ -133,3 +133,27 @@ async def test_snapshot_binding_rejects_cross_node(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await snap_api.receive_snapshot("glass_node_99", req, api_key="ignored")
     assert ei.value.status_code == 403
+
+
+def test_provision_endpoint_and_has_key(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    from central_server.api import nodes as nodes_api
+    import asyncio
+    database.upsert_node("glass_node_31", "glass", "OFFLINE", None)
+
+    async def go():
+        res = await nodes_api.provision_node_key("glass_node_31",
+                                                 request=types.SimpleNamespace(),
+                                                 user="op")
+        assert res["api_key"].startswith("sk-edge-")
+        assert database.get_edge_node_by_key(res["api_key"])["node_id"] == "glass_node_31"
+        # Clearing returns the node to shared-key fallback.
+        await nodes_api.clear_node_key("glass_node_31", user="op")
+        assert database.get_edge_node_by_key(res["api_key"]) is None
+    asyncio.run(go())
+
+def test_has_key_derived(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    database.provision_edge_node_key("glass_node_33")
+    row = database.get_node("glass_node_33")
+    assert bool(row.get("api_key_hash")) is True
