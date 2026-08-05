@@ -396,6 +396,37 @@ module.exports = [
     `,
   },
 
+  // ================================================================ perf: ALR-008 identity
+  {
+    name: 'ALR-008: activeList memo holds identity across unrelated re-renders',
+    target: 'pages/alerts.jsx',
+    deps: ['icons.jsx', 'data.jsx', 'components.jsx'],
+    body: `
+      ${S5_RENDER_ALERTS}
+      const alerts = [
+        Object.assign({}, ${JSON.stringify(S5_ALERT)}, { id: 'M1', sev: 'critical', state: 'pending', node: 'G-01' }),
+        Object.assign({}, ${JSON.stringify(S5_ALERT)}, { id: 'M2', sev: 'warn', state: 'pending', node: 'G-02' }),
+      ];
+
+      // Arm the factory counter.
+      window.__SDPRS_ALR008_COUNT = 0;
+      renderAlerts({ alerts: alerts, selectedId: 'M1' });
+      await settle();
+      const base = window.__SDPRS_ALR008_COUNT;
+      A('ALR-008 setup: factory ran at least once on initial render', base >= 1, 'factory runs: ' + base);
+
+      // Trigger an UNRELATED re-render: only selectedId changes.
+      // tab, alerts, filterSev, search are all unchanged, so a correct
+      // useMemo on activeList must NOT recompute.
+      renderAlerts({ alerts: alerts, selectedId: 'M2' });
+      await settle();
+      A('ALR-008 activeList memo holds across unrelated re-render',
+        window.__SDPRS_ALR008_COUNT === base,
+        'factory runs: ' + base + ' -> ' + window.__SDPRS_ALR008_COUNT);
+      delete window.__SDPRS_ALR008_COUNT;
+    `,
+  },
+
   // ================================================================ perf: ALR-009
   {
     name: 'ALR-009: sibling count badges correct with precomputed map',

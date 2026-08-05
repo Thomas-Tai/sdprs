@@ -213,9 +213,14 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     flashTimersRef.current.clear();
   }, []);
 
-  const activeList = tab === 'active'
-    ? alerts.filter(a => a.state !== 'resolved')
-    : window.HISTORY_ALERTS;
+  // ALR-008: memoize so `filtered`'s useMemo isn't defeated by a fresh
+  // activeList identity every render. Deps are the only real inputs.
+  const activeList = useMemo_p(() => {
+    if (window.__SDPRS_ALR008_COUNT != null) window.__SDPRS_ALR008_COUNT++;
+    return tab === 'active'
+      ? alerts.filter(a => a.state !== 'resolved')
+      : window.HISTORY_ALERTS;
+  }, [tab, alerts]);
 
   // ALR-009: precompute node→active-count map once per render instead of
   // O(n²) per-row filter. Badge values are identical to before.
