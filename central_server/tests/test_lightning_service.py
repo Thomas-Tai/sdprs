@@ -18,6 +18,7 @@ def test_lightning_settings_defaults():
 
 
 from central_server.services import lightning_service as L
+import json
 
 
 def test_decompress_ascii_identity():
@@ -168,3 +169,56 @@ def test_getter_falls_back_to_configured_site_when_args_none():
     _add(svc, 22.20, 113.55, 5)   # ~1 km from the 22.19/113.55 default
     r = svc.get_lightning(None, None)  # None args -> use configured site
     assert r["count"] == 1
+
+
+import asyncio
+from datetime import datetime, timezone
+
+
+def test_on_message_updates_liveness_even_when_filtered():
+    svc = _svc()
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)  # tz-aware in TEST is fine
+    far = json.dumps({"time": now_ns, "lat": 40.0, "lon": 113.5})  # outside 1-deg bbox
+    svc._on_message(far)
+    assert len(svc._strikes) == 0            # filtered out
+    assert svc._connected is True            # but the message still marks the feed live
+    assert svc._last_msg_at is not None
+
+
+def test_on_message_appends_in_bbox_strike():
+    svc = _svc()
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+    near = json.dumps({"time": now_ns, "lat": 22.2, "lon": 113.5})  # ~1 km from site
+    svc._on_message(near)
+    assert len(svc._strikes) == 1
+
+
+def test_on_message_swallows_garbage():
+    svc = _svc()
+    svc._on_message("{bad json")   # must not raise; still marks liveness
+    assert len(svc._strikes) == 0
+    assert svc._connected is True
+
+
+def test_prune_drops_strikes_older_than_count_window():
+    svc = _svc()
+    _add(svc, 22.2, 113.5, 90)   # 90 min old -> beyond 60-min window
+    _add(svc, 22.2, 113.5, 10)   # fresh
+    svc._prune()
+    assert len(svc._strikes) == 1
+
+
+def test_start_is_noop_when_disabled():
+    svc = _svc(LIGHTNING_ENABLED=False)
+    asyncio.run(svc.start())
+    assert svc._task is None
+
+
+def test_singleton_init_and_get():
+    s = types.SimpleNamespace(
+        LIGHTNING_ENABLED=True, LIGHTNING_COUNT_RADIUS_KM=50.0,
+        LIGHTNING_NEAREST_WINDOW_MIN=30, LIGHTNING_COUNT_WINDOW_MIN=60,
+        LIGHTNING_STALE_AFTER_S=300, SITE_LAT=22.19, SITE_LON=113.55,
+    )
+    svc = L.init_lightning_service(s)
+    assert L.get_lightning_service() is svc

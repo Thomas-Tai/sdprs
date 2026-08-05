@@ -8,6 +8,9 @@
 # ------------------------------------------------------------
 uvicorn[standard]>=0.24.0
 fastapi>=0.104.0
+# WXA-004 lightning: Blitzortung WebSocket client. Already present transitively
+# via uvicorn[standard]; declared directly so the import is an honest dependency.
+websockets>=12.0
 
 # ------------------------------------------------------------
 # MQTT

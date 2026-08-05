@@ -165,3 +165,99 @@ class LightningService:
         except Exception:
             logger.exception("get_lightning failed; returning safe default")
             return {"count": None, "nearest": None, "source": SOURCE_LABEL}
+
+    # ---- listener ----------------------------------------------------------
+    def _in_bbox(self, lat: float, lon: float) -> bool:
+        return (abs(lat - self._site_lat) <= self._bbox_deg and
+                abs(lon - self._site_lon) <= self._bbox_deg)
+
+    def _prune(self, now: Optional[datetime] = None) -> None:
+        now = now or utcnow()
+        cutoff = now - timedelta(minutes=self._count_window_min)
+        while self._strikes and isinstance(self._strikes[0], Strike) and self._strikes[0].ts < cutoff:
+            self._strikes.popleft()
+
+    def _on_message(self, raw: str) -> None:
+        """Handle one received frame. Marks the feed live for EVERY message
+        (strike or keep-alive) so a genuinely quiet sky stays 'connected';
+        only decoded, in-box strikes are retained. Never raises."""
+        self._last_msg_at = utcnow()
+        self._connected = True
+        try:
+            strike = _decode_message(raw)
+            if strike is None:
+                return
+            if not self._in_bbox(strike.lat, strike.lon):
+                return
+            self._strikes.append(strike)
+            self._prune()
+        except Exception:
+            logger.exception("lightning _on_message failed")
+
+    # ---- lifecycle ---------------------------------------------------------
+    async def start(self) -> None:
+        if not self._enabled:
+            logger.info("Lightning service disabled (LIGHTNING_ENABLED=false)")
+            return
+        if self._task is not None:
+            return
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._run())
+        logger.info("Lightning service started (Blitzortung.org)")
+
+    async def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await asyncio.wait_for(self._task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            self._task = None
+
+    async def _run(self) -> None:
+        """Persistent WebSocket with exponential-backoff reconnect. Not
+        exercised in CI (no live socket); every failure is caught + retried so
+        nothing propagates."""
+        import websockets  # local import: keeps module importable if the dep is absent
+        attempt = 0
+        while self._stop is None or not self._stop.is_set():
+            host = BLITZORTUNG_WS_HOSTS[attempt % len(BLITZORTUNG_WS_HOSTS)]
+            url = f"wss://{host}/"
+            try:
+                async with websockets.connect(url, open_timeout=10) as ws:
+                    await ws.send(SUBSCRIBE_MSG)
+                    attempt = 0
+                    self._connected = True
+                    self._last_msg_at = utcnow()
+                    async for raw in ws:
+                        if self._stop is not None and self._stop.is_set():
+                            break
+                        self._on_message(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"Lightning WS disconnected ({host}): {e}")
+            attempt += 1
+            backoff = min(60, 2 ** min(attempt, 6))
+            if self._stop is None:
+                await asyncio.sleep(backoff)
+            else:
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+
+
+_service: Optional[LightningService] = None
+
+
+def init_lightning_service(settings) -> LightningService:
+    global _service
+    _service = LightningService(settings)
+    return _service
+
+
+def get_lightning_service() -> Optional[LightningService]:
+    return _service
