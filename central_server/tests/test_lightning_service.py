@@ -222,3 +222,29 @@ def test_singleton_init_and_get():
     )
     svc = L.init_lightning_service(s)
     assert L.get_lightning_service() is svc
+
+
+def test_prune_tolerates_non_strike_head():
+    # _prune must not raise on a corrupt (non-Strike) entry at the head —
+    # the isinstance guard stops the pop loop instead of dereferencing .ts.
+    svc = _svc()
+    svc._strikes.append("not-a-strike")          # corrupt head
+    _add(svc, 22.2, 113.5, 90)                   # a stale real strike behind it
+    svc._prune()                                 # must NOT raise
+    assert svc._strikes[0] == "not-a-strike"     # loop halted at the guard; nothing popped
+
+
+def test_on_message_outer_guard_swallows_unexpected_error():
+    # Force an error INSIDE the try, AFTER a successful decode, to exercise
+    # _on_message's own except Exception (the garbage test is caught earlier
+    # inside _decode_message, so it never reaches this guard).
+    svc = _svc()
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+    msg = json.dumps({"time": now_ns, "lat": 22.2, "lon": 113.5})  # valid, in-bbox
+    def _boom(lat, lon):
+        raise RuntimeError("boom")
+    svc._in_bbox = _boom                          # make the post-decode path raise
+    svc._on_message(msg)                          # must NOT raise
+    assert svc._connected is True                 # liveness still marked (set before the try)
+    assert svc._last_msg_at is not None
+    assert len(svc._strikes) == 0                 # append never reached
