@@ -16,11 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
+from ..config import get_settings
 from ..database import get_weather_config, set_weather_config
 from ..services.weather_service import (
     get_weather_service, update_weather_location, refresh_weather_now,
     _list_hko_temp_stations, SMG_XML_URL, HTTP_TIMEOUT_S,
 )
+from ..services.lightning_service import get_lightning_service
 import httpx
 import xml.etree.ElementTree as ET
 
@@ -256,6 +258,25 @@ async def list_hko_stations(
         return {"stations": [], "source_reachable": False}
 
 
+def _overlay_lightning(payload: Dict[str, Any]) -> None:
+    """Overlay a FRESH lightning read onto a serialized weather payload.
+
+    Never raises (get_lightning is safe; this only adds dict keys). Service
+    absent -> bare null-shape with NO sources.lightning (tile shows a bare
+    "—"); service present -> {count, nearest} + sources.lightning label."""
+    lsvc = get_lightning_service()
+    if lsvc is None:
+        payload["lightning"] = {"count": None, "nearest": None}
+        return
+    cfg = get_weather_config() or {}
+    settings = get_settings()
+    lat = cfg.get("site_lat") if cfg.get("site_lat") is not None else settings.SITE_LAT
+    lon = cfg.get("site_lon") if cfg.get("site_lon") is not None else settings.SITE_LON
+    ll = lsvc.get_lightning(lat, lon)
+    payload["lightning"] = {"count": ll.get("count"), "nearest": ll.get("nearest")}
+    payload.setdefault("sources", {})["lightning"] = ll.get("source", "Blitzortung.org")
+
+
 @router.get("/weather/current")
 async def get_current_weather(request: Request, user: str = Depends(get_current_user)) -> Dict[str, Any]:
     svc = get_weather_service()
@@ -264,7 +285,9 @@ async def get_current_weather(request: Request, user: str = Depends(get_current_
     cur = svc.get_current()
     if cur is None:
         raise HTTPException(status_code=503, detail="Weather data not available yet")
-    return _serialize(cur)
+    payload = _serialize(cur)
+    _overlay_lightning(payload)
+    return payload
 
 
 @router.get("/weather/forecast")
