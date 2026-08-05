@@ -250,11 +250,27 @@ async def verify_api_key_or_session(
     """
     Accept either API key or session authentication.
     Used for GET endpoints that both edge nodes and dashboard users need.
+
+    A per-node key (Track 1: per-node edge API keys) is checked FIRST and,
+    when it matches, binds the request to that node via
+    ``request.state.edge_auth_node``. The shared EDGE_API_KEY remains a
+    fallback for as long as it is configured; a shared-key match leaves
+    ``request.state.edge_auth_node`` as None (unbound). Read paths do not
+    enforce binding.
     """
     settings = get_settings()
 
-    # Try API key first
+    # Per-node key first: a hash-equality SQL lookup
+    if api_key:
+        from .database import get_edge_node_by_key
+        rec = get_edge_node_by_key(api_key)
+        if rec is not None:
+            request.state.edge_auth_node = rec["node_id"]
+            return api_key
+
+    # Shared-key fallback (grace period while nodes are migrated to per-node keys)
     if api_key and _ct_equal(api_key, settings.EDGE_API_KEY):
+        request.state.edge_auth_node = None
         return api_key
 
     # Try session auth

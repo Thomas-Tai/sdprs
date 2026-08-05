@@ -90,3 +90,14 @@ async def test_verify_api_key_per_node_and_fallback(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await auth.verify_api_key(_req(), "sk-edge-bogus")
     assert ei.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_or_session_accepts_per_node(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    from central_server import auth
+    out = database.provision_edge_node_key("glass_node_13")
+    r = types.SimpleNamespace(state=types.SimpleNamespace(),
+                              session={}, headers={})
+    assert await auth.verify_api_key_or_session(r, out["api_key"]) == out["api_key"]
+    assert r.state.edge_auth_node == "glass_node_13"
