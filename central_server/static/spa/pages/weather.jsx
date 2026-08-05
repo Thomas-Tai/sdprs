@@ -681,9 +681,10 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
                 </div>
               );
             })()}
-            {/* No source label — lightning has no backend source yet
-                (rendered as null in api.jsx mapWeather). Reserved for a
-                future Blitzortung / HKO thunderstorm-warning integration. */}
+            {/* WXA-004: Blitzortung source, shown like every sibling tile.
+                SourceChip renders null on a falsy label, so this stays hidden
+                until the backend supplies sources.lightning. */}
+            <SourceChip label={sources.lightning}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Thermometer size={10}/> 環境</div>

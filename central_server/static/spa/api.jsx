@@ -530,7 +530,10 @@
       // through so tile renders "1005 hPa · 17km" not "1005.4 hPa".
       pressure: current.pressure_hpa != null ? Math.round(current.pressure_hpa) : null,
       visibility: current.visibility_km != null ? Math.round(current.visibility_km * 10) / 10 : null,
-      lightning: { count: null, nearest: null },
+      // WXA-004: flow the backend's aggregated lightning through (was
+      // permanently hardcoded null). `sources.lightning` rides through the
+      // `sources: backendSources` line below — no separate wiring needed.
+      lightning: current.lightning || { count: null, nearest: null },
       source: current.source || 'SMG',
       // Per-field sources dict from backend Phase 1 multi-source merge.
       // Keys match CurrentWeather dataclass field names (temperature_c,
@@ -1438,7 +1441,7 @@
   }
 
   window.SDPRS_API = {
-    loadInitial, refreshLive, markSeen,
+    loadInitial, refreshLive, loadWeather, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
