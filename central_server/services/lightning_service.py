@@ -141,6 +141,8 @@ class LightningService:
         """Fresh in-memory read; NEVER raises. Returns
         {"count", "nearest", "source"}."""
         try:
+            if not self._enabled:
+                return {"count": None, "nearest": None, "source": None}
             if site_lat is None or site_lon is None:
                 site_lat, site_lon = self._site_lat, self._site_lon
             now = utcnow()

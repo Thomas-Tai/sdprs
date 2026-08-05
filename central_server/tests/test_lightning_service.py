@@ -248,3 +248,13 @@ def test_on_message_outer_guard_swallows_unexpected_error():
     assert svc._connected is True                 # liveness still marked (set before the try)
     assert svc._last_msg_at is not None
     assert len(svc._strikes) == 0                 # append never reached
+
+
+def test_getter_disabled_reports_no_source():
+    # LIGHTNING_ENABLED=false: the feature is OFF, so the read must carry NO
+    # source attribution (source=None) even if the instance looks "live" —
+    # the tile then shows a bare "—" with no misleading Blitzortung chip.
+    svc = _svc(LIGHTNING_ENABLED=False)
+    svc._connected = True
+    svc._last_msg_at = utcnow()
+    assert svc.get_lightning(22.19, 113.55) == {"count": None, "nearest": None, "source": None}

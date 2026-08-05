@@ -277,7 +277,9 @@ def _overlay_lightning(payload: Dict[str, Any]) -> None:
         lon = cfg.get("site_lon") if cfg.get("site_lon") is not None else settings.SITE_LON
         ll = lsvc.get_lightning(lat, lon)
         payload["lightning"] = {"count": ll.get("count"), "nearest": ll.get("nearest")}
-        payload.setdefault("sources", {})["lightning"] = ll.get("source", "Blitzortung.org")
+        src = ll.get("source")
+        if src:
+            payload.setdefault("sources", {})["lightning"] = src
     except Exception as e:
         logger.warning(f"lightning overlay failed: {e}")
         payload["lightning"] = {"count": None, "nearest": None}

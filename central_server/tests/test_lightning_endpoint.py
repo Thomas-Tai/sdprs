@@ -71,3 +71,15 @@ def test_overlay_never_raises_when_config_db_errors(monkeypatch):
     weather._overlay_lightning(payload)  # must NOT raise
     assert payload["lightning"] == {"count": None, "nearest": None}
     assert "lightning" not in payload["sources"]  # bare "—", no misleading source chip
+
+
+def test_overlay_omits_source_chip_when_service_disabled(monkeypatch):
+    # A DISABLED service reports source=None; the overlay must NOT set a
+    # sources.lightning chip on a permanently-"—" tile.
+    monkeypatch.setattr(weather, "get_lightning_service",
+                        lambda: _StubLightning({"count": None, "nearest": None, "source": None}))
+    monkeypatch.setattr(weather, "get_weather_config", lambda: {})
+    payload = {}
+    weather._overlay_lightning(payload)
+    assert payload["lightning"] == {"count": None, "nearest": None}
+    assert "lightning" not in payload.get("sources", {})
