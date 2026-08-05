@@ -50,3 +50,15 @@ def test_provision_edge_node_key(monkeypatch):
     assert out2["api_key"] != out["api_key"]
     assert database.get_edge_node_by_key(out["api_key"]) is None
     assert database.get_edge_node_by_key(out2["api_key"])["node_id"] == "glass_node_07"
+
+
+def test_clear_edge_node_key(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    out = database.provision_edge_node_key("glass_node_09")
+    assert database.get_edge_node_by_key(out["api_key"])["node_id"] == "glass_node_09"
+    assert database.clear_edge_node_key("glass_node_09") is True
+    # Key no longer resolves, but the node row still exists.
+    assert database.get_edge_node_by_key(out["api_key"]) is None
+    assert database.get_node("glass_node_09") is not None
+    # Clearing an unknown node reports False.
+    assert database.clear_edge_node_key("nope_404") is False

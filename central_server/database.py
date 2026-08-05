@@ -1472,6 +1472,30 @@ def provision_edge_node_key(node_id: str, node_type: str = "glass") -> dict:
     return {"api_key": api_key}
 
 
+def rotate_edge_node_key(node_id: str) -> dict:
+    """Rotate an existing edge node's key (caller 404-guards existence)."""
+    return provision_edge_node_key(node_id)
+
+
+def clear_edge_node_key(node_id: str) -> bool:
+    """De-provision: NULL the node's api_key_hash so it falls back to the shared
+    key. The node registry row and its telemetry are preserved. Returns True if
+    a row was updated, False if no such node."""
+    if get_backend() == "postgresql":
+        existing = _pg_fetch_one_sync(
+            "SELECT node_id FROM nodes WHERE node_id = :id", {"id": node_id}
+        )
+        if not existing:
+            return False
+        _pg_execute_sync(
+            "UPDATE nodes SET api_key_hash = NULL WHERE node_id = :id", {"id": node_id}
+        )
+        return True
+    with get_db_cursor() as cursor:
+        cursor.execute("UPDATE nodes SET api_key_hash = NULL WHERE node_id = ?", (node_id,))
+        return cursor.rowcount > 0
+
+
 def revoke_webcam_key(node_id: str) -> dict:
     """Rotate the API key for a webcam client. Returns new {api_key, api_key_hash}."""
     new_key = f"sk-webcam-{secrets.token_urlsafe(32)}"
