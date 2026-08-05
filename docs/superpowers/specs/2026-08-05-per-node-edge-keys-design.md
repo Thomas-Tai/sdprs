@@ -148,9 +148,22 @@ separate table, separate scheme.
 - zh-TW for any user-facing strings (provisioning UI copy, if added).
 - No merge/push to origin/main without the user typing literal "approved".
 
+## Dashboard key panel (IN SCOPE — user decision 2026-08-05)
+
+A SPA panel (zh-TW) on the node/status view to manage a node's key:
+
+- Shows each node's `has_key` state (未設定 / 已設定).
+- **Provision / rotate** button → calls `POST /api/nodes/{id}/key`, then reveals
+  the returned raw key ONCE in a copy-able modal with a clear "此金鑰只顯示一次"
+  warning (mirrors any existing webcam-key reveal UX; the key is never re-fetchable).
+- **Clear** button → `DELETE /api/nodes/{id}/key`, returns the node to shared-key
+  fallback, with a confirm.
+- All SPA rules hold: no build step / in-browser Babel, no new deps, no
+  `import`/`require`, driven by `window.SDPRS_API`, covered by a
+  `tools/spa/render_extra/*.js` render test.
+
 ## Out of scope (explicit)
 
-- Dashboard key-management UI beyond the `has_key` flag — a follow-up if wanted.
 - Auto-rotation / expiry schedules.
 - Per-node keys for MQTT (this covers the REST/HTTP surface; MQTT auth is separate).
 - Retiring `EDGE_API_KEY` in code — it stays as the fallback; retirement is an ops
