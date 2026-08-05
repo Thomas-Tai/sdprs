@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
 
-from ..auth import verify_api_key, verify_api_key_or_session, verify_node_id
+from ..auth import verify_api_key, verify_api_key_or_session, verify_node_id, verify_node_binding
 from ..timeutil import utcnow
 
 # Configure logging
@@ -187,6 +187,12 @@ async def receive_snapshot(
     # Enforce the edge node_id allowlist on the path node_id (before reading
     # the body / storing). No-op when ALLOWED_NODE_IDS is empty -> backward compatible.
     verify_node_id(node_id)
+
+    # Enforce per-node key binding: a key bound to a specific node cannot act
+    # under a different node_id. No-op when edge_auth_node is None (shared key
+    # or session auth). Must happen before reading body to reject cross-node
+    # claims before buffering potentially large (up to 5 MB) JPEG data.
+    verify_node_binding(request, node_id)
 
     # Read the raw JPEG bytes from request body
     jpeg_bytes = await request.body()

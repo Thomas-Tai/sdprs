@@ -121,3 +121,15 @@ async def test_alert_binding_rejects_cross_node(monkeypatch):
     auth.verify_node_binding(req, "glass_node_15")
     # Shared-key (unbound) -> ok for any node.
     auth.verify_node_binding(types.SimpleNamespace(state=types.SimpleNamespace(edge_auth_node=None)), "glass_node_99")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_binding_rejects_cross_node(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    from central_server.api import snapshots as snap_api
+    from fastapi import HTTPException
+    req = types.SimpleNamespace(state=types.SimpleNamespace(edge_auth_node="glass_node_21"),
+                                app=types.SimpleNamespace(state=types.SimpleNamespace()))
+    with pytest.raises(HTTPException) as ei:
+        await snap_api.receive_snapshot("glass_node_99", req, api_key="ignored")
+    assert ei.value.status_code == 403
