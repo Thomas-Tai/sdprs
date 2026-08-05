@@ -34,6 +34,7 @@ from .services.websocket_service import router as ws_router
 from .services.mqtt_service import init_mqtt_service, get_mqtt_service
 from .services.retention_service import setup_retention_scheduler
 from .services.weather_service import init_weather_service, get_weather_service
+from .services.lightning_service import init_lightning_service, get_lightning_service
 from .database import init_db as db_init_db, close_db as db_close_db
 from .config import get_settings
 from .auth import authenticate_user
@@ -126,6 +127,16 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to start weather service: {e}")
         app.state.weather_service = None
 
+    # Lightning service (WXA-004). Self-degrading; start() is a no-op when
+    # LIGHTNING_ENABLED is false. A failure here must never block startup.
+    try:
+        lightning_svc = init_lightning_service(settings)
+        await lightning_svc.start()
+        app.state.lightning_service = lightning_svc
+    except Exception as e:
+        logger.warning(f"Failed to start lightning service: {e}")
+        app.state.lightning_service = None
+
     logger.info("SDPRS Central Server started successfully")
 
     yield
@@ -140,6 +151,14 @@ async def lifespan(app: FastAPI):
             await weather_svc.stop()
         except Exception as e:
             logger.warning(f"Weather service shutdown error: {e}")
+
+    # Stop lightning service
+    lightning_svc = get_lightning_service()
+    if lightning_svc is not None:
+        try:
+            await lightning_svc.stop()
+        except Exception as e:
+            logger.warning(f"Lightning service shutdown error: {e}")
 
     # Stop retention scheduler
     if getattr(app.state, "scheduler", None):
