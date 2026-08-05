@@ -1425,6 +1425,29 @@ def get_webcam_client_by_key(api_key: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_edge_node_by_key(api_key: str) -> Optional[dict]:
+    """Look up an edge node by its raw API key (SHA-256 hashed for comparison).
+
+    Returns {"node_id", "status"} or None. An empty/blank key never matches
+    (its hash is never stored; a NULL api_key_hash row must not be resolved by
+    an empty key)."""
+    if not api_key:
+        return None
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT node_id, status FROM nodes WHERE api_key_hash = :h",
+            {"h": api_key_hash},
+        )
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT node_id, status FROM nodes WHERE api_key_hash = ?",
+            (api_key_hash,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
 def revoke_webcam_key(node_id: str) -> dict:
     """Rotate the API key for a webcam client. Returns new {api_key, api_key_hash}."""
     new_key = f"sk-webcam-{secrets.token_urlsafe(32)}"
