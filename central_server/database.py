@@ -1448,6 +1448,30 @@ def get_edge_node_by_key(api_key: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def provision_edge_node_key(node_id: str, node_type: str = "glass") -> dict:
+    """Provision (or rotate) a per-node API key for an edge node. Creates the
+    nodes row if absent, else sets its api_key_hash. Returns {"api_key"} — the
+    raw key is shown ONCE and never stored/returned again."""
+    api_key = f"sk-edge-{secrets.token_urlsafe(32)}"
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        _pg_execute_sync(
+            "INSERT INTO nodes (node_id, node_type, status, api_key_hash) "
+            "VALUES (:id, :t, 'OFFLINE', :h) "
+            "ON CONFLICT (node_id) DO UPDATE SET api_key_hash = :h",
+            {"id": node_id, "t": node_type, "h": api_key_hash},
+        )
+    else:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO nodes (node_id, node_type, status, api_key_hash) "
+                "VALUES (?, ?, 'OFFLINE', ?) "
+                "ON CONFLICT(node_id) DO UPDATE SET api_key_hash = excluded.api_key_hash",
+                (node_id, node_type, api_key_hash),
+            )
+    return {"api_key": api_key}
+
+
 def revoke_webcam_key(node_id: str) -> dict:
     """Rotate the API key for a webcam client. Returns new {api_key, api_key_hash}."""
     new_key = f"sk-webcam-{secrets.token_urlsafe(32)}"

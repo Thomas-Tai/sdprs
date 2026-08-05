@@ -37,3 +37,16 @@ def test_get_edge_node_by_key(monkeypatch):
     assert database.get_edge_node_by_key(raw)["node_id"] == "glass_node_01"
     assert database.get_edge_node_by_key("sk-edge-WRONG") is None
     assert database.get_edge_node_by_key("") is None
+
+
+def test_provision_edge_node_key(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    out = database.provision_edge_node_key("glass_node_07")
+    assert out["api_key"].startswith("sk-edge-")
+    # The freshly provisioned key resolves back to the node.
+    assert database.get_edge_node_by_key(out["api_key"])["node_id"] == "glass_node_07"
+    # Re-provisioning rotates: the old key stops resolving.
+    out2 = database.provision_edge_node_key("glass_node_07")
+    assert out2["api_key"] != out["api_key"]
+    assert database.get_edge_node_by_key(out["api_key"]) is None
+    assert database.get_edge_node_by_key(out2["api_key"])["node_id"] == "glass_node_07"
