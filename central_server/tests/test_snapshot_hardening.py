@@ -72,18 +72,26 @@ except ImportError:
 
 @pytest.fixture
 def test_db():
-    """Bare temp SQLite handle so central_server.database.get_db is patchable
-    without triggering the real schema-init path. Nothing in the snapshots
-    endpoints reads from it, but the module import touches database."""
-    import sqlite3
+    """Temp SQLite DB via the production init_db() path.
+
+    Track 1 (2026-08-05): verify_api_key now checks a per-node key first via
+    database.get_edge_node_by_key(), which goes through get_db_cursor() ->
+    get_db() and needs the module-global `_db_lock` (set up inside
+    _init_sqlite()) plus a `nodes` table with the api_key_hash column. A bare
+    sqlite3.connect() (the previous approach here) left `_db_lock` as None
+    and had no `nodes` table, so any route behind Depends(verify_api_key)
+    started failing with "'NoneType' object does not support the context
+    manager protocol" / "no such table: nodes". init_db() is the same
+    production path test_alerts_api.py / test_snapshot_api.py already use,
+    for the same reason."""
+    import central_server.database as db_module
 
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
 
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    conn = db_module.init_db(db_path)
     yield conn
-    conn.close()
+    db_module.close_db()
     try:
         os.unlink(db_path)
     except OSError:

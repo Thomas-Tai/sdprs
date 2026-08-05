@@ -50,45 +50,68 @@ def _ct_equal(a: str, b: str) -> bool:
 
 # ===== API Key Authentication =====
 
-async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)) -> str:
+async def verify_api_key(
+    request: Request,
+    api_key: Optional[str] = Depends(api_key_header),
+) -> str:
     """
     Verify API key from X-API-Key header.
-    
-    Used for authenticating edge node requests.
-    
+
+    Used for authenticating edge node requests. A per-node key (Track 1:
+    per-node edge API keys) is checked FIRST and, when it matches, binds the
+    request to that node via ``request.state.edge_auth_node``. The shared
+    EDGE_API_KEY remains a fallback for as long as it is configured (grace
+    period during per-node rollout); a shared-key match leaves
+    ``request.state.edge_auth_node`` as None (unbound / not node-specific).
+
     Args:
+        request: The FastAPI request object (stamped with the resolved
+            edge-auth identity for downstream consumers such as
+            ``verify_node_binding``).
         api_key: The API key from the header
-        
+
     Returns:
-        The validated API key
-        
+        The validated API key (unchanged so existing callers keep working)
+
     Raises:
         HTTPException: 401 if API key is missing or invalid
     """
     settings = get_settings()
-    
+
     if api_key is None:
         logger.warning("API key missing in request")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API key required"
         )
-    
-    if not _ct_equal(api_key, settings.EDGE_API_KEY):
-        # Auth-G1 (2026-07-16): the EDGE_API_KEY floor is now >=32 chars /
-        # >=8 unique chars, so `api_key[:8]` would leak ~32 bits of the
-        # rejected credential to anyone reading the log. Log a SHA-256
-        # digest instead: no key material is disclosed, but distinct wrong
-        # keys still produce distinct digests so operators can correlate
-        # repeated attempts from the same offender.
-        key_digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
-        logger.warning(f"Invalid API key attempt (sha256={key_digest})")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key"
-        )
-    
-    return api_key
+
+    # Per-node key first: a hash-equality SQL lookup, not a raw string
+    # comparison, so constant-time comparison does not apply here.
+    from .database import get_edge_node_by_key
+    rec = get_edge_node_by_key(api_key)
+    if rec is not None:
+        request.state.edge_auth_node = rec["node_id"]
+        return api_key
+
+    # Shared-key fallback (grace period while nodes are migrated to
+    # per-node keys). Constant-time comparison still applies here.
+    shared = getattr(settings, "EDGE_API_KEY", "") or ""
+    if shared and _ct_equal(api_key, shared):
+        request.state.edge_auth_node = None
+        return api_key
+
+    # Auth-G1 (2026-07-16): the EDGE_API_KEY floor is now >=32 chars /
+    # >=8 unique chars, so `api_key[:8]` would leak ~32 bits of the
+    # rejected credential to anyone reading the log. Log a SHA-256
+    # digest instead: no key material is disclosed, but distinct wrong
+    # keys still produce distinct digests so operators can correlate
+    # repeated attempts from the same offender.
+    key_digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    logger.warning(f"Invalid API key attempt (sha256={key_digest})")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid API key"
+    )
 
 
 def verify_node_id(node_id: str) -> None:

@@ -1,6 +1,8 @@
-import sys, os, tempfile
+import sys, os, tempfile, types
 from pathlib import Path
 import hashlib
+import pytest
+from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
@@ -62,3 +64,29 @@ def test_clear_edge_node_key(monkeypatch):
     assert database.get_node("glass_node_09") is not None
     # Clearing an unknown node reports False.
     assert database.clear_edge_node_key("nope_404") is False
+
+
+def _req():
+    return types.SimpleNamespace(state=types.SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_per_node_and_fallback(monkeypatch):
+    database, _ = _fresh_db(monkeypatch)
+    from central_server import auth
+    from central_server.config import get_settings
+    monkeypatch.setattr(get_settings(), "EDGE_API_KEY", "shared-" + "x" * 32, raising=False)
+
+    out = database.provision_edge_node_key("glass_node_11")
+    # Per-node key: authenticates AND stamps the bound node identity.
+    r1 = _req()
+    assert await auth.verify_api_key(r1, out["api_key"]) == out["api_key"]
+    assert r1.state.edge_auth_node == "glass_node_11"
+    # Shared key: authenticates, identity is None (unbound / grace period).
+    r2 = _req()
+    assert await auth.verify_api_key(r2, "shared-" + "x" * 32) == "shared-" + "x" * 32
+    assert r2.state.edge_auth_node is None
+    # Invalid key: 401.
+    with pytest.raises(HTTPException) as ei:
+        await auth.verify_api_key(_req(), "sk-edge-bogus")
+    assert ei.value.status_code == 401
