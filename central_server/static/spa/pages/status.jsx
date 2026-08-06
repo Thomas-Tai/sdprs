@@ -272,9 +272,10 @@ const NodeKeyRowButtons = ({ node, onRevealed, onRequestClear, onError }) => {
       {node.hasKey && (
         <button
           title="清除金鑰"
+          disabled={busy}
           onClick={e => { e.stopPropagation(); onRequestClear(node); }}
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
-          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors"
+          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           清除金鑰
         </button>

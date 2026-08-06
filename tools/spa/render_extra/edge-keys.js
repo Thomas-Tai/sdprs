@@ -68,9 +68,10 @@ module.exports = [
         return _res(null, { status: 204 });
       };
       A('clearNodeKey is published on SDPRS_API', typeof window.SDPRS_API.clearNodeKey === 'function', typeof window.SDPRS_API.clearNodeKey);
-      await window.SDPRS_API.clearNodeKey('n1');
+      const clearResult = await window.SDPRS_API.clearNodeKey('n1');
       A('clearNodeKey sends DELETE to /api/nodes/n1/key', capturedPath === '/api/nodes/n1/key', capturedPath);
       A('clearNodeKey uses method DELETE', !!capturedOpts && capturedOpts.method === 'DELETE', capturedOpts && capturedOpts.method);
+      A('clearNodeKey resolves to null on a 204 No Content response', clearResult === null, JSON.stringify(clearResult));
 
       const raw = 'n 1/x?y';
       const enc = encodeURIComponent(raw);

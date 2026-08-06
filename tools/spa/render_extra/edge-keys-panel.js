@@ -208,6 +208,53 @@ module.exports = [
     `,
   },
 
+  // ------------------------------------------------- busy guards 清除金鑰 too
+  {
+    name: 'Task 11 / T11 review-fix: 清除金鑰 is disabled while a provision/rotate is in-flight',
+    target: 'pages/status.jsx',
+    deps: ['icons.jsx', 'data.jsx', 'components.jsx'],
+    body: `
+      // provisionNodeKey deliberately never resolves during this test — it
+      // lets us observe the component while it is still "busy" (in-flight),
+      // mirroring how the sibling 設定/重設金鑰 button's own disabled={busy}
+      // is proven elsewhere in this suite.
+      let resolveProvision;
+      window.SDPRS_API = {
+        provisionNodeKey: () => new Promise(resolve => { resolveProvision = resolve; }),
+        clearNodeKey: () => Promise.resolve(null),
+        snoozeNode: () => Promise.resolve(), unsnoozeNode: () => Promise.resolve(),
+      };
+      const node = { id: 'pump-busyclear', name: '抽水站-busy', type: 'pump', status: 'online',
+        heartbeat: 5, upload: 5, snoozeMin: 0, level: 50, cycles: 1, voltage: 12.5,
+        power: 'mains', hasKey: true };
+      ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+        nodes: [node], onSelectNode: () => {}, onRefresh: () => Promise.resolve() })));
+      await settle();
+
+      const findBtn = (label) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === label);
+      const rotateBtn = findBtn('重設金鑰');
+      A('setup: 重設金鑰 button renders', !!rotateBtn);
+      const clearBtnBefore = findBtn('清除金鑰');
+      A('setup: 清除金鑰 is enabled before any in-flight request', !!clearBtnBefore && !clearBtnBefore.disabled);
+
+      click(rotateBtn);
+      await settle();
+      // Still in-flight: provisionNodeKey's promise has not been resolved yet.
+      const clearBtnDuring = findBtn('清除金鑰');
+      A('清除金鑰 is disabled while provision/rotate is in-flight (busy)', !!clearBtnDuring && clearBtnDuring.disabled === true,
+        clearBtnDuring && clearBtnDuring.disabled);
+
+      // Let the in-flight request resolve so it doesn't leak into other tests.
+      resolveProvision({ node_id: node.id, api_key: 'sk-edge-BUSYCLEARTEST' });
+      await settle();
+      const dialog = container.querySelector('[role="dialog"]');
+      if (dialog) {
+        const closeBtn = Array.from(dialog.querySelectorAll('button')).find(b => b.textContent.trim() === '關閉');
+        if (closeBtn) { click(closeBtn); await settle(); }
+      }
+    `,
+  },
+
   // --------------------------------------------------------- Escape handling
   {
     name: 'Task 11: Escape closes the node-key reveal and clear-confirm modals',
