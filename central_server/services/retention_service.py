@@ -126,18 +126,25 @@ def run_retention_cleanup(
 
     if database.get_backend() == "postgresql":
         # ─────────────────────────────────────────────────────────────────
-        # PostgreSQL branch (T3-1: EVENTS ONLY). `events.created_at` is a
-        # native TIMESTAMP column under the PG schema (see
-        # _create_tables_postgresql in database.py), so a plain parameterized
-        # `created_at < :cutoff` comparison works with no SQLite-only
-        # datetime() wrapper. Mirrors the `_pg_*_sync` idiom in database.py.
-        # T3-2 will extend this branch with pump_readings pruning and the
-        # surviving-refs snapshot; until then deleted_pump_readings stays 0
-        # and surviving_refs stays None, which fail-safely skips the orphan
-        # sweep below rather than risk deleting live files.
+        # PostgreSQL branch. `events.created_at` and `pump_readings.timestamp`
+        # are native TIMESTAMP columns under the PG schema (see
+        # _create_tables_postgresql in database.py), so plain parameterized
+        # `created_at < :cutoff` / `timestamp < :cutoff` comparisons work with
+        # no SQLite-only datetime() wrapper. Mirrors the `_pg_*_sync` idiom in
+        # database.py.
+        #
+        # T3-2: each of the three steps below (events, pump_readings,
+        # surviving-refs) uses its OWN `with engine.connect() as conn:` block
+        # (its own transaction), deliberately NOT sharing a transaction with
+        # the already-committed events work. Under real PostgreSQL a missing-
+        # table error ABORTS the current transaction, so keeping the pump
+        # DELETE and the surviving SELECT in separate transactions means a
+        # missing pump_readings table can't poison the committed events
+        # delete or the surviving-refs SELECT.
         # ─────────────────────────────────────────────────────────────────
         import sqlalchemy
 
+        engine = None
         try:
             engine = database._get_engine()
             with engine.connect() as conn:
@@ -176,16 +183,55 @@ def run_retention_cleanup(
                     errors.append(error_msg)
                     logger.error(error_msg)
 
-            # T3-1 scope: pump_readings prune + surviving-refs snapshot are
-            # deferred to T3-2. Leaving surviving_refs=None is the intended
-            # fail-safe intermediate state (orphan sweep skipped).
-            deleted_pump_readings = 0
-            surviving_refs = None
-
         except Exception as e:
             logger.error(f"Database operation failed (PostgreSQL): {e}")
             errors.append(f"Database operation failed: {e}")
             deleted_events = 0
+
+        if engine is not None:
+            # FIX 2 (PostgreSQL): prune pump_readings telemetry, same intent
+            # as the SQLite branch below. Own transaction, own try/except —
+            # a missing table must not roll back the already-committed
+            # events delete above. Under real PG a missing table raises
+            # sqlalchemy.exc.ProgrammingError; tolerate it like the SQLite
+            # branch tolerates sqlite3.OperationalError.
+            try:
+                with engine.connect() as conn:
+                    pump_result = conn.execute(
+                        sqlalchemy.text(
+                            "DELETE FROM pump_readings WHERE timestamp < :cutoff"
+                        ),
+                        {"cutoff": cutoff},
+                    )
+                    deleted_pump_readings = pump_result.rowcount
+                    conn.commit()
+                logger.info(f"Deleted {deleted_pump_readings} pump_readings rows (PostgreSQL)")
+            except sqlalchemy.exc.ProgrammingError as e:
+                # Older DBs may predate the pump_readings table; skip gracefully.
+                logger.warning(f"pump_readings prune skipped (table missing?): {e}")
+                deleted_pump_readings = 0
+
+            # FIX 3 (part 1, PostgreSQL): snapshot the surviving MP4
+            # references so the backend-agnostic on-disk orphan sweep below
+            # can tell a live file from an orphan. Normalize with
+            # abspath+normpath to match the on-disk paths — byte-for-byte
+            # the same normalization the SQLite branch uses. Own
+            # transaction, broad except -> fail-safe skip on any failure.
+            try:
+                with engine.connect() as conn:
+                    surviving_result = conn.execute(
+                        sqlalchemy.text(
+                            "SELECT mp4_path FROM events WHERE mp4_path IS NOT NULL"
+                        )
+                    )
+                    surviving_refs = {
+                        os.path.normpath(os.path.abspath(row["mp4_path"]))
+                        for row in surviving_result.mappings().fetchall()
+                        if row["mp4_path"]
+                    }
+            except Exception as e:
+                logger.error(f"Failed to build surviving-reference set (PostgreSQL): {e}")
+                surviving_refs = None
 
     else:
         # Connect to database
