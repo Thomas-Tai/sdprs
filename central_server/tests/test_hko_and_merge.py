@@ -110,7 +110,9 @@ def test_hko_parses_selected_temperature_station():
     assert cur is not None
     assert cur.temperature_c == 30.0
     assert cur.humidity_pct == 82
-    assert cur.rainfall_24h_mm == 3.5
+    # HKO past-hour district max is a live rate (mm/h), not a daily total.
+    assert cur.rainfall_rate_mmh == 3.5
+    assert cur.rainfall_24h_mm == 0.0
     assert cur.source == "HKO"
     assert cur.station_name == "Central Weather Station"
     # HKO rhrread has no wind — must NOT claim wind fields in sources
@@ -121,7 +123,8 @@ def test_hko_parses_selected_temperature_station():
     assert 'temperature_c' in cur.sources
     assert cur.sources['temperature_c'] == "HKO Central Weather Station"
     assert cur.sources['humidity_pct'] == "HKO Hong Kong Observatory"
-    assert 'rainfall_24h_mm' in cur.sources
+    assert 'rainfall_rate_mmh' in cur.sources
+    assert 'rainfall_24h_mm' not in cur.sources
 
 
 def test_hko_returns_none_when_station_not_found():
@@ -147,7 +150,8 @@ def test_hko_omits_rainfall_source_when_no_district_data():
     client = _FakeClient(_FakeResponse(200, json.dumps(slim)))
     cur = asyncio.run(_fetch_hko_current(client, temp_station="Hong Kong Observatory"))
     assert cur is not None
-    assert cur.rainfall_24h_mm == 0.0
+    assert cur.rainfall_rate_mmh is None
+    assert 'rainfall_rate_mmh' not in cur.sources
     assert 'rainfall_24h_mm' not in cur.sources
 
 

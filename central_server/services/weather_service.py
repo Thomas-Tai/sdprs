@@ -712,13 +712,13 @@ async def _fetch_hko_current(
             'humidity_pct': f"HKO Hong Kong Observatory",  # always this station
         }
         if rain_data:  # only claim rainfall if the API actually returned district data
-            sources['rainfall_24h_mm'] = f"HKO 全港最大值 (18 districts)"
+            sources['rainfall_rate_mmh'] = f"HKO 全港最大值 (18 districts)"
 
         return CurrentWeather(
             obs_time=obs_time,
             wind_speed_ms=0.0,       # HKO rhrread has no wind — filled by merge
             wind_direction_deg=0,    # HKO rhrread has no wind — filled by merge
-            rainfall_24h_mm=rainfall_mm,
+            rainfall_24h_mm=0.0,  # HKO rhrread has no daily total — merge fills from another source, else '—'
             temperature_c=temp_c,
             humidity_pct=humidity_pct,
             is_stale=False,
@@ -726,6 +726,7 @@ async def _fetch_hko_current(
             source="HKO",
             station_name=temp_station,
             gust_speed_ms=None,      # HKO rhrread has no gust
+            rainfall_rate_mmh=(rainfall_mm if rain_data else None),  # past-hour district max ≈ live mm/h
             sources=sources,
         )
     except Exception as e:
