@@ -119,103 +119,171 @@ def run_retention_cleanup(
     # None => could not determine surviving MP4 references; fail safe by
     # skipping the orphan sweep entirely rather than risk deleting live files.
     surviving_refs = None
-    
-    # Connect to database
-    try:
-        db = sqlite3.connect(db_path)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        return {
-            "deleted_events": 0,
-            "deleted_files": 0,
-            "deleted_pump_readings": 0,
-            "deleted_orphans": 0,
-            "deleted_dirs": 0,
-            "errors": [f"Database connection failed: {e}"]
-        }
-    
-    try:
-        # Query expired events.
-        # datetime() on BOTH sides normalizes the stored space-delimited
-        # "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP) against the
-        # T-delimited cutoff.isoformat(), avoiding a lexicographic ~24h
-        # boundary error (see api/alerts.py's .replace(" ","T") normalization).
-        cursor = db.cursor()
-        cursor.execute(
-            "SELECT id, mp4_path FROM events WHERE datetime(created_at) < datetime(?)",
-            (cutoff_str,)
-        )
-        expired_events = cursor.fetchall()
-        
-        logger.info(f"Found {len(expired_events)} expired events")
-        
-        # Collect file paths before deleting DB records
-        file_paths_to_delete = []
-        for event in expired_events:
-            mp4_path = event["mp4_path"]
-            if mp4_path and os.path.exists(mp4_path):
-                file_paths_to_delete.append(mp4_path)
-        
-        # Delete database records first (rollback-safe). datetime() on both
-        # sides for the same delimiter-robustness as the SELECT above.
-        cursor.execute("DELETE FROM events WHERE datetime(created_at) < datetime(?)", (cutoff_str,))
-        deleted_events = cursor.rowcount
-        db.commit()
 
-        # Then delete MP4 files
-        for mp4_path in file_paths_to_delete:
-            try:
-                os.remove(mp4_path)
-                deleted_files += 1
-                logger.debug(f"Deleted MP4: {mp4_path}")
-            except OSError as e:
-                error_msg = f"Failed to delete {mp4_path}: {e}"
-                errors.append(error_msg)
-                logger.error(error_msg)
+    # Imported lazily (not at module top) mirroring the `_pg_*_sync` helpers'
+    # local `import sqlalchemy` idiom in database.py.
+    from .. import database
 
-        logger.info(f"Deleted {deleted_events} database records")
+    if database.get_backend() == "postgresql":
+        # ─────────────────────────────────────────────────────────────────
+        # PostgreSQL branch (T3-1: EVENTS ONLY). `events.created_at` is a
+        # native TIMESTAMP column under the PG schema (see
+        # _create_tables_postgresql in database.py), so a plain parameterized
+        # `created_at < :cutoff` comparison works with no SQLite-only
+        # datetime() wrapper. Mirrors the `_pg_*_sync` idiom in database.py.
+        # T3-2 will extend this branch with pump_readings pruning and the
+        # surviving-refs snapshot; until then deleted_pump_readings stays 0
+        # and surviving_refs stays None, which fail-safely skips the orphan
+        # sweep below rather than risk deleting live files.
+        # ─────────────────────────────────────────────────────────────────
+        import sqlalchemy
 
-        # FIX 2: prune pump_readings telemetry (INSERTed on every pump status,
-        # never deleted -> unbounded growth). It has an edge-supplied `timestamp`
-        # (ISO string, no created_at); datetime() makes the compare robust to
-        # space/T delimiters. NOTE: pruning by the edge-supplied timestamp trusts
-        # edge clocks — acceptable for telemetry retention.
         try:
+            engine = database._get_engine()
+            with engine.connect() as conn:
+                select_result = conn.execute(
+                    sqlalchemy.text(
+                        "SELECT id, mp4_path FROM events WHERE created_at < :cutoff"
+                    ),
+                    {"cutoff": cutoff},
+                )
+                expired_rows = select_result.mappings().fetchall()
+
+                file_paths_to_delete = []
+                for row in expired_rows:
+                    mp4_path = row["mp4_path"]
+                    if mp4_path and os.path.exists(mp4_path):
+                        file_paths_to_delete.append(mp4_path)
+
+                delete_result = conn.execute(
+                    sqlalchemy.text(
+                        "DELETE FROM events WHERE created_at < :cutoff"
+                    ),
+                    {"cutoff": cutoff},
+                )
+                deleted_events = delete_result.rowcount
+                conn.commit()
+
+            logger.info(f"Found/deleted {deleted_events} expired events (PostgreSQL)")
+
+            for mp4_path in file_paths_to_delete:
+                try:
+                    os.remove(mp4_path)
+                    deleted_files += 1
+                    logger.debug(f"Deleted MP4: {mp4_path}")
+                except OSError as e:
+                    error_msg = f"Failed to delete {mp4_path}: {e}"
+                    errors.append(error_msg)
+                    logger.error(error_msg)
+
+            # T3-1 scope: pump_readings prune + surviving-refs snapshot are
+            # deferred to T3-2. Leaving surviving_refs=None is the intended
+            # fail-safe intermediate state (orphan sweep skipped).
+            deleted_pump_readings = 0
+            surviving_refs = None
+
+        except Exception as e:
+            logger.error(f"Database operation failed (PostgreSQL): {e}")
+            errors.append(f"Database operation failed: {e}")
+            deleted_events = 0
+
+    else:
+        # Connect to database
+        try:
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+        except Exception as e:
+            logger.error(f"Failed to connect to database: {e}")
+            return {
+                "deleted_events": 0,
+                "deleted_files": 0,
+                "deleted_pump_readings": 0,
+                "deleted_orphans": 0,
+                "deleted_dirs": 0,
+                "errors": [f"Database connection failed: {e}"]
+            }
+
+        try:
+            # Query expired events.
+            # datetime() on BOTH sides normalizes the stored space-delimited
+            # "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP) against the
+            # T-delimited cutoff.isoformat(), avoiding a lexicographic ~24h
+            # boundary error (see api/alerts.py's .replace(" ","T") normalization).
+            cursor = db.cursor()
             cursor.execute(
-                "DELETE FROM pump_readings WHERE datetime(timestamp) < datetime(?)",
+                "SELECT id, mp4_path FROM events WHERE datetime(created_at) < datetime(?)",
                 (cutoff_str,)
             )
-            deleted_pump_readings = cursor.rowcount
-            db.commit()
-            logger.info(f"Deleted {deleted_pump_readings} pump_readings rows")
-        except sqlite3.OperationalError as e:
-            # Older DBs may predate the pump_readings table; skip gracefully.
-            logger.warning(f"pump_readings prune skipped (table missing?): {e}")
-            deleted_pump_readings = 0
+            expired_events = cursor.fetchall()
 
-        # FIX 3 (part 1): snapshot the surviving MP4 references while the DB is
-        # still open, so the on-disk orphan sweep (after db.close()) can tell a
-        # live file from an orphan. Normalize with abspath+normpath to match the
-        # on-disk paths. surviving_refs stays None on failure -> fail-safe skip.
-        try:
-            cursor.execute("SELECT mp4_path FROM events WHERE mp4_path IS NOT NULL")
-            surviving_refs = {
-                os.path.normpath(os.path.abspath(r["mp4_path"]))
-                for r in cursor.fetchall()
-                if r["mp4_path"]
-            }
+            logger.info(f"Found {len(expired_events)} expired events")
+
+            # Collect file paths before deleting DB records
+            file_paths_to_delete = []
+            for event in expired_events:
+                mp4_path = event["mp4_path"]
+                if mp4_path and os.path.exists(mp4_path):
+                    file_paths_to_delete.append(mp4_path)
+
+            # Delete database records first (rollback-safe). datetime() on both
+            # sides for the same delimiter-robustness as the SELECT above.
+            cursor.execute("DELETE FROM events WHERE datetime(created_at) < datetime(?)", (cutoff_str,))
+            deleted_events = cursor.rowcount
+            db.commit()
+
+            # Then delete MP4 files
+            for mp4_path in file_paths_to_delete:
+                try:
+                    os.remove(mp4_path)
+                    deleted_files += 1
+                    logger.debug(f"Deleted MP4: {mp4_path}")
+                except OSError as e:
+                    error_msg = f"Failed to delete {mp4_path}: {e}"
+                    errors.append(error_msg)
+                    logger.error(error_msg)
+
+            logger.info(f"Deleted {deleted_events} database records")
+
+            # FIX 2: prune pump_readings telemetry (INSERTed on every pump status,
+            # never deleted -> unbounded growth). It has an edge-supplied `timestamp`
+            # (ISO string, no created_at); datetime() makes the compare robust to
+            # space/T delimiters. NOTE: pruning by the edge-supplied timestamp trusts
+            # edge clocks — acceptable for telemetry retention.
+            try:
+                cursor.execute(
+                    "DELETE FROM pump_readings WHERE datetime(timestamp) < datetime(?)",
+                    (cutoff_str,)
+                )
+                deleted_pump_readings = cursor.rowcount
+                db.commit()
+                logger.info(f"Deleted {deleted_pump_readings} pump_readings rows")
+            except sqlite3.OperationalError as e:
+                # Older DBs may predate the pump_readings table; skip gracefully.
+                logger.warning(f"pump_readings prune skipped (table missing?): {e}")
+                deleted_pump_readings = 0
+
+            # FIX 3 (part 1): snapshot the surviving MP4 references while the DB is
+            # still open, so the on-disk orphan sweep (after db.close()) can tell a
+            # live file from an orphan. Normalize with abspath+normpath to match the
+            # on-disk paths. surviving_refs stays None on failure -> fail-safe skip.
+            try:
+                cursor.execute("SELECT mp4_path FROM events WHERE mp4_path IS NOT NULL")
+                surviving_refs = {
+                    os.path.normpath(os.path.abspath(r["mp4_path"]))
+                    for r in cursor.fetchall()
+                    if r["mp4_path"]
+                }
+            except Exception as e:
+                logger.error(f"Failed to build surviving-reference set: {e}")
+                surviving_refs = None
+
         except Exception as e:
-            logger.error(f"Failed to build surviving-reference set: {e}")
-            surviving_refs = None
-        
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
-        errors.append(f"Database operation failed: {e}")
-        deleted_events = 0
-    finally:
-        db.close()
+            logger.error(f"Database operation failed: {e}")
+            errors.append(f"Database operation failed: {e}")
+            deleted_events = 0
+        finally:
+            db.close()
 
     # FIX 3 (part 2): sweep orphaned MP4s on disk — files older than the cutoff
     # that NO surviving event row references (failed inserts / prior failed
