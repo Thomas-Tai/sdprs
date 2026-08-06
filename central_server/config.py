@@ -40,10 +40,13 @@ if PYDANTIC_AVAILABLE:
         Required variables (will raise error if not set):
         - DASHBOARD_USER: Dashboard login username
         - DASHBOARD_PASS: Dashboard login password
-        - EDGE_API_KEY: Shared API key for edge nodes
         - SECRET_KEY: Secret key for session cookie signing
 
         Optional variables (have defaults):
+        - EDGE_API_KEY: Legacy shared API key for edge nodes (grace-period
+          fallback). Empty/unset = per-node-only auth (see
+          database.provision_edge_node_key / auth.py). When set, it is still
+          fully strength-checked by validate_settings().
         - MQTT_BROKER: MQTT broker address
         - MQTT_PORT: MQTT broker port
         - MQTT_USERNAME: MQTT broker username (Mosquitto auth on Zeabur cloud deploy)
@@ -62,8 +65,16 @@ if PYDANTIC_AVAILABLE:
         # Required settings
         DASHBOARD_USER: str
         DASHBOARD_PASS: str
-        EDGE_API_KEY: str
         SECRET_KEY: str
+
+        # Legacy shared edge-node API key (grace-period fallback, optional as of
+        # Task 12A). Empty/unset => per-node-only auth: only keys provisioned via
+        # database.provision_edge_node_key() authenticate (see auth.py). When SET,
+        # it is still fully strength-checked by validate_settings() below. NOTE:
+        # this default is load-bearing — without it pydantic-settings treats the
+        # field as required and Settings() itself raises ValidationError when the
+        # env var is unset, before validate_settings() ever runs.
+        EDGE_API_KEY: str = ""
 
         # MQTT settings
         MQTT_BROKER: str = "localhost"
@@ -222,7 +233,8 @@ else:
         def __init__(self):
             self.DASHBOARD_USER = _get_env_str("DASHBOARD_USER", required=True)
             self.DASHBOARD_PASS = _get_env_str("DASHBOARD_PASS", required=True)
-            self.EDGE_API_KEY = _get_env_str("EDGE_API_KEY", required=True)
+            # Legacy shared fallback; empty = per-node-only auth (Task 12A).
+            self.EDGE_API_KEY = _get_env_str("EDGE_API_KEY", "")
             self.SECRET_KEY = _get_env_str("SECRET_KEY", required=True)
             self.MQTT_BROKER = _get_env_str("MQTT_BROKER", "localhost")
             self.MQTT_PORT = _get_env_int("MQTT_PORT", 1883)
@@ -322,15 +334,19 @@ def validate_settings(settings: Settings) -> bool:
       * Missing / empty required field
       * Value in KNOWN_INSECURE_VALUES
       * Value containing "changeme" substring (case-insensitive)
-      * SECRET_KEY / EDGE_API_KEY shorter than SECRET_MIN_LENGTH
-      * SECRET_KEY / EDGE_API_KEY with fewer than SECRET_MIN_UNIQUE_CHARS
+      * SECRET_KEY shorter than SECRET_MIN_LENGTH
+      * SECRET_KEY with fewer than SECRET_MIN_UNIQUE_CHARS
       * DASHBOARD_PASS shorter than PASSWORD_MIN_LENGTH
       * Out-of-range MQTT_PORT / RETENTION_DAYS / SERVER_PORT
+      * EDGE_API_KEY is OPTIONAL (Task 12A): unset/empty means per-node-only
+        auth and is not checked here. When SET, it is still fully checked
+        against KNOWN_INSECURE_VALUES / "changeme" / SECRET_MIN_LENGTH /
+        SECRET_MIN_UNIQUE_CHARS, same as SECRET_KEY.
 
     Called from main.py lifespan startup — failing closed here prevents
     the app from serving requests with insecure credentials.
     """
-    required_fields = ["DASHBOARD_USER", "DASHBOARD_PASS", "EDGE_API_KEY", "SECRET_KEY"]
+    required_fields = ["DASHBOARD_USER", "DASHBOARD_PASS", "SECRET_KEY"]
 
     for field in required_fields:
         value = getattr(settings, field, None)
@@ -349,7 +365,7 @@ def validate_settings(settings: Settings) -> bool:
                 f"Rotate to a random value before starting the server."
             )
 
-    for field in ("SECRET_KEY", "EDGE_API_KEY"):
+    for field in ("SECRET_KEY",):
         value = getattr(settings, field)
         if len(value) < SECRET_MIN_LENGTH:
             raise ValueError(
@@ -363,6 +379,34 @@ def validate_settings(settings: Settings) -> bool:
                 f"(only {len(set(value))} unique chars, "
                 f"need >= {SECRET_MIN_UNIQUE_CHARS}). "
                 f"Generate with `openssl rand -hex 32`."
+            )
+
+    # EDGE_API_KEY is the LEGACY shared fallback and is now OPTIONAL: unset it to
+    # run per-node-only auth (per-node keys live in the nodes table). But WHEN SET
+    # it must still be a strong secret — apply the same insecure/placeholder/length/
+    # entropy floor the required secrets get, so a set-but-weak shared key fails closed.
+    edge = getattr(settings, "EDGE_API_KEY", "") or ""
+    if edge:
+        if edge in KNOWN_INSECURE_VALUES:
+            raise ValueError(
+                "EDGE_API_KEY is set to a known-insecure placeholder value. "
+                "Generate a real value (e.g. `openssl rand -hex 32`) and update "
+                "your .env, or unset EDGE_API_KEY to use per-node keys only."
+            )
+        if "changeme" in edge.lower():
+            raise ValueError(
+                "EDGE_API_KEY contains the placeholder text 'changeme'. "
+                "Rotate to a random value, or unset it for per-node-only auth."
+            )
+        if len(edge) < SECRET_MIN_LENGTH:
+            raise ValueError(
+                f"EDGE_API_KEY too short ({len(edge)} chars, need >= {SECRET_MIN_LENGTH}). "
+                f"Generate with `openssl rand -hex 32`, or unset it for per-node-only auth."
+            )
+        if len(set(edge)) < SECRET_MIN_UNIQUE_CHARS:
+            raise ValueError(
+                f"EDGE_API_KEY has insufficient entropy (only {len(set(edge))} unique "
+                f"chars, need >= {SECRET_MIN_UNIQUE_CHARS})."
             )
 
     if len(settings.DASHBOARD_PASS) < PASSWORD_MIN_LENGTH:

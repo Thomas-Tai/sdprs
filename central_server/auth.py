@@ -281,8 +281,11 @@ async def verify_api_key_or_session(
             request.state.edge_auth_node = rec["node_id"]
             return api_key
 
-    # Shared-key fallback (grace period while nodes are migrated to per-node keys)
-    if api_key and _ct_equal(api_key, settings.EDGE_API_KEY):
+    # Shared-key fallback — only while a shared key is still configured. Unsetting
+    # EDGE_API_KEY (per-node-only mode) disables this path: only the per-node keys
+    # checked above and session auth below remain.
+    shared = getattr(settings, "EDGE_API_KEY", "") or ""
+    if shared and api_key and _ct_equal(api_key, shared):
         request.state.edge_auth_node = None
         return api_key
 
