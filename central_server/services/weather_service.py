@@ -65,6 +65,12 @@ class CurrentWeather:
     # suspicious default.
     pressure_hpa: Optional[float] = None
     visibility_km: Optional[float] = None
+    # Live rainfall intensity in mm/h (SMG Type-3 element / Open-Meteo
+    # current precipitation / HKO past-hour district max). Optional so
+    # "no provider supplied a live rate" (absent from sources) is distinct
+    # from a genuine 0.0 during dry weather — same idiom as pressure_hpa.
+    # rainfall_24h_mm remains the DAILY total; this is the instantaneous rate.
+    rainfall_rate_mmh: Optional[float] = None
 
 
 @dataclass
@@ -704,6 +710,7 @@ _MERGEABLE_FIELDS = (
     "wind_direction_deg",
     "gust_speed_ms",
     "rainfall_24h_mm",
+    "rainfall_rate_mmh",
     "pressure_hpa",
     "visibility_km",
 )
@@ -775,6 +782,7 @@ def merge_currents(
         sources=merged_sources,
         pressure_hpa=merged_values.get("pressure_hpa"),
         visibility_km=merged_values.get("visibility_km"),
+        rainfall_rate_mmh=merged_values.get("rainfall_rate_mmh"),
     )
 
 

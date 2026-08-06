@@ -89,6 +89,7 @@ def _cur(source, station, sources_fields, **overrides):
         fetched_at=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc),
         source=source, station_name=station,
         gust_speed_ms=None,
+        rainfall_rate_mmh=None,
         sources={f: f"{source} {station}" for f in sources_fields},
     )
     defaults.update(overrides)
@@ -258,6 +259,45 @@ def test_merge_leaves_field_unlabeled_when_no_source_supplied_it():
     merged = merge_currents([(smg, "SMG"), (hko, "HKO")])
     # Neither supplied gust — sources must NOT claim it
     assert 'gust_speed_ms' not in merged.sources
+
+
+def test_merge_picks_rainfall_rate_and_daily_from_different_providers():
+    """rainfall_rate_mmh (live mm/h) and rainfall_24h_mm (daily total) are
+    independent merge fields. SMG supplies the rate, Open-Meteo supplies the
+    daily total — merged must carry both, each labeled from its own source."""
+    smg = _cur("SMG", "外港", ['rainfall_rate_mmh'], rainfall_rate_mmh=2.5)
+    om = _cur("Open-Meteo", "22.19,113.55", ['rainfall_24h_mm'], rainfall_24h_mm=40.0)
+    merged = merge_currents([(smg, "SMG"), (om, "Open-Meteo")])
+    assert merged is not None
+    assert merged.rainfall_rate_mmh == 2.5
+    assert merged.sources['rainfall_rate_mmh'] == "SMG 外港"
+    assert merged.rainfall_24h_mm == 40.0
+    assert merged.sources['rainfall_24h_mm'] == "Open-Meteo 22.19,113.55"
+
+
+def test_merge_leaves_daily_unlabeled_when_only_rate_supplied():
+    """A provider that supplies only the live rate must NOT cause the daily
+    total to be labeled — the 24h hero should render '—' in that case."""
+    hko_like = _cur("HKO", "Hong Kong Observatory", ['rainfall_rate_mmh'], rainfall_rate_mmh=3.5)
+    merged = merge_currents([(hko_like, "HKO")])
+    assert merged is not None
+    assert merged.rainfall_rate_mmh == 3.5
+    assert 'rainfall_rate_mmh' in merged.sources
+    assert 'rainfall_24h_mm' not in merged.sources
+
+
+def test_serialize_emits_both_rainfall_fields():
+    """Wire contract: the /api/weather/current serializer (_serialize, which
+    uses dataclasses.asdict) must emit BOTH rainfall_rate_mmh and
+    rainfall_24h_mm so the SPA can bind the live rate and the daily total."""
+    from central_server.api.weather import _serialize
+    cur = _cur("SMG", "外港", ['rainfall_rate_mmh', 'rainfall_24h_mm'],
+               rainfall_rate_mmh=1.2, rainfall_24h_mm=8.0)
+    payload = _serialize(cur)
+    assert 'rainfall_rate_mmh' in payload
+    assert 'rainfall_24h_mm' in payload
+    assert payload['rainfall_rate_mmh'] == 1.2
+    assert payload['rainfall_24h_mm'] == 8.0
 
 
 if __name__ == "__main__":
