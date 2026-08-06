@@ -40,4 +40,51 @@ module.exports = [
       A('RAIN-MAP rate source rides through sources dict', w.sources && w.sources.rainfall_rate_mmh === 'SMG 外港', JSON.stringify(w.sources));
     `,
   },
+  {
+    name: 'RAIN-TILE weather.jsx renders live rate + its source (mixed providers)',
+    target: 'pages/weather.jsx',
+    deps: ['icons.jsx', 'data.jsx', 'components.jsx'],
+    body: `
+      window.WEATHER = {
+        available: true, source: 'SMG', station: '外港', stale: false,
+        temp: 28, humidity: 80, pressure: 1005, visibility: 8,
+        wind: { speed: 3, degree: 90, dir: 'E', gust: 5 },
+        rain: { day: 40, now: 2.5, hour: null },
+        lightning: { count: 0, nearest: null },
+        typhoon: null,
+        fetchedAt: new Date().toISOString(),
+        forecast: [],
+        sources: { rainfall_24h_mm: 'SMG 外港', rainfall_rate_mmh: 'Open-Meteo (22.19,113.55)' },
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(WeatherPage, { showToast: () => {}, onRefresh: () => Promise.resolve() })));
+      await settle();
+      const text = container.textContent;
+      A('RAIN-TILE live-rate line shows 即時 2.5 mm/h', text.indexOf('即時 2.5 mm/h') !== -1, text.slice(0, 400));
+      A('RAIN-TILE 24h hero shows 40 mm/24h', text.indexOf('40') !== -1 && text.indexOf('mm/24h') !== -1, '');
+      A('RAIN-TILE rate source label renders (was: only 24h source rendered)', text.indexOf('Open-Meteo (22.19,113.55)') !== -1, text.slice(0, 400));
+    `,
+  },
+  {
+    name: 'RAIN-TILE weather.jsx null rate shows honest no-source fallback',
+    target: 'pages/weather.jsx',
+    deps: ['icons.jsx', 'data.jsx', 'components.jsx'],
+    body: `
+      window.WEATHER = {
+        available: true, source: 'SMG', station: '外港', stale: false,
+        temp: 28, humidity: 80, pressure: 1005, visibility: 8,
+        wind: { speed: 3, degree: 90, dir: 'E', gust: 5 },
+        rain: { day: 40, now: null, hour: null },
+        lightning: { count: 0, nearest: null },
+        typhoon: null,
+        fetchedAt: new Date().toISOString(),
+        forecast: [],
+        sources: { rainfall_24h_mm: 'SMG 外港' },
+      };
+      ReactDOM.flushSync(() => root.render(React.createElement(WeatherPage, { showToast: () => {}, onRefresh: () => Promise.resolve() })));
+      await settle();
+      const text = container.textContent;
+      A('RAIN-TILE null rate shows 無即時雨量資料來源 fallback', text.indexOf('無即時雨量資料來源') !== -1, '');
+      A('RAIN-TILE 24h source still renders when only daily supplied', text.indexOf('SMG 外港') !== -1, '');
+    `,
+  },
 ];

@@ -635,34 +635,36 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
-            {/* WHA-M6 fix (2026-07-20, known-unfixable-as-scoped): the
-                backend's CurrentWeather only ever exposes rainfall_24h_mm —
-                no 10-min or 1-hour live rainfall field exists (rain.now/hour
-                are hardcoded null in api.jsx, see API contract notes), so
-                this hero used to permanently show "—" for a metric that can
-                never populate. Promoted the field that DOES populate (24h
-                cumulative) into the hero position instead of fabricating or
-                forever displaying a dead placeholder; the live-rate line
-                below now honestly states no source exists rather than
-                silently showing blank "mm/h" forever. */}
+            {/* Rain tile — 2026-08-06 rainfall reconciliation (supersedes the
+                old WHA-M6 note): the backend now exposes TWO honest fields.
+                The hero shows rain.day — a GENUINE 24h daily total (SMG Type-5
+                / Open-Meteo daily=precipitation_sum), no longer the mislabeled
+                hourly value it used to hold. The live-rate line below binds
+                rain.now — the instantaneous mm/h (SMG Type-3 / Open-Meteo
+                current precip / HKO past-hour). Each field carries its own
+                source; MultiSourceChip labels them, collapsing to one row when
+                both come from the same provider. "無即時雨量資料來源" is now the
+                genuine rain.now==null fallback, not a permanent state. */}
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
               <span className="text-4xl font-mono font-bold tnum text-ink-primary">
                 {rain.day != null ? rain.day : '—'}
               </span>
               <span className="text-ink-muted text-sm">mm/24h</span>
             </div>
-            {/* rainColorClass's thresholds (30 / 10) are rainstorm-signal
-                INTENSITY bands in mm/h, so they belong on this live-rate line
-                — not on the 24h cumulative above, where 30mm is unremarkable
-                and would paint a calm day critical-red. Promoting the 24h
-                total into the hero orphaned this helper entirely, leaving the
-                rain tile the only uncoloured hero next to a tempColorClass'd
-                temperature. Muted (not the helper's null branch) when there is
-                no source, so "no data" never reads as a severity. */}
+            {/* rainColorClass's 30/10 thresholds are rainstorm-signal INTENSITY
+                bands in mm/h, so they color the live-rate line below (which now
+                populates from rainfall_rate_mmh) — NOT the 24h cumulative hero,
+                where 30mm is unremarkable and would paint a calm day red. The
+                hero stays neutral (text-ink-primary); the rate line is muted
+                only in its rain.now==null fallback so "no data" never reads as
+                a severity. */}
             <div className={`text-xs mt-1 font-mono tnum whitespace-nowrap ${rain.now != null ? rainColorClass(rain.now) : 'text-ink-muted'}`}>
               {rain.now != null ? `即時 ${rain.now} mm/h` : '無即時雨量資料來源'}
             </div>
-            <SourceChip label={sources.rainfall_24h_mm}/>
+            <MultiSourceChip items={[
+              { label: '24h', sourceLabel: sources.rainfall_24h_mm },
+              { label: '即時', sourceLabel: sources.rainfall_rate_mmh },
+            ]}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Zap size={10}/> 雷擊</div>
