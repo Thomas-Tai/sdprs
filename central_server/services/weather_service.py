@@ -27,6 +27,15 @@ from ..timeutil import utcnow
 logger = logging.getLogger("weather_service")
 
 SMG_XML_URL = "https://xml.smg.gov.mo/c_actualweather.xml"
+# SMG emits multiple <Rainfall> elements per station, distinguished by
+# <Type>: 3 = current-hour rate (mm/h), 5 = daily total since local midnight
+# (mm). Type 4 is an intermediate accumulation we don't surface. Verified
+# against the live feed 2026-08-06 (see
+# docs/superpowers/specs/2026-08-06-weather-rainfall-reconcile-design.md).
+# Single source of truth for the Type->field mapping — re-validate during a
+# rain event and adjust here if SMG's Type semantics ever differ.
+SMG_RAINFALL_TYPE_RATE = "3"    # -> rainfall_rate_mmh (live mm/h)
+SMG_RAINFALL_TYPE_DAILY = "5"   # -> rainfall_24h_mm   (daily total)
 CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 HKO_RHRREAD_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
@@ -231,11 +240,25 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
 
                 pressure_hpa = _get_optional_plain_float('MeanSeaLevelPressure/Value')
 
-                # Rainfall - SMG usually emits multiple <Rainfall> elements
-                # differentiated by <Type> (3=current hour, 5=daily total).
-                # findtext returns the FIRST match; Type 3 (hourly) is the
-                # instantaneous rate suitable for the dashboard's mm/h field.
-                rainfall_hourly = _get_float('Rainfall/Value')
+                # Rainfall: SMG emits several <Rainfall> elements per station,
+                # differentiated by <Type>. Select explicitly rather than
+                # taking findtext's first match — Type 3 is the live rate
+                # (mm/h), Type 5 is the daily total (mm). See the
+                # SMG_RAINFALL_TYPE_* constants.
+                def _get_rainfall_by_type(type_code: str) -> Optional[float]:
+                    for rf in station.findall('Rainfall'):
+                        if (rf.findtext('Type') or '').strip() == type_code:
+                            val = rf.findtext('Value')
+                            if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
+                                return None
+                            try:
+                                return float(val)
+                            except (TypeError, ValueError):
+                                return None
+                    return None
+
+                rainfall_rate = _get_rainfall_by_type(SMG_RAINFALL_TYPE_RATE)    # mm/h (Type 3)
+                rainfall_daily = _get_rainfall_by_type(SMG_RAINFALL_TYPE_DAILY)  # mm   (Type 5)
 
                 # WindDirection has <Value>SW</Value> (compass letters) plus
                 # <Degree>230</Degree> (numeric). We need the numeric.
@@ -267,8 +290,9 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     sources['wind_direction_deg'] = station_label
                 if gust_ms is not None:
                     sources['gust_speed_ms'] = station_label
-                if station.find('Rainfall/Value') is not None and \
-                        (station.findtext('Rainfall/Value') or '').strip() not in ('', '-', 'X', 'x', '-99'):
+                if rainfall_rate is not None:
+                    sources['rainfall_rate_mmh'] = station_label
+                if rainfall_daily is not None:
                     sources['rainfall_24h_mm'] = station_label
                 if pressure_hpa is not None:
                     sources['pressure_hpa'] = station_label
@@ -277,7 +301,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     obs_time=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
                     wind_speed_ms=wind_ms,
                     wind_direction_deg=wind_dir,
-                    rainfall_24h_mm=rainfall_hourly,
+                    rainfall_24h_mm=rainfall_daily if rainfall_daily is not None else 0.0,
                     temperature_c=temp_c,
                     humidity_pct=humidity,
                     is_stale=False,
@@ -288,6 +312,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     sources=sources,
                     pressure_hpa=pressure_hpa,
                     visibility_km=None,  # SMG XML has no visibility data
+                    rainfall_rate_mmh=rainfall_rate,
                 )
 
         logger.warning(f"SMG XML: station '{station_name}' not found")

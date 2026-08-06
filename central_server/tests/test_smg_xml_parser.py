@@ -53,6 +53,8 @@ SMG_XML_FIXTURE = """<?xml version='1.0' encoding='utf-8'?>
         <WindGust><Value>17</Value></WindGust>
         <WindDirection><Value>S</Value><Degree>168</Degree></WindDirection>
         <Rainfall><Type>3</Type><Value>2.5</Value></Rainfall>
+        <Rainfall><Type>4</Type><Value>6.0</Value></Rainfall>
+        <Rainfall><Type>5</Type><Value>8.0</Value></Rainfall>
         <MeanSeaLevelPressure><Value>1005.3</Value></MeanSeaLevelPressure>
       </station>
       <station code="MN">
@@ -115,8 +117,10 @@ def test_smg_parses_station_readings_from_value_child_elements():
     assert cur.temperature_c == 29.0, f"expected 29.0°C, got {cur.temperature_c}"
     # Humidity 83
     assert cur.humidity_pct == 83, f"expected 83%, got {cur.humidity_pct}"
-    # Rainfall (Type 3 == current hour): 2.5mm
-    assert cur.rainfall_24h_mm == 2.5, f"expected 2.5mm, got {cur.rainfall_24h_mm}"
+    # Rainfall: Type 3 -> live rate (mm/h), Type 5 -> daily total (mm).
+    # Type 4 (6.0) must not leak into either.
+    assert cur.rainfall_rate_mmh == 2.5, f"expected Type-3 rate 2.5 mm/h, got {cur.rainfall_rate_mmh}"
+    assert cur.rainfall_24h_mm == 8.0, f"expected Type-5 daily 8.0 mm, got {cur.rainfall_24h_mm}"
     # Attribution
     assert cur.source == "SMG"
     assert cur.station_name == "外港"
@@ -189,6 +193,30 @@ def test_smg_visibility_always_none():
     assert cur is not None
     assert cur.visibility_km is None
     assert 'visibility_km' not in cur.sources
+
+
+def test_smg_rate_from_type3_daily_from_type5_never_type4():
+    """The parser selects <Rainfall> by explicit <Type>: 3->rate, 5->daily.
+    Type 4's value must never appear in either field."""
+    client = _FakeClient(_FakeResponse(200, SMG_XML_FIXTURE))
+    cur = asyncio.run(_fetch_smg_current(client, "外港"))
+    assert cur is not None
+    assert cur.rainfall_rate_mmh == 2.5
+    assert cur.rainfall_24h_mm == 8.0
+    assert cur.rainfall_rate_mmh != 6.0 and cur.rainfall_24h_mm != 6.0  # Type 4 excluded
+    assert cur.sources.get('rainfall_rate_mmh') == "SMG 外港"
+    assert cur.sources.get('rainfall_24h_mm') == "SMG 外港"
+
+
+def test_smg_type3_only_station_labels_rate_not_daily():
+    """A station with only a Type-3 element (大炮台) supplies the live rate
+    (0.0 is a real dry reading) but must NOT label a daily total."""
+    client = _FakeClient(_FakeResponse(200, SMG_XML_FIXTURE))
+    cur = asyncio.run(_fetch_smg_current(client, "大炮台"))
+    assert cur is not None
+    assert cur.rainfall_rate_mmh == 0.0
+    assert 'rainfall_rate_mmh' in cur.sources
+    assert 'rainfall_24h_mm' not in cur.sources
 
 
 if __name__ == "__main__":
