@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -79,4 +80,44 @@ def test_verify_api_key_pernode_only_when_shared_unset(monkeypatch):
         assert req.state.edge_auth_node == "glass_optional_1"
         with pytest.raises(Exception):     # HTTPException 401 — shared path disabled
             await auth_mod.verify_api_key(request=types.SimpleNamespace(state=types.SimpleNamespace()), api_key="not-a-real-key")
+    asyncio.run(go())
+
+
+def test_verify_api_key_or_session_pernode_only_when_shared_unset(monkeypatch):
+    # Direct coverage for verify_api_key_or_session — the function this task
+    # actually changed (the L285 guard). With EDGE_API_KEY empty, ONLY a
+    # provisioned per-node key authenticates; a wrong key with no session
+    # must 401 rather than fall through to the (now-disabled) shared path.
+    database, _ = _fresh_db(monkeypatch)
+    from central_server import auth as auth_mod
+    from central_server.config import get_settings
+    monkeypatch.setattr(get_settings(), "EDGE_API_KEY", "", raising=False)
+    key = database.provision_edge_node_key("glass_optional_2")["api_key"]
+    import asyncio
+    req = types.SimpleNamespace(state=types.SimpleNamespace(), session={})
+
+    async def go():
+        assert await auth_mod.verify_api_key_or_session(request=req, api_key=key) == key
+        assert req.state.edge_auth_node == "glass_optional_2"
+        req2 = types.SimpleNamespace(state=types.SimpleNamespace(), session={})
+        with pytest.raises(HTTPException) as ei:
+            await auth_mod.verify_api_key_or_session(request=req2, api_key="not-a-real-key")
+        assert ei.value.status_code == 401
+    asyncio.run(go())
+
+
+def test_verify_api_key_or_session_shared_key_still_works_when_set(monkeypatch):
+    # Regression for the TRUE branch of the guard this task changed: a SET
+    # shared key must still authenticate on verify_api_key_or_session, and
+    # a shared-key match stays unbound (edge_auth_node is None).
+    database, _ = _fresh_db(monkeypatch)   # harmless; not needed for this path
+    from central_server import auth as auth_mod
+    from central_server.config import get_settings
+    monkeypatch.setattr(get_settings(), "EDGE_API_KEY", _STRONG_EDGE, raising=False)
+    import asyncio
+    req = types.SimpleNamespace(state=types.SimpleNamespace(), session={})
+
+    async def go():
+        assert await auth_mod.verify_api_key_or_session(request=req, api_key=_STRONG_EDGE) == _STRONG_EDGE
+        assert req.state.edge_auth_node is None
     asyncio.run(go())
