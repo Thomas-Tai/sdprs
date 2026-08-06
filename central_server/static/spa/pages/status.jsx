@@ -215,6 +215,74 @@ const StreamHealthCell = ({ node, health: healthProp }) => {
   );
 };
 
+// Track 1 per-node edge API keys: row-level provision/rotate/clear controls.
+// Gated on node.hasKey (camelCase; api.jsx's mapNode reads it from
+// `n.has_key ?? null`), NOT on node.type — mapNode collapses every backend
+// node_type other than 'pump'/'webcam' (including 'glass') into the SPA's
+// 'camera', so there is no literal type string to key off. hasKey === null
+// means the concept doesn't apply (webcam rows use their own existing
+// createWebcamClient/revokeWebcamKey controls above) and this renders nothing.
+//
+// Mirrors SnoozeRowButton/StreamRowButton: an isolated component with its own
+// busy/in-flight guard so a slow request only latches this row, not the whole
+// table. Provision and rotate are the same call (provisionNodeKey is a
+// provision-or-rotate 201) — the label is the only difference. The raw key is
+// never held in this component's state; it is handed straight up to the
+// page's onRevealed callback, which opens the one-time reveal modal (the
+// component that actually owns "shown once" discipline).
+const NodeKeyRowButtons = ({ node, onRevealed, onRequestClear, onError }) => {
+  const [busy, setBusy] = React.useState(false);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  const inFlightRef = React.useRef(false);
+  if (node.hasKey == null) return null; // webcam rows: concept doesn't apply
+  const provisionOrRotate = () => {
+    if (inFlightRef.current || busy) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.provisionNodeKey)) {
+      onError && onError(new Error('暫時無法連線後端，請稍後再試'));
+      return;
+    }
+    inFlightRef.current = true;
+    setBusy(true);
+    Promise.resolve(api.provisionNodeKey(node.id))
+      .then(data => {
+        if (!mountedRef.current) return;
+        onRevealed(node, (data || {}).api_key);
+      })
+      .catch(err => onError && onError(err))
+      .finally(() => { inFlightRef.current = false; if (mountedRef.current) setBusy(false); });
+  };
+  const label = node.hasKey ? '重設金鑰' : '設定金鑰';
+  return (
+    <>
+      <button
+        title={label}
+        disabled={busy}
+        onClick={e => { e.stopPropagation(); provisionOrRotate(); }}
+        // Mirrors the webcam 🔑/刪除 buttons: without stopping the keydown
+        // here, Enter/Space on the focused button would also bubble into the
+        // row's own keyboard handling and select the node instead of (or as
+        // well as) activating this button.
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+        className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-info hover:bg-sev-info/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {busy ? '處理中...' : label}
+      </button>
+      {node.hasKey && (
+        <button
+          title="清除金鑰"
+          onClick={e => { e.stopPropagation(); onRequestClear(node); }}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors"
+        >
+          清除金鑰
+        </button>
+      )}
+    </>
+  );
+};
+
 const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump | webcam
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
@@ -304,6 +372,15 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // repaints behind it on a 24/7 wall display, and cannot be styled.
   const [revokeTarget, setRevokeTarget] = useState_p(null); // { clientId, name } | null
   const [revokeBusy, setRevokeBusy] = useState_p(false);
+  // Track 1 per-node edge API keys: a NEW parallel reveal state — deliberately
+  // NOT sharing revokedKey above, whose copy talks about updating a webcam
+  // 用戶端's client-side config (wrong voice for a glass/pump edge node).
+  // { nodeId, name, apiKey } | null.
+  const [nodeKeyRevealed, setNodeKeyRevealed] = useState_p(null);
+  // Clear-key confirmation — same in-app modal pattern as deleteTarget/
+  // revokeTarget above, not native confirm(). { nodeId, name } | null.
+  const [clearKeyTarget, setClearKeyTarget] = useState_p(null);
+  const [clearKeyBusy, setClearKeyBusy] = useState_p(false);
   // What to call the client in operator-facing copy. Never used as an id.
   const clientLabel = (t) => (t && t.clientName) || (t && t.clientId) || '';
   const [deleteBusy, setDeleteBusy] = useState_p(false);
@@ -325,13 +402,15 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
     const onKey = (e) => {
       if (e.key !== 'Escape') return;
       if (revokeTarget) { if (!revokeBusy) setRevokeTarget(null); return; }
+      if (clearKeyTarget) { if (!clearKeyBusy) setClearKeyTarget(null); return; }
       if (deleteTarget) { if (!deleteBusy) setDeleteTarget(null); return; }
       if (showAddModal) { if (!createdKey && !addBusy) setShowAddModal(false); return; }
       if (revokedKey) { setRevokedKey(null); return; }
+      if (nodeKeyRevealed) { setNodeKeyRevealed(null); return; }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [revokeTarget, revokeBusy, deleteTarget, deleteBusy, showAddModal, createdKey, addBusy, revokedKey]);
+  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
   const confirmDeleteWebcam = () => {
     if (deleteBusy || !deleteTarget) return;
     // G1 guard (same as SnoozeRow/StreamRow): without the API bundle the
@@ -393,6 +472,31 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
       })
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '撤銷失敗: ' + window.actionErrorText(err) }); })
       .finally(() => { if (mountedRef.current) setRevokeBusy(false); });
+  };
+  // Track 1 per-node edge API keys: clear-key confirmation — mirrors
+  // confirmDeleteWebcam/confirmRevoke above. 404 (already cleared) is treated
+  // like deleteWebcamClient's 404 handling: the operator's intent (no key on
+  // this node) is already satisfied, so refresh like a success rather than
+  // erroring on a double-click or a peer's earlier clear.
+  const confirmClearKey = () => {
+    if (clearKeyBusy || !clearKeyTarget) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.clearNodeKey)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    const target = clearKeyTarget;
+    setClearKeyBusy(true);
+    Promise.resolve(api.clearNodeKey(target.nodeId))
+      .catch(err => { if (err && err.status === 404) return; throw err; })
+      .then(() => {
+        if (!mountedRef.current) return;
+        setClearKeyTarget(null);
+        setToast({ tone: 'success', msg: `${target.name || target.nodeId} 的 API Key 已清除` });
+        return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
+      })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '清除失敗: ' + window.actionErrorText(err) }); })
+      .finally(() => { if (mountedRef.current) setClearKeyBusy(false); });
   };
   // Unique locations from the current node list — filter values are derived
   // so a new deployment doesn't need a config change.
@@ -656,6 +760,14 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                           return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                         }}
                         onError={err => setToast({ tone: 'error', msg: '靜音失敗: ' + window.actionErrorText(err) })}/>
+                      {/* Track 1 per-node edge API keys: gated on n.hasKey
+                          (null for webcam rows, which keep only their
+                          existing 🔑/刪除 controls below), never on n.type. */}
+                      <NodeKeyRowButtons
+                        node={n}
+                        onRevealed={(node, apiKey) => setNodeKeyRevealed({ nodeId: node.id, name: node.name, apiKey })}
+                        onRequestClear={(node) => setClearKeyTarget({ nodeId: node.id, name: node.name })}
+                        onError={err => setToast({ tone: 'error', msg: '設定金鑰失敗: ' + window.actionErrorText(err) })}/>
                       {n.type === 'webcam' && (
                         <button
                           title={n.clientId
@@ -892,6 +1004,70 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 className="flex-1 py-2 rounded-lg bg-sev-warn text-white text-sm font-bold disabled:opacity-50"
               >
                 {revokeBusy ? '撤銷中...' : '確定撤銷'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Track 1 per-node edge API keys: one-time reveal after provision/
+          rotate. A NEW modal (not revokedKey above, whose copy is written for
+          a webcam client's local config, not a glass/pump edge node) but the
+          same "shown once, copy-able, stays up until explicitly dismissed"
+          contract as the create/revoke panels above. Closing acknowledges the
+          reveal and refreshes the node list so hasKey flips to true. */}
+      {nodeKeyRevealed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="節點 API Key">
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">節點 API Key</h3>
+            <p className="text-xs text-sev-warn font-bold mb-2">⚠ 此金鑰只顯示一次，請立即複製</p>
+            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
+              <code className="text-xs text-ink-primary break-all select-all flex-1">{nodeKeyRevealed.apiKey}</code>
+              <button
+                onClick={() => copyToClipboard(nodeKeyRevealed.apiKey).then(ok =>
+                  setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
+                className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
+              >
+                複製
+              </button>
+            </div>
+            <p className="text-xs text-ink-muted mb-3">節點: {nodeKeyRevealed.name || nodeKeyRevealed.nodeId}</p>
+            <button
+              onClick={() => { setNodeKeyRevealed(null); onRefresh && onRefresh(); }}
+              className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
+            >
+              關閉
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Track 1 per-node edge API keys: clear-key confirmation — mirrors the
+          delete/revoke modals above. In-app, non-blocking, busy latch,
+          post-success refresh so hasKey flips back to false. */}
+      {clearKeyTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="清除 API Key"
+          onClick={() => { if (!clearKeyBusy) setClearKeyTarget(null); }}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">清除 API Key</h3>
+            <p className="text-xs text-ink-secondary mb-2">
+              確定要清除 <span className="text-ink-primary font-bold">{clearKeyTarget.name || clearKeyTarget.nodeId}</span> 的 API Key？
+            </p>
+            <p className="text-xs text-sev-warn font-bold mb-4">⚠ 此節點將立即無法使用該金鑰連線，需重新設定金鑰才能恢復。</p>
+            <div className="flex gap-2">
+              <button
+                disabled={clearKeyBusy}
+                onClick={() => setClearKeyTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={clearKeyBusy}
+                onClick={confirmClearKey}
+                className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
+              >
+                {clearKeyBusy ? '清除中...' : '確定清除'}
               </button>
             </div>
           </div>
