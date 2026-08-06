@@ -300,7 +300,14 @@ async def upload_video(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Alert {alert_id} not found"
         )
-    
+
+    # Enforce per-node key binding: a key bound to a specific node cannot
+    # upload video into another node's alert. No-op when edge_auth_node is
+    # None (shared key or session auth). Checked AFTER the 404 (a
+    # nonexistent alert must still 404, not leak a 403) but BEFORE the
+    # storage/streaming work below.
+    verify_node_binding(request, event["node_id"])
+
     if event["status"] != "PENDING_VIDEO":
         logger.warning(f"Alert {alert_id} has status {event['status']}, expected PENDING_VIDEO")
         raise HTTPException(

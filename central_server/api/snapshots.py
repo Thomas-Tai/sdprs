@@ -327,9 +327,19 @@ async def clear_snapshot(
 ):
     """
     Clear the snapshot for a node.
-    
+
     - **node_id**: The edge node identifier
     """
+    # Enforce per-node key binding: a key bound to a specific node cannot
+    # clear a different node's snapshot. No-op when edge_auth_node is None
+    # (shared key or session auth). Binding-only (mirrors the ingest
+    # preamble's verify_node_binding call, not its verify_node_id call --
+    # this handler never builds a filesystem path from node_id, so the
+    # allowlist/path-traversal defense verify_node_id exists for doesn't
+    # apply here; adding it would be new, out-of-scope allowlist behavior
+    # rather than the binding-gap fix this endpoint needs).
+    verify_node_binding(request, node_id)
+
     snapshots: Dict[str, Dict[str, Any]] = request.app.state.latest_snapshots
     
     if node_id in snapshots:

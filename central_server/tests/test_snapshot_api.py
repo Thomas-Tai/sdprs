@@ -465,5 +465,71 @@ class TestClearSnapshot:
         assert response.status_code == 204
 
 
+class TestClearSnapshotNodeBinding:
+    """Security fix (2026-08-06): DELETE /edge/{node_id}/snapshot accepts
+    per-node edge API keys (Depends(verify_api_key)) but, before this fix,
+    never called verify_node_binding -- so a key provisioned for node X
+    could clear node Y's snapshot. Covers the three binding outcomes:
+    cross-node -> 403, own-node -> not 403, shared/unbound key -> not 403.
+    """
+
+    def test_cross_node_key_forbidden(self, client, api_headers):
+        """A per-node key bound to a DIFFERENT node than the path node_id
+        must be rejected with 403 (this is the RED assertion pre-fix)."""
+        import central_server.database as db_module
+
+        node_id = "glass_node_01"
+        client.post(
+            f"/api/edge/{node_id}/snapshot",
+            content=FAKE_JPEG,
+            headers={**api_headers, "Content-Type": "image/jpeg"}
+        )
+
+        # Per-node key provisioned for a DIFFERENT node.
+        out = db_module.provision_edge_node_key("glass_node_99")
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code == 403
+
+    def test_own_node_key_allowed(self, client, api_headers):
+        """A per-node key bound to the SAME node_id as the path must proceed
+        (not be rejected as a binding mismatch)."""
+        import central_server.database as db_module
+
+        node_id = "glass_node_01"
+        client.post(
+            f"/api/edge/{node_id}/snapshot",
+            content=FAKE_JPEG,
+            headers={**api_headers, "Content-Type": "image/jpeg"}
+        )
+
+        # Per-node key provisioned for the SAME node.
+        out = db_module.provision_edge_node_key(node_id)
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code != 403
+        assert response.status_code == 204
+
+    def test_shared_key_allowed_any_node(self, client, api_headers):
+        """The shared EDGE_API_KEY leaves edge_auth_node None (grace-period /
+        unbound) -- verify_node_binding must remain a no-op for it, or every
+        node still on the shared key would regress and lose the ability to
+        clear its own snapshot."""
+        node_id = "glass_node_01"
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers=api_headers  # shared key -> edge_auth_node is None
+        )
+
+        assert response.status_code != 403
+        assert response.status_code == 204
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
