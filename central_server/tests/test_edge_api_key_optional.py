@@ -121,3 +121,29 @@ def test_verify_api_key_or_session_shared_key_still_works_when_set(monkeypatch):
         assert await auth_mod.verify_api_key_or_session(request=req, api_key=_STRONG_EDGE) == _STRONG_EDGE
         assert req.state.edge_auth_node is None
     asyncio.run(go())
+
+
+def test_real_settings_boots_per_node_only_when_edge_api_key_unset(monkeypatch):
+    # Trip-wire for config.py's `EDGE_API_KEY: str = ""` default (the
+    # load-bearing line noted in the field's own comment). Every OTHER test in
+    # this file stubs a SimpleNamespace, so none exercises the real pydantic
+    # Settings class with EDGE_API_KEY genuinely absent from the environment.
+    # If someone deletes that default, pydantic-settings makes the field
+    # required and `Settings()` raises ValidationError HERE — proving the
+    # per-node-only boot path (unset shared key) stays wired.
+    from central_server.config import Settings, validate_settings, PYDANTIC_AVAILABLE
+    # Genuinely unset the shared key (the module sets a default at import time).
+    monkeypatch.delenv("EDGE_API_KEY", raising=False)
+    # The three boot-required secrets must be present and strong.
+    monkeypatch.setenv("DASHBOARD_USER", "operator")
+    monkeypatch.setenv("DASHBOARD_PASS", "s3cure-pass-9")
+    monkeypatch.setenv("SECRET_KEY", _STRONG_SECRET)
+    # Construct the REAL Settings. For pydantic, _env_file=None isolates the
+    # test from any on-disk .env so EDGE_API_KEY can't be reintroduced by a
+    # file; the dataclass fallback reads os.environ directly.
+    settings = Settings(_env_file=None) if PYDANTIC_AVAILABLE else Settings()
+    # The default kicked in (no ValidationError) => empty shared key.
+    assert settings.EDGE_API_KEY == ""
+    # And a real Settings with the shared key unset passes validation
+    # (per-node-only mode) end to end.
+    assert validate_settings(settings) is True
