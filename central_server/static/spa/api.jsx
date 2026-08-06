@@ -516,16 +516,17 @@
         degree: current.wind_direction_deg != null ? current.wind_direction_deg : null,
       },
       rain: {
-        // Backend only exposes rainfall_24h_mm (see services/weather_service.py
-        // CurrentWeather). There are NO sub-24h buckets (no rainfall_10min_mm,
-        // no rainfall_1h_mm). Deriving `now` as rainfall_24h_mm / 24 would
-        // fabricate an instantaneous rate from a daily total — dishonest during
-        // a typhoon where rain is anything but uniform. Keep now/hour null.
-        // The weather.jsx display MUST render null as "—" / "N/A" (honest
-        // labeling), never substitute the 24h value under a different label.
-        // TODO(dashboard-audit-2026-07-15): bind now/hour only when backend
-        // exposes true rainfall_10min_mm / rainfall_1h_mm fields.
-        now: null,
+        // 2026-08-06 rainfall reconciliation: the backend now exposes an
+        // honest live rate AND a genuine daily total (previously the single
+        // rainfall_24h_mm field secretly held an hourly value). rainfall_rate_mmh
+        // is the instantaneous mm/h (SMG Type-3 / Open-Meteo current precip /
+        // HKO past-hour); rainfall_24h_mm is the true daily accumulation
+        // (SMG Type-5 / Open-Meteo daily=precipitation_sum). Keep ONE decimal
+        // on the rate (like visibility below) so light drizzle — 0.4 mm/h —
+        // doesn't round to a misleading "0". `hour` stays null: there is no
+        // separate 1-hour bucket, and the live rate already covers "now".
+        // null still renders as "—" / the no-source line per source-chip rules.
+        now: current.rainfall_rate_mmh != null ? Math.round(current.rainfall_rate_mmh * 10) / 10 : null,
         hour: null,
         day: roundOrNull(current.rainfall_24h_mm),
       },
