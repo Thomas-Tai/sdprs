@@ -402,6 +402,12 @@ async def _fetch_openmeteo_current(
             # purpose and buffer size.
             "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,pressure_msl",
             "hourly": "visibility",
+            # Daily precipitation total (mm) for the genuine 24h rainfall
+            # figure — summed over the UTC day (timezone=UTC below). The
+            # `current.precipitation` value is the live rate; this is the
+            # honest daily accumulation, replacing the old "hourly-as-24h"
+            # approximation.
+            "daily": "precipitation_sum",
             "forecast_hours": 1,
             "wind_speed_unit": "ms",
             # API-F1 trap (2026-07-20): this is the exact bug just fixed in the
@@ -425,9 +431,27 @@ async def _fetch_openmeteo_current(
         if not cur:
             return None
 
-        # Open-Meteo precipitation is hourly; approximate 24h by multiplying
-        # For display, we use the hourly value as "24h" since it's the available data
-        precip_current = float(cur.get("precipitation", 0) or 0)
+        # Open-Meteo `current.precipitation` is the live rate (mm/h). The
+        # daily=precipitation_sum block carries the genuine 24h total.
+        precip_raw = cur.get("precipitation")
+        rainfall_rate = None
+        if precip_raw is not None:
+            try:
+                rainfall_rate = float(precip_raw)
+            except (TypeError, ValueError):
+                rainfall_rate = None
+
+        # Daily total (mm): daily.precipitation_sum[0] is today's accumulation.
+        # Missing/empty => None so the merge/UI renders '—' rather than a
+        # fabricated 0.
+        daily = data.get("daily", {})
+        precip_sum_arr = daily.get("precipitation_sum", []) if isinstance(daily, dict) else []
+        rainfall_daily = None
+        if precip_sum_arr:
+            try:
+                rainfall_daily = float(precip_sum_arr[0])
+            except (TypeError, ValueError):
+                rainfall_daily = None
 
         # Wind gusts — Open-Meteo returns wind_gusts_10m in the same unit as
         # wind_speed_unit (m/s here). May be absent in some response shapes;
@@ -451,7 +475,9 @@ async def _fetch_openmeteo_current(
             sources['wind_direction_deg'] = station_label
         if gust_ms is not None:
             sources['gust_speed_ms'] = station_label
-        if cur.get("precipitation") is not None:
+        if rainfall_rate is not None:
+            sources['rainfall_rate_mmh'] = station_label
+        if rainfall_daily is not None:
             sources['rainfall_24h_mm'] = station_label
 
         # Pressure (Option D): pressure_msl arrives in the same current
@@ -491,7 +517,7 @@ async def _fetch_openmeteo_current(
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
             wind_direction_deg=int(cur.get("wind_direction_10m", 0) or 0),
-            rainfall_24h_mm=precip_current,
+            rainfall_24h_mm=rainfall_daily if rainfall_daily is not None else 0.0,
             temperature_c=float(cur.get("temperature_2m", 0) or 0),
             humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
             is_stale=False,
@@ -502,6 +528,7 @@ async def _fetch_openmeteo_current(
             sources=sources,
             pressure_hpa=pressure_hpa,
             visibility_km=visibility_km,
+            rainfall_rate_mmh=rainfall_rate,
         )
     except Exception as e:
         logger.warning(f"Open-Meteo fetch failed: {e}")
