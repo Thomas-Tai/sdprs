@@ -30,6 +30,29 @@ function copyToClipboard(text) {
   return Promise.resolve(fallbackCopyText(text));
 }
 
+// One-time API-key reveal field — the ⚠ warning line plus the copy-able
+// <code> + 複製 button shared verbatim by all three "shown once" reveal modals
+// (webcam create, webcam revoke, per-node edge key). Only the warning text and
+// the key value differ per context, so both are props; the copy behavior
+// (async Clipboard with plain-http fallback, then a success/failure toast) is
+// identical everywhere. `onToast` keeps this presentational — it forwards the
+// same { tone, msg } shape StatusPage's setToast expects.
+const OneTimeKeyField = ({ apiKey, warning, onToast }) => (
+  <>
+    <p className="text-xs text-sev-warn font-bold mb-2">{warning}</p>
+    <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
+      <code className="text-xs text-ink-primary break-all select-all flex-1">{apiKey}</code>
+      <button
+        onClick={() => copyToClipboard(apiKey).then(ok =>
+          onToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
+        className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
+      >
+        複製
+      </button>
+    </div>
+  </>
+);
+
 // Per-row snooze control. Local `busy` state guards against double-fire on
 // slow VPN; onKeyDown must stopPropagation so Enter/Space on the focused
 // button doesn't also bubble to the surrounding row's keyboard handler
@@ -877,17 +900,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               </>
             ) : (
               <>
-                <p className="text-xs text-sev-warn font-bold mb-2">⚠ API Key 僅顯示一次，請立即複製</p>
-                <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
-                  <code className="text-xs text-ink-primary break-all select-all flex-1">{createdKey.api_key}</code>
-                  <button
-                    onClick={() => copyToClipboard(createdKey.api_key).then(ok =>
-                      setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
-                    className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
-                  >
-                    複製
-                  </button>
-                </div>
+                <OneTimeKeyField apiKey={createdKey.api_key} warning="⚠ API Key 僅顯示一次，請立即複製" onToast={setToast} />
                 <p className="text-xs text-ink-muted mb-3">Node ID: {createdKey.node_id}</p>
                 <button
                   onClick={() => { setShowAddModal(false); onRefresh && onRefresh(); }}
@@ -909,17 +922,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           role="dialog" aria-modal="true" aria-label="API Key 已重新產生">
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">API Key 已重新產生</h3>
-            <p className="text-xs text-sev-warn font-bold mb-2">⚠ 新 Key 僅顯示一次，請立即複製，並更新 {revokedKey.name || revokedKey.nodeId} 的用戶端設定</p>
-            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
-              <code className="text-xs text-ink-primary break-all select-all flex-1">{revokedKey.apiKey}</code>
-              <button
-                onClick={() => copyToClipboard(revokedKey.apiKey).then(ok =>
-                  setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
-                className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
-              >
-                複製
-              </button>
-            </div>
+            <OneTimeKeyField apiKey={revokedKey.apiKey} warning={`⚠ 新 Key 僅顯示一次，請立即複製，並更新 ${revokedKey.name || revokedKey.nodeId} 的用戶端設定`} onToast={setToast} />
             <p className="text-xs text-ink-muted mb-3">Node ID: {revokedKey.nodeId}</p>
             <button
               onClick={() => setRevokedKey(null)}
@@ -1021,17 +1024,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           role="dialog" aria-modal="true" aria-label="節點 API Key">
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">節點 API Key</h3>
-            <p className="text-xs text-sev-warn font-bold mb-2">⚠ 此金鑰只顯示一次，請立即複製</p>
-            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
-              <code className="text-xs text-ink-primary break-all select-all flex-1">{nodeKeyRevealed.apiKey}</code>
-              <button
-                onClick={() => copyToClipboard(nodeKeyRevealed.apiKey).then(ok =>
-                  setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
-                className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
-              >
-                複製
-              </button>
-            </div>
+            <OneTimeKeyField apiKey={nodeKeyRevealed.apiKey} warning="⚠ 此金鑰只顯示一次，請立即複製" onToast={setToast} />
             <p className="text-xs text-ink-muted mb-3">節點: {nodeKeyRevealed.name || nodeKeyRevealed.nodeId}</p>
             <button
               onClick={() => { setNodeKeyRevealed(null); onRefresh && onRefresh(); }}
