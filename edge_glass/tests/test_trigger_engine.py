@@ -178,3 +178,13 @@ class TestForceTrigger:
         engine.force_trigger(current_time=BASE + 1.0)
         assert engine._last_visual_trigger_time is None
         assert engine._last_audio_trigger_time is None
+
+
+class TestEventProvenance:
+    """事件來源標記（trigger_source）。"""
+
+    def test_fusion_event_has_trigger_source(self, engine):
+        """相關配對產生的事件其 trigger_source 應為 'fusion'。"""
+        event = engine.evaluate(_visual(), _audio(), current_time=BASE)
+        assert event is not None
+        assert event.trigger_source == "fusion"

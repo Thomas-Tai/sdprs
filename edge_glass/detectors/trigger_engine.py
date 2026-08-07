@@ -44,6 +44,7 @@ class Event:
     audio_db_peak: float = 0.0  # 峰值音訊 dB
     audio_freq_peak_hz: float = 0.0  # 峰值頻率 Hz
     is_simulation: bool = False  # 是否為模擬事件
+    trigger_source: str = "fusion"  # 事件來源："fusion"（視覺 AND 音訊）| "visual_only"（純視覺回退）
 
 
 class TriggerEngine:
