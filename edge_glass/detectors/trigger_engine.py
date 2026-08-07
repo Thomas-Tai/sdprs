@@ -55,17 +55,31 @@ class TriggerEngine:
     冷卻期：防止單一持續事件的警報洪水。
     """
 
-    def __init__(self, config: dict, node_id: str):
+    def __init__(
+        self,
+        config: dict,
+        node_id: str,
+        audio_available: bool = True,
+        solo_confidence_threshold: Optional[float] = None,
+    ):
         """
         Args:
             config: config.yaml 中 "trigger" 區塊的字典，包含：
                 - correlation_window_seconds: float (2)
                 - cooldown_seconds: float (30)
+                - visual_only_fallback: bool (False)
             node_id: 節點 ID
+            audio_available: 本節點是否有可用的音訊串流（False = 純視覺節點）
+            solo_confidence_threshold: 純視覺回退的提高後信心門檻（None = 不啟用）
         """
         self._correlation_window = config.get("correlation_window_seconds", 2)
         self._cooldown_seconds = config.get("cooldown_seconds", 30)
         self._node_id = node_id
+
+        # 單感測器（純視覺）回退設定
+        self._visual_only_fallback = config.get("visual_only_fallback", False)
+        self._audio_available = audio_available
+        self._solo_confidence_threshold = solo_confidence_threshold
 
         # 觸發時間戳
         self._last_visual_trigger_time: Optional[float] = None
@@ -134,14 +148,19 @@ class TriggerEngine:
                 f"delta_db={audio_result.delta_db:.1f}"
             )
 
-        # 檢查兩者是否都在窗口內觸發
-        if not self._check_correlation(current_time):
+        # 檢查融合（Visual AND Audio）或純視覺回退
+        correlated = self._check_correlation(current_time)
+        solo = (not correlated) and self._check_visual_only(visual_result, current_time)
+
+        if not (correlated or solo):
             return None
 
         # 檢查冷卻期
         if not self._check_cooldown(current_time):
             logger.info("Trigger suppressed by cooldown")
             return None
+
+        trigger_source = "fusion" if correlated else "visual_only"
 
         # 產生事件
         event = Event(
@@ -153,15 +172,16 @@ class TriggerEngine:
             audio_db_peak=self._last_audio_db_peak,
             audio_freq_peak_hz=self._last_audio_freq_peak_hz,
             is_simulation=False,
+            trigger_source=trigger_source,
         )
 
         # 更新上次事件時間
         self._last_event_time = current_time
 
-        # 重置觸發時間戳：下一次事件必須由兩個「新鮮」觸發重新配對，
-        # 避免陳舊時間戳殘留造成後續誤觸發。
+        # 重置觸發時間戳與 dwell 區間：下一次事件必須由新鮮觸發重新配對／重新持續。
         self._last_visual_trigger_time = None
         self._last_audio_trigger_time = None
+        self._visual_run_start = None
 
         logger.info(
             f"EVENT TRIGGERED: confidence={event.visual_confidence:.2f}, "
@@ -206,6 +226,33 @@ class TriggerEngine:
             return True
 
         return False
+
+    def _check_visual_only(
+        self, visual_result: Optional["VisualResult"], current_time: float
+    ) -> bool:
+        """
+        純視覺回退判定（不含冷卻期，冷卻期由呼叫端另行檢查）。
+
+        僅在下列全部成立時回傳 True：
+          - 音訊完全無串流（audio_available=False）且 visual_only_fallback 啟用；
+          - 已提供提高後的信心門檻；
+          - 本幀有新鮮視覺觸發（visual_result.triggered）；
+          - dwell：持續觸發區間已達 correlation_window_seconds；
+          - 本幀 confidence >= 提高後的信心門檻。
+        """
+        if self._audio_available or not self._visual_only_fallback:
+            return False
+        if self._solo_confidence_threshold is None:
+            return False
+        if visual_result is None or not visual_result.triggered:
+            return False
+        if self._visual_run_start is None:
+            return False
+        if current_time - self._visual_run_start < self._correlation_window:
+            return False
+        if visual_result.confidence < self._solo_confidence_threshold:
+            return False
+        return True
 
     def _check_cooldown(self, current_time: float) -> bool:
         """
