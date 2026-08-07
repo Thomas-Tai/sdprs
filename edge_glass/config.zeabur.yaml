@@ -43,6 +43,8 @@ audio:
 trigger:
   correlation_window_seconds: 2
   cooldown_seconds: 30
+  visual_only_fallback: false             # 純視覺回退（每節點選用）；音訊無串流時允許相機單獨觸發
+  visual_only_confidence_multiplier: 1.5  # solo 信心門檻 = visual.edge_density_threshold × 此值
 
 thermal:
   fps_reduce_temp: 75

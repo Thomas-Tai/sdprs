@@ -286,11 +286,6 @@ def main():
 
     audio_detector = AudioDetector(config["audio"])
 
-    trigger_engine = TriggerEngine(
-        config["trigger"],
-        node_id=config["node_id"],
-    )
-
     # 確保事件目錄存在
     events_dir = config["events"]["local_backup_dir"]
     max_local_files = int(config["events"].get("max_local_files", 20))
@@ -369,6 +364,18 @@ def main():
     else:
         logger.info("Audio disabled by config; running in visual-only mode")
         audio_stream = None
+
+    # 觸發引擎於音訊初始化之後建立，才能得知 audio_available
+    # （audio_stream is None 即 compute_audio_health 判定 "disabled" 的訊號）。
+    trigger_engine = TriggerEngine(
+        config["trigger"],
+        node_id=config["node_id"],
+        audio_available=(audio_stream is not None),
+        solo_confidence_threshold=(
+            config["visual"]["edge_density_threshold"]
+            * config["trigger"].get("visual_only_confidence_multiplier", 1.5)
+        ),
+    )
 
     # 模擬觸發請求標誌（供 MQTT simulate_trigger 指令設定，主迴圈讀取）
     sim_request = [False]
@@ -530,6 +537,7 @@ def main():
                 "audio_db_peak": event.audio_db_peak,
                 "audio_freq_peak_hz": event.audio_freq_peak_hz,
                 "is_simulation": bool(getattr(event, "is_simulation", False)),
+                "trigger_source": getattr(event, "trigger_source", "fusion"),
             }
 
             if async_encode:
