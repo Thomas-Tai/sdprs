@@ -71,6 +71,9 @@ class TriggerEngine:
         self._last_visual_trigger_time: Optional[float] = None
         self._last_audio_trigger_time: Optional[float] = None
 
+        # 視覺持續觸發區間起點（供純視覺回退的 dwell 判定）
+        self._visual_run_start: Optional[float] = None
+
         # 上次事件時間
         self._last_event_time: float = 0
 
@@ -102,14 +105,22 @@ class TriggerEngine:
         """
         current_time = current_time or time.time()
 
-        # 更新視覺觸發時間
-        if visual_result is not None and visual_result.triggered:
-            self._last_visual_trigger_time = current_time
-            self._last_visual_confidence = visual_result.confidence
-            logger.debug(
-                f"Visual trigger at {current_time:.3f}, "
-                f"confidence={visual_result.confidence:.2f}"
-            )
+        # 更新視覺觸發時間與持續觸發區間（dwell run）
+        if visual_result is not None:
+            if visual_result.triggered:
+                # 開始一段新的持續觸發區間（若尚未開始）；進行中則保持起點不變
+                if self._visual_run_start is None:
+                    self._visual_run_start = current_time
+                self._last_visual_trigger_time = current_time
+                self._last_visual_confidence = visual_result.confidence
+                logger.debug(
+                    f"Visual trigger at {current_time:.3f}, "
+                    f"confidence={visual_result.confidence:.2f}"
+                )
+            else:
+                # triggered=False：裂紋特徵消失，持續區間中斷
+                self._visual_run_start = None
+        # visual_result is None（偵測節流／暫停幀）：保持 dwell 區間不變
 
         # 更新音訊觸發時間
         if audio_result is not None and audio_result.triggered:

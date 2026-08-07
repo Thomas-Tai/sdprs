@@ -188,3 +188,28 @@ class TestEventProvenance:
         event = engine.evaluate(_visual(), _audio(), current_time=BASE)
         assert event is not None
         assert event.trigger_source == "fusion"
+
+
+class TestDwellRunTracking:
+    """視覺持續觸發區間（dwell run）追蹤。"""
+
+    def test_triggered_starts_run_and_start_is_stable(self, engine):
+        """triggered=True 開始區間；後續 triggered 幀不移動起點。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE + 1.0)
+        assert engine._visual_run_start == BASE  # 起點保持不變
+
+    def test_triggered_false_clears_run(self, engine):
+        """triggered=False 中斷區間 → 起點重置為 None。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(_visual(triggered=False), None, current_time=BASE + 0.5)
+        assert engine._visual_run_start is None
+
+    def test_none_visual_leaves_run_unchanged(self, engine):
+        """visual_result=None（節流幀）不改變區間。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(None, None, current_time=BASE + 0.5)
+        assert engine._visual_run_start == BASE
