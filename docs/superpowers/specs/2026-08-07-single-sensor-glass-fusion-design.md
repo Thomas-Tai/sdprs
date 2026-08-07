@@ -28,7 +28,7 @@ Five decisions frame the whole design:
 Therefore the elevated solo bar is simply:
 
 ```
-solo_triggered  ⟺  confidence > edge_density_threshold × visual_only_confidence_multiplier
+solo_triggered  ⟺  confidence ≥ edge_density_threshold × visual_only_confidence_multiplier
 ```
 
 The `TriggerEngine` already receives `visual_result.confidence` every frame, so it can enforce the raised bar **itself** — the `VisualDetector` needs no change — and the bar stays **anchored to the already-tuned threshold** (a multiplier), not a fresh un-calibrated absolute number.
