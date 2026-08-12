@@ -17,6 +17,7 @@ class PumpController:
         self.ctrl_state = control_logic.initial_state()
         self._on_since = None
         self._off_since = None      # start of the current continuous-OFF period
+        self._min_off_since = None  # Layer 3.5's own clock — see control_logic
         self._rain_wet_since = None
         self._level_low_since = None
         self._burst_phase_since = None
@@ -68,6 +69,10 @@ class PumpController:
             # rest (Layer 3) measures ACTUAL rest: a conflict burst that runs the
             # pump mid-rest clears _off_since and restarts the rest.
             "rest_elapsed_ms": self._elapsed(self._off_since, now),
+            # Layer 3.5's timer. Maintained on the same transitions as
+            # rest_elapsed_ms but kept separate on purpose: the two layers
+            # read a None value in opposite directions (spec §5.4).
+            "min_off_elapsed_ms": self._elapsed(self._min_off_since, now),
         }
 
     def apply(self, decision):
@@ -88,9 +93,11 @@ class PumpController:
             if prev["pump_state"] != "ON":
                 self._on_since = now
             self._off_since = None            # running -> not resting
+            self._min_off_since = None
         else:  # nxt OFF
             if prev["pump_state"] == "ON":
                 self._off_since = now          # ON->OFF: start the rest/off clock
+                self._min_off_since = now
             self._on_since = None
 
         # burst-phase timer

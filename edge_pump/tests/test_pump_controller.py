@@ -83,3 +83,58 @@ def test_rest_timer_tracks_off_duration_and_restarts_after_on():
     pc.apply(control_logic._mk("ON", dict(pc.ctrl_state), {}, "X"))
     t = pc.snapshot_timing({"level_pct": None, "raining": None})
     assert t["rest_elapsed_ms"] is None
+
+
+def test_min_off_timer_starts_on_off_transition():
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+    clock = FakeClock()
+    pump = PumpController(FakePin(0), FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, clock)
+
+    on_state = dict(pump.ctrl_state, pump_state="ON")
+    pump.apply({"action": "ON", "next_state": on_state, "flags": {}, "reason": "HIGH_WATER"})
+    assert pump.snapshot_timing({})["min_off_elapsed_ms"] is None
+
+    clock.advance(5000)
+    off_state = dict(pump.ctrl_state, pump_state="OFF")
+    pump.apply({"action": "OFF", "next_state": off_state, "flags": {}, "reason": "STANDBY"})
+    clock.advance(30000)
+    assert pump.snapshot_timing({})["min_off_elapsed_ms"] == 30000
+
+
+def test_min_off_and_rest_timers_stay_in_lockstep():
+    """Invariant guard. `_min_off_since` and `_off_since` are deliberately
+    SEPARATE fields (spec §5.4) but are maintained by identical rules in the
+    same block of apply(), so they must hold identical values at every
+    instant. The separation buys a different None reading at the CONSUMER,
+    not different timing. If a future edit changes one transition and
+    forgets the other, the two silently diverge and Layer 3.5 starts
+    measuring something nobody designed — this test is what catches it."""
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+    clock = FakeClock()
+    pump = PumpController(FakePin(0), FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, clock)
+
+    def both():
+        t = pump.snapshot_timing({})
+        return t["rest_elapsed_ms"], t["min_off_elapsed_ms"]
+
+    on = dict(pump.ctrl_state, pump_state="ON")
+    off = dict(pump.ctrl_state, pump_state="OFF")
+
+    assert both()[0] == both()[1]                      # cold: both None
+    pump.apply({"action": "ON", "next_state": on, "flags": {}, "reason": "HIGH_WATER"})
+    clock.advance(5000)
+    assert both()[0] == both()[1]                      # running: both None
+    pump.apply({"action": "OFF", "next_state": off, "flags": {}, "reason": "STANDBY"})
+    clock.advance(7000)
+    r, m = both()
+    assert r == m == 7000
+    # A burst that runs the pump mid-rest must restart BOTH clocks.
+    pump.apply({"action": "ON", "next_state": dict(on), "flags": {}, "reason": "CONFLICT_BURST_ON"})
+    pump.apply({"action": "OFF", "next_state": dict(off), "flags": {}, "reason": "STANDBY"})
+    clock.advance(1000)
+    r, m = both()
+    assert r == m == 1000

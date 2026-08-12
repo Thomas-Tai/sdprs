@@ -20,6 +20,7 @@ MAX_RUNTIME_REST = "MAX_RUNTIME_REST"
 MANUAL_ON = "MANUAL_ON"
 MANUAL_OFF = "MANUAL_OFF"
 MANUAL_REJECTED = "MANUAL_REJECTED"
+MIN_OFF_WAIT = "MIN_OFF_WAIT"
 
 DEFAULT_CONFIG = {
     "high_threshold": 80.0,
@@ -32,6 +33,7 @@ DEFAULT_CONFIG = {
     "conflict_max_ms": 900000,
     "max_run_ms": 600000,
     "rest_ms": 60000,
+    "min_off_ms": 0,          # 0 disables Layer 3.5 (12V profile)
 }
 
 
@@ -80,6 +82,7 @@ def _preamble(readings, timing, config):
         "sensor_conflict": False,
         "dry_run_protect": False,
         "max_runtime_rest": False,
+        "min_off_wait": False,
     }
     return float_dry, rain_confirmed, conflict_now, flags
 
@@ -159,6 +162,20 @@ def _safety_guards(state, timing, config, float_dry, conflict_now, flags):
         state["resting"] = True
         flags["max_runtime_rest"] = True
         return _mk("OFF", state, flags, MAX_RUNTIME_REST)
+
+    # ---- Layer 3.5: minimum-off short-cycle guard ----
+    # Deliberately uses its OWN timer rather than rest_elapsed_ms. The two
+    # have opposite None contracts: Layer 3 coerces None to 0 (blocking),
+    # min-off treats None as not-blocking (cold boot has no off-period to
+    # measure). One timer read two opposite ways is how a future edit to
+    # that `or 0` silently changes this guard (spec §5.4).
+    min_off_ms = config.get("min_off_ms") or 0
+    if min_off_ms and state.get("pump_state") != "ON":
+        mo = timing.get("min_off_elapsed_ms")
+        if mo is not None and mo < min_off_ms:
+            flags["min_off_wait"] = True
+            flags["min_off_remaining_ms"] = min_off_ms - mo
+            return _mk("OFF", state, flags, MIN_OFF_WAIT)
 
     return None
 

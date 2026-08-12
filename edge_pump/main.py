@@ -23,6 +23,7 @@ def build_config():
         "conflict_max_ms": config.CONFLICT_MAX_MS,
         "max_run_ms": config.MAX_RUN_MS,
         "rest_ms": config.REST_MS,
+        "min_off_ms": 0,          # profile-supplied in Task 7; 0 = guard off
     }
 
 
