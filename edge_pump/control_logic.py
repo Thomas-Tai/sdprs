@@ -21,6 +21,9 @@ MANUAL_ON = "MANUAL_ON"
 MANUAL_OFF = "MANUAL_OFF"
 MANUAL_REJECTED = "MANUAL_REJECTED"
 MIN_OFF_WAIT = "MIN_OFF_WAIT"
+CONTAINER_FULL = "CONTAINER_FULL"
+COLLECT_RAIN_ON = "COLLECT_RAIN_ON"
+SOURCE_DRY = "SOURCE_DRY"
 
 DEFAULT_CONFIG = {
     "high_threshold": 80.0,
@@ -83,6 +86,7 @@ def _preamble(readings, timing, config):
         "dry_run_protect": False,
         "max_runtime_rest": False,
         "min_off_wait": False,
+        "container_full": False,
     }
     return float_dry, rain_confirmed, conflict_now, flags
 
@@ -241,3 +245,52 @@ def decide(readings, timing, ctrl_state, config):
 
     return _trigger_drain(readings, timing, state, config, flags,
                           float_dry, rain_confirmed)
+
+
+def _trigger_collect(readings, timing, state, config, flags, float_dry, rain_confirmed):
+    """Layers 4-5 for COLLECT: the pump fills a container of finite size.
+
+    high_water INVERTS relative to DRAIN. In DRAIN it means "flood, run
+    hard"; here it means "container full, stop" — and it is also the alert
+    a human must act on by emptying the container.
+    """
+    # Container full wins over everything below: overflow is water damage.
+    if readings.get("high_water") is True:
+        flags["container_full"] = True
+        return _mk("OFF", state, flags, CONTAINER_FULL)
+
+    # Source exhausted. Distinct from Layer 2's hard dry-run interlock:
+    # that one protects the pump, this one just says there is nothing left
+    # to collect.
+    level = readings.get("level_pct")
+    if level is not None and level <= config["low_threshold"]:
+        if state.get("pump_state") == "ON":
+            low_elapsed = timing.get("level_low_elapsed_ms")
+            if low_elapsed is not None and low_elapsed >= config["dry_off_delay_ms"]:
+                return _mk("OFF", state, flags, SOURCE_DRY)
+            return _mk("HOLD", state, flags, HOLD)
+        return _mk("OFF", state, flags, SOURCE_DRY)
+
+    if rain_confirmed:
+        return _mk("ON", state, flags, COLLECT_RAIN_ON)
+
+    if state.get("pump_state") == "ON":
+        return _mk("HOLD", state, flags, HOLD)
+    return _mk("OFF", state, flags, STANDBY)
+
+
+def decide_collect(readings, timing, ctrl_state, config):
+    """COLLECT-mode counterpart to decide(). Same signature, same return
+    shape, same safety core — only Layer 4/5 differs (spec §3, §5.4).
+
+    The caller timing contract in decide()'s docstring applies unchanged.
+    """
+    state = dict(ctrl_state)
+    float_dry, rain_confirmed, conflict_now, flags = _preamble(readings, timing, config)
+
+    guarded = _safety_guards(state, timing, config, float_dry, conflict_now, flags)
+    if guarded is not None:
+        return guarded
+
+    return _trigger_collect(readings, timing, state, config, flags,
+                            float_dry, rain_confirmed)
