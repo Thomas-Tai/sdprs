@@ -48,3 +48,34 @@ def make_reader(seq_or_value):
 
         return rd
     return lambda: seq_or_value
+
+
+class FakeNVS:
+    """Mimics esp32.NVS closely enough to test the persistence rules.
+
+    The important fidelity detail: get_i32() RAISES OSError for a missing
+    key rather than returning None. Code that assumes a None return works
+    on the desktop and throws on the device.
+    """
+
+    def __init__(self, initial=None):
+        self._store = dict(initial or {})
+        self._uncommitted = {}
+        self.commits = 0
+        self.writes = 0
+
+    def get_i32(self, key):
+        if key in self._uncommitted:
+            return self._uncommitted[key]
+        if key not in self._store:
+            raise OSError("NVS key not found: %s" % key)
+        return self._store[key]
+
+    def set_i32(self, key, value):
+        self._uncommitted[key] = int(value)
+        self.writes += 1
+
+    def commit(self):
+        self._store.update(self._uncommitted)
+        self._uncommitted = {}
+        self.commits += 1
