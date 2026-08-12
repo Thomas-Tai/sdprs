@@ -74,3 +74,21 @@ def validate(profile, wdt_enabled):
         raise ValueError(
             "ACTUATOR_PROFILE requires WDT_ENABLED=True: a hung controller "
             "would hold the contactor closed indefinitely")
+
+
+def service_due(profile, ops):
+    """True once the contactor has used up its service allowance.
+
+    `contactor_service_ops` is 60% of the part's rated AC3 electrical life
+    (spec §5.8), so this fires with margin left rather than at failure.
+
+    Evaluated on-device rather than server-side: a node whose telemetry
+    nobody is reading yet still needs the threshold to mean something, and
+    the profile that owns the number is here. `ops=None` (NVS unavailable)
+    is NOT service-due — an unreadable counter is a missing measurement,
+    and raising a wear alarm on it would train operators to ignore it.
+    """
+    threshold = profile["contactor_service_ops"]
+    if threshold <= 0 or ops is None:
+        return False
+    return ops >= threshold

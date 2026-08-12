@@ -32,7 +32,7 @@ def format_timestamp():
 
 
 def build_payload(node_id, timestamp, pump_state, water_level, flags, reason,
-                  battery_voltage=None, power_source=None):
+                  battery_voltage=None, power_source=None, extra=None):
     """Additive telemetry payload — never renames the original core fields."""
     p = {
         "node_id": node_id,
@@ -51,6 +51,29 @@ def build_payload(node_id, timestamp, pump_state, water_level, flags, reason,
         p["battery_voltage"] = round(battery_voltage, 2)
     if power_source is not None:
         p["power_source"] = power_source
+
+    # Operator-facing flags added since the original six. Still an explicit
+    # whitelist rather than `p.update(flags)` — flags also carries internal
+    # bookkeeping, and a payload that grows whenever someone adds a flag is
+    # how private state ends up on the wire. Included only when truthy: all
+    # of these are False on the overwhelming majority of ticks, and this
+    # payload goes out every 2 seconds.
+    for k in ("min_off_wait", "max_runtime_rest", "container_full",
+              "overload_trip", "boot_holdoff", "config_error",
+              "rest_remaining_ms", "min_off_remaining_ms",
+              "boot_holdoff_remaining_ms"):
+        if flags.get(k):
+            p[k] = flags[k]
+
+    if extra:
+        # Additive only. Core fields are re-asserted afterwards so a bug in
+        # the extra-builder can never make telemetry misreport pump_state.
+        for k, v in extra.items():
+            if v is not None:
+                p[k] = v
+        p["node_id"] = node_id
+        p["pump_state"] = pump_state
+        p["timestamp"] = timestamp
     return p
 
 
@@ -195,7 +218,7 @@ class PumpMQTTClient:
         return self._wifi_connected and self._mqtt_connected
 
     def publish_status(self, pump_state, water_level, flags, reason,
-                       battery_voltage=None, power_source=None):
+                       battery_voltage=None, power_source=None, extra=None):
         if not self.ensure_connection():
             return
         if self._client is None:
@@ -203,7 +226,7 @@ class PumpMQTTClient:
         try:
             payload = build_payload(
                 self._node_id, format_timestamp(), pump_state, water_level,
-                flags, reason, battery_voltage, power_source)
+                flags, reason, battery_voltage, power_source, extra)
             self._client.publish(self._topic, json.dumps(payload))
         except OSError as e:
             print("[MQTT] Publish error: %s" % str(e))

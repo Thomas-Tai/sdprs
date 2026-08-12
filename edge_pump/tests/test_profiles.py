@@ -57,3 +57,27 @@ def test_urgent_holdoff_shorter_than_normal():
 def test_reset_loop_holdoff_is_the_longest():
     p = profiles.get_profile("SOCKET_220V")
     assert p["boot_loop_holdoff_ms"] > p["boot_holdoff_ms"]
+
+
+def test_service_due_compares_ops_against_the_profile_threshold():
+    # The threshold is 60% of the contactor's rated AC3 electrical life
+    # (spec §5.8) — the point is to replace it BEFORE the contacts weld.
+    p = profiles.get_profile("SOCKET_220V")
+    assert profiles.service_due(p, 59999) is False
+    assert profiles.service_due(p, 60000) is True
+    assert profiles.service_due(p, 250000) is True
+
+
+def test_service_due_is_never_true_when_the_counter_is_disabled():
+    # PUMP_12V has contactor_service_ops = 0: no contactor, nothing to wear.
+    p = profiles.get_profile("PUMP_12V")
+    assert profiles.service_due(p, 10 ** 9) is False
+
+
+def test_service_due_tolerates_a_missing_count():
+    # Defensive only: persist._read currently coerces every failure to 0,
+    # so read_contactor_ops never actually returns None today. The guard is
+    # here so that if that contract is ever tightened to distinguish
+    # "unavailable" from "zero", service_due does not start comparing None.
+    p = profiles.get_profile("SOCKET_220V")
+    assert profiles.service_due(p, None) is False

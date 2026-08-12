@@ -265,7 +265,7 @@ def apply_boot_holdoff(decision, remaining_ms):
 
 def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
                   manual_state=None, clock=None, decider=None, strict=False,
-                  boot_holdoff=None):
+                  boot_holdoff=None, ct_read=None):
     """One control-loop body. Pure of hardware except via injected objects.
 
     `decider` defaults to DRAIN so pre-existing callers and tests keep
@@ -287,6 +287,17 @@ def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
     if boot_holdoff is not None:
         decision = apply_boot_holdoff(decision, boot_holdoff(readings))
 
+    # CT feedback sits ABOVE decide() — hardware protection, not a control
+    # decision, so the pure safety core stays CT-free (spec §5.5).
+    # `pump.state` is the ACTUATOR's current state, not this tick's
+    # decision, so the CT read is unaffected by the hold-off above it.
+    ct_verdict = None
+    if ct_read is not None:
+        band, hoa_hand, ct_verdict = ct_read(pump.state == "ON")
+        decision = apply_overload_interlock(decision, ct_verdict)
+        readings["_current_band"] = band
+        readings["_hoa_hand"] = hoa_hand
+
     if manual_state is not None and clock is not None:
         decision, new_manual = apply_manual_override(decision, manual_state, clock,
                                                      strict=strict)
@@ -299,9 +310,21 @@ def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
             manual_state.clear()
             manual_state.update(new_manual)
     pump.apply(decision)
+    # `manual_state` has already been updated in place above, so a rejection
+    # recorded this tick is visible here. Without these two keys the
+    # remaining time computed by apply_manual_override never leaves the
+    # device and spec §5.7's "tell the operator why the click did nothing"
+    # is not delivered by anything.
+    manual = manual_state or {}
     publish_cb(pump_state=pump.state,
                water_level=synthesize_display_level(readings),
-               flags=decision["flags"], reason=decision["reason"])
+               flags=decision["flags"], reason=decision["reason"],
+               extra={"current_band": readings.get("_current_band"),
+                      "hoa_hand": readings.get("_hoa_hand"),
+                      "ct_verdict": ct_verdict,
+                      "manual_rejected": manual.get("last_rejected_flag"),
+                      "manual_rejected_remaining_ms":
+                          manual.get("last_rejected_remaining_ms")})
     return decision
 
 
@@ -396,6 +419,35 @@ def main():
         led_green = machine.Pin(config.LED_GREEN_PIN, machine.Pin.OUT)
         clock = _RealClockShim()
         sensor_set = SensorSet(build_sensor_config(profile), readers, clock)
+
+        ct_read = None
+        if profile["ct_enabled"]:
+            import current_sense
+            ct_thresholds = current_sense.build_thresholds(
+                config.CT_BAND_LOW, config.CT_BAND_NORMAL, config.CT_BAND_HIGH)
+            ct_samples = current_sense.sample_count_for_cycles(
+                config.CT_SAMPLE_RATE_HZ, config.CT_SAMPLE_CYCLES)
+            ct_reader = readers.get("ct")
+            hoa_reader = readers.get("hoa_hand")
+
+            def ct_read(commanded_on):
+                """Blocking RMS burst. ~60ms at the shipped defaults — the
+                budget spec §9.5 flags as unverified against MQTT + the 30s
+                WDT. Measure on the bench before trusting it."""
+                try:
+                    samples = [ct_reader() for _ in range(ct_samples)]
+                    rms = current_sense.rms_from_samples(samples)
+                    band = current_sense.classify_band(rms, ct_thresholds)
+                except Exception as e:
+                    print("[CT] read failed: %s" % str(e))
+                    return None, None, None
+                hoa_hand = None
+                if hoa_reader is not None:
+                    raw = hoa_reader()
+                    hoa_hand = (raw == 0) if config.HOA_HAND_ACTIVE_LOW else (raw == 1)
+                return band, hoa_hand, current_sense.diagnose(commanded_on, band,
+                                                              bool(hoa_hand))
+
         def _count_contactor_close():
             if profile["contactor_service_ops"]:
                 persist.bump_contactor_ops(nvs)
@@ -509,13 +561,34 @@ def main():
 
     mqtt._on_pump_command = on_pump_command
 
-    def publish_cb(pump_state, water_level, flags, reason):
+    def publish_cb(pump_state, water_level, flags, reason, extra=None):
         nonlocal last_publish, ntp_synced
         now = time.ticks_ms()
         if time.ticks_diff(now, last_publish) >= config.PUBLISH_INTERVAL * 1000:
             battery_voltage, power_source = _read_power(battery_adc, power_source_pin)
+            # `nvs_ok` exists so "boot_count is 0" and "boot_count is
+            # unreadable" are distinguishable. persist._read() coerces every
+            # failure to 0, so without this a node with a dead flash
+            # partition reports boot_count=0 forever — which reads as a
+            # perfectly healthy node while reset-loop detection is silently
+            # off, the same failure DIRECTION that got RTC memory rejected
+            # in spec finding B2. This catches an unavailable namespace,
+            # not a partially-worn one; it narrows the blind spot rather
+            # than closing it.
+            merged = {"actuator_profile": config.ACTUATOR_PROFILE,
+                      "pump_mode": config.PUMP_MODE,
+                      "boot_count": boot_count,
+                      "nvs_ok": nvs is not None}
+            if profile["contactor_service_ops"]:
+                ops = persist.read_contactor_ops(nvs)
+                merged["contactor_ops"] = ops
+                # Compared on-device: the threshold has to mean something
+                # before the Phase 2 server exists to evaluate it.
+                merged["contactor_service_due"] = profiles.service_due(profile, ops)
+            if extra:
+                merged.update(extra)
             mqtt.publish_status(pump_state, water_level, flags, reason,
-                                battery_voltage, power_source)
+                                battery_voltage, power_source, extra=merged)
             last_publish = now
             if not ntp_synced and mqtt._wifi_connected:
                 _sync_ntp(); ntp_synced = True
@@ -526,7 +599,7 @@ def main():
             run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
                           manual_state=manual_state, clock=clock,
                           decider=decider, strict=profile["ct_enabled"],
-                          boot_holdoff=boot_holdoff)
+                          boot_holdoff=boot_holdoff, ct_read=ct_read)
             if wdt:
                 wdt.feed()           # feed ONLY after a full successful iteration
             import gc
