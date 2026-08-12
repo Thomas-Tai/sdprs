@@ -6,13 +6,14 @@
 import time
 import config
 import control_logic
+import profiles
 from sensors import SensorSet
 from pump_controller import PumpController
 from mqtt_client import PumpMQTTClient
 
 
-def build_config():
-    return {
+def build_config(profile=None):
+    cfg = {
         "high_threshold": float(config.HIGH_THRESHOLD),
         "low_threshold": float(config.LOW_THRESHOLD),
         "rain_on_threshold": float(config.RAIN_ON_THRESHOLD),
@@ -23,8 +24,27 @@ def build_config():
         "conflict_max_ms": config.CONFLICT_MAX_MS,
         "max_run_ms": config.MAX_RUN_MS,
         "rest_ms": config.REST_MS,
-        "min_off_ms": 0,          # profile-supplied in Task 7; 0 = guard off
+        "min_off_ms": 0,
     }
+    if profile is not None:
+        # Profile timings OVERRIDE the module defaults — config.py carries
+        # the 12V-era values and the mains profile must win on a mains node.
+        cfg["burst_cooldown_ms"] = profile["burst_cooldown_ms"]
+        cfg["min_off_ms"] = profile["min_off_ms"]
+    return cfg
+
+
+def build_decider(mode):
+    """Pick the trigger layer for this node's PUMP_MODE.
+
+    Resolved ONCE at boot rather than per iteration: a mode that could
+    change mid-run would mean high_water flipping meaning between ticks.
+    """
+    if mode == "DRAIN":
+        return control_logic.decide
+    if mode == "COLLECT":
+        return control_logic.decide_collect
+    raise ValueError("unknown PUMP_MODE: %r" % (mode,))
 
 
 def build_sensor_config():
@@ -65,7 +85,15 @@ def synthesize_display_level(readings):
     return 0.0
 
 
-def apply_manual_override(decision, manual_state, clock):
+# Flag -> the flag carrying its remaining time, for operator feedback.
+_REMAINING_KEY = {
+    "max_runtime_rest": "rest_remaining_ms",
+    "min_off_wait": "min_off_remaining_ms",
+    "boot_holdoff": "boot_holdoff_remaining_ms",
+}
+
+
+def apply_manual_override(decision, manual_state, clock, strict=False):
     """Optionally override the pure control decision with an operator command.
 
     Two-slot manual state:
@@ -78,6 +106,11 @@ def apply_manual_override(decision, manual_state, clock):
       - Manual ON is REJECTED (dropped, no retry) when the safety core has
         engaged `dry_run_protect` or `sensor_conflict` — the pump would
         damage itself running dry or with contradicting sensors.
+      - Under `strict=True` (the SOCKET_220V profile) the rejection list
+        also covers `max_runtime_rest` and `min_off_wait`. Restarting a
+        motor that just ran for ten minutes is how you burn it; at 12V the
+        same click is harmless, which is why this is profile-gated rather
+        than unconditional (spec §5.7).
       - Manual AUTO releases the hold: the slot is cleared and the natural
         control decision passes through untouched.
       - ON/OFF auto-expire once `expires_ms` is reached (bounded pulse).
@@ -113,12 +146,26 @@ def apply_manual_override(decision, manual_state, clock):
         }, manual_state
 
     if action == "ON":
-        if flags.get("dry_run_protect") or flags.get("sensor_conflict"):
+        # `boot_holdoff` blocks unconditionally rather than only under
+        # strict: the flag exists only while a hold-off is actually
+        # running, and a profile with no hold-off configured never sets
+        # it. Gating it on `strict` would add a second way to be wrong
+        # without adding any 12V freedom.
+        blocking = ["dry_run_protect", "sensor_conflict", "boot_holdoff"]
+        if strict:
+            blocking += ["max_runtime_rest", "min_off_wait"]
+        hit = next((f for f in blocking if flags.get(f)), None)
+        if hit is not None:
             # Refuse and DROP the override so it doesn't retry every tick.
-            # The wrapper's caller can inspect the `manual_state["last_rejected"]`
-            # field to surface why the operator's ON click didn't take.
+            # `last_rejected_remaining_ms` lets the dashboard say WHY the
+            # click did nothing and when it will work, instead of silently
+            # doing nothing.
+            remaining_key = _REMAINING_KEY.get(hit)
+            remaining = flags.get(remaining_key) if remaining_key else None
             return decision, {"action": None, "expires_ms": None,
-                              "last_rejected": control_logic.MANUAL_REJECTED}
+                              "last_rejected": control_logic.MANUAL_REJECTED,
+                              "last_rejected_flag": hit,
+                              "last_rejected_remaining_ms": remaining}
         next_state = dict(decision["next_state"])
         next_state["pump_state"] = "ON"
         return {
@@ -145,20 +192,70 @@ def apply_manual_override(decision, manual_state, clock):
     return decision, {"action": None, "expires_ms": None}
 
 
+def apply_boot_holdoff(decision, remaining_ms):
+    """Force the pump OFF while the post-reset hold-off is still running.
+
+    NOTE THE ASYMMETRY WITH ITS NAME: this does not merely veto a *start*,
+    it drives the actuator OFF on any tick where time remains — including
+    a tick where the pump is already running. During the boot window that
+    is the same thing (the pump starts OFF), which is why the caller must
+    never let the hold-off come back after it has expired. See
+    `boot_guard.make_holdoff_tracker`.
+
+    `_off_since` lives in RAM, so every reset makes the node believe the
+    pump has never run and the min-off guard passes instantly. A WDT reset
+    loop at the 30s timeout would therefore restart a 2200W motor every 30
+    seconds, and each boot would consider that correct (spec §5.6).
+
+    This sits ABOVE decide() for the same reason apply_overload_interlock()
+    does: it is not a control decision, and a fresh decision must not be
+    able to clear it. Returns the decision object UNCHANGED once the
+    hold-off expires, so the normal path resumes with no residue.
+
+    The `boot_holdoff` flag it sets is also read by apply_manual_override(),
+    which is what stops an operator clicking ON straight through a hold-off.
+    """
+    if not remaining_ms or remaining_ms <= 0:
+        return decision
+    next_state = dict(decision["next_state"])
+    next_state["pump_state"] = "OFF"
+    return {
+        "action": "OFF",
+        "next_state": next_state,
+        "flags": dict(decision["flags"],
+                      boot_holdoff=True,
+                      boot_holdoff_remaining_ms=remaining_ms),
+        "reason": control_logic.BOOT_HOLDOFF,
+    }
+
+
 def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
-                  manual_state=None, clock=None):
+                  manual_state=None, clock=None, decider=None, strict=False,
+                  boot_holdoff=None):
     """One control-loop body. Pure of hardware except via injected objects.
 
-    `manual_state`/`clock` are optional so existing callers (tests + the
-    device main loop before the manual-override wiring) keep working; when
-    both are provided, an outstanding manual command is layered on top of
-    the pure decision via `apply_manual_override` before it hits the pump.
+    `decider` defaults to DRAIN so pre-existing callers and tests keep
+    working; `main()` passes the mode-resolved function.
+
+    `boot_holdoff` is an optional callable `(readings) -> remaining_ms`.
+    It is re-evaluated EVERY tick, not resolved once at boot, because the
+    hold-off shortens when the mode layer reports urgency — a live flood
+    must not wait the full 60s (spec §5.6).
     """
     readings = sensor_set.read_all()
     timing = pump.snapshot_timing(readings)
-    decision = control_logic.decide(readings, timing, pump.ctrl_state, cfg)
+    decide_fn = decider or control_logic.decide
+    decision = decide_fn(readings, timing, pump.ctrl_state, cfg)
+
+    # Post-reset hold-off sits directly above decide() and BEFORE the
+    # manual override, so the flag it sets is visible to the override's
+    # rejection list.
+    if boot_holdoff is not None:
+        decision = apply_boot_holdoff(decision, boot_holdoff(readings))
+
     if manual_state is not None and clock is not None:
-        decision, new_manual = apply_manual_override(decision, manual_state, clock)
+        decision, new_manual = apply_manual_override(decision, manual_state, clock,
+                                                     strict=strict)
         # In-place mutation so the caller's dict reference stays valid.
         # BUT: apply_manual_override may return the SAME reference for the
         # "still-active, pass through" case — clearing manual_state would
@@ -174,11 +271,87 @@ def run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
     return decision
 
 
+def resolve_runtime():
+    """Resolve (profile, decider) from config WITHOUT raising.
+
+    Returns (profile, decider, error_message|None).
+
+    Why this exists: main()'s init block ends in
+    `except Exception: ... machine.reset()`. A ValueError from
+    profiles.validate() or build_decider() is a CONFIGURATION error, so it
+    recurs on every boot — reset, re-raise, reset, forever. It also fires
+    before register_boot(), so the boot counter never moves and the node
+    leaves no trace of why it vanished. `WDT_ENABLED = False` is a
+    documented debugging step and `PUMP_MODE` is one typo away from
+    unknown, so this is a likely mistake; under the §4.8 split-bay decision
+    recovering from it means a site visit.
+
+    On error we return an INERT stand-in profile. It is not a fallback the
+    node runs on — main() refuses to enter the control loop at all. It
+    exists only so the rest of init can finish constructing the objects the
+    error loop needs (a PUMP_12V profile touches no CT or HOA pins and
+    no-ops the contactor counter), and so nothing downstream has to handle
+    `profile is None`.
+    """
+    try:
+        profile = profiles.get_profile(config.ACTUATOR_PROFILE)
+        profiles.validate(profile, config.WDT_ENABLED)
+        return profile, build_decider(config.PUMP_MODE), None
+    except (ValueError, KeyError) as e:
+        return profiles.get_profile("PUMP_12V"), control_logic.decide, str(e)
+
+
+def _run_config_error_loop(pump, mqtt, wdt, message):
+    """Hold the pump OFF and keep saying why, without ever resetting.
+
+    A configuration error is not transient — resetting reproduces it on the
+    next boot and the node disappears instead of reporting. OFF is already
+    the safe physical state (the coil is de-energised and the contactor
+    drops out), so the useful thing left to do is stay reachable and keep
+    publishing the reason. An operator seeing CONFIG_ERROR knows to reflash;
+    an operator seeing nothing at all has to drive out and open the box.
+    """
+    print("[MAIN] CONFIG ERROR (refusing to run): %s" % message)
+    off_state = dict(pump.ctrl_state)
+    off_state["pump_state"] = "OFF"
+    pump.apply({"action": "OFF", "next_state": off_state,
+                "flags": {"config_error": True},
+                "reason": control_logic.CONFIG_ERROR})
+    while True:
+        try:
+            mqtt.publish_status("OFF", 0.0, {"config_error": True},
+                                control_logic.CONFIG_ERROR)
+            mqtt.check_msg()
+        except Exception:
+            pass          # network trouble must not turn this into a reset
+        if wdt:
+            wdt.feed()
+        time.sleep(config.POLL_INTERVAL)
+
+
 def main():
     print("[MAIN] SDPRS Pump Node starting (merged firmware)...")
     wdt = None
     try:
         import machine
+        import persist
+        import boot_guard
+        profile, decider, config_error = resolve_runtime()
+        nvs = persist.open_nvs()
+        # Only profiles that USE the counter pay for it. Under PUMP_12V,
+        # boot_loop_threshold is 0 (detection off) and boot_healthy_ms is 0
+        # (is_boot_healthy is never True, so clear_boot_count is never
+        # called) — registering there would burn one flash erase cycle per
+        # boot on a monotonic counter with no reset path, on exactly the
+        # bench nodes that get power-cycled most.
+        if profile["boot_loop_threshold"] > 0:
+            boot_count = persist.register_boot(nvs)
+        else:
+            boot_count = 0
+        reset_loop = boot_guard.is_reset_loop(boot_count,
+                                              profile["boot_loop_threshold"])
+        print("[MAIN] profile=%s mode=%s boot_count=%d reset_loop=%s"
+              % (config.ACTUATOR_PROFILE, config.PUMP_MODE, boot_count, reset_loop))
         if config.WDT_ENABLED:
             from machine import WDT
             wdt = WDT(timeout=config.WDT_TIMEOUT)
@@ -218,7 +391,39 @@ def main():
         machine.reset()
         return
 
-    cfg = build_config()
+    if config_error is not None:
+        _run_config_error_loop(pump, mqtt, wdt, config_error)
+        return
+
+    cfg = build_config(profile)
+
+    # Post-reset hold-off. Re-evaluated per tick because urgency can SHORTEN
+    # it mid-run; the tracker is what stops it ever getting LONGER again.
+    # `boot_started` is captured here rather than read from a timer the reset
+    # cleared, which is the whole reason the counter had to move to NVS.
+    boot_holdoff = None
+    boot_cleared = False
+    if profile["boot_holdoff_ms"] or profile["boot_loop_holdoff_ms"]:
+        boot_started = clock.ticks_ms()
+        holdoff_tracker = boot_guard.make_holdoff_tracker(profile, reset_loop)
+
+        def boot_holdoff(readings):
+            nonlocal boot_cleared
+            uptime = clock.ticks_diff(clock.ticks_ms(), boot_started)
+            # Urgency is a MODE question, not a profile one: high water is a
+            # live flood in DRAIN and merely 'container full' in COLLECT,
+            # where starting the pump is never the time-critical response.
+            urgent = (config.PUMP_MODE == "DRAIN"
+                      and readings.get("high_water") is True)
+            if not boot_cleared and boot_guard.is_boot_healthy(uptime, profile):
+                # This boot has run long enough to disprove a loop. Clearing
+                # here rather than at boot is the point: a node that resets
+                # before reaching the healthy window never clears, so the
+                # count climbs and the loop is detected.
+                persist.clear_boot_count(nvs)
+                boot_cleared = True
+            return holdoff_tracker(uptime, urgent)
+
     last_publish = time.ticks_ms()
     ntp_synced = False
 
@@ -280,7 +485,9 @@ def main():
     while True:
         try:
             run_iteration(sensor_set, pump, mqtt, cfg, publish_cb,
-                          manual_state=manual_state, clock=clock)
+                          manual_state=manual_state, clock=clock,
+                          decider=decider, strict=profile["ct_enabled"],
+                          boot_holdoff=boot_holdoff)
             if wdt:
                 wdt.feed()           # feed ONLY after a full successful iteration
             import gc

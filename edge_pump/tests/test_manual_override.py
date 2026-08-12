@@ -156,3 +156,149 @@ def test_unknown_action_drops_the_slot():
     out, s = main.apply_manual_override(d, state, clk)
     assert out is d
     assert s == {"action": None, "expires_ms": None}
+
+
+def test_strict_mode_rejects_manual_on_during_max_runtime_rest():
+    # Pre-existing gap (spec 5.7): an operator could restart a motor that
+    # had just run for 10 minutes straight. Harmless at 12V, burns a
+    # 2200W motor.
+    from main import apply_manual_override
+    from tests.fakes import FakeClock
+    decision = {"action": "OFF", "next_state": {"pump_state": "OFF"},
+                "flags": {"max_runtime_rest": True, "rest_remaining_ms": 45000},
+                "reason": "MAX_RUNTIME_REST"}
+    manual = {"action": "ON", "expires_ms": None}
+    out, new_manual = apply_manual_override(decision, manual, FakeClock(), strict=True)
+    assert out["action"] == "OFF"
+    assert new_manual["action"] is None
+    assert new_manual["last_rejected"] == "MANUAL_REJECTED"
+    assert new_manual["last_rejected_remaining_ms"] == 45000
+
+
+def test_strict_mode_rejects_manual_on_during_min_off():
+    from main import apply_manual_override
+    from tests.fakes import FakeClock
+    decision = {"action": "OFF", "next_state": {"pump_state": "OFF"},
+                "flags": {"min_off_wait": True, "min_off_remaining_ms": 120000},
+                "reason": "MIN_OFF_WAIT"}
+    manual = {"action": "ON", "expires_ms": None}
+    out, new_manual = apply_manual_override(decision, manual, FakeClock(), strict=True)
+    assert out["action"] == "OFF"
+    assert new_manual["last_rejected_remaining_ms"] == 120000
+
+
+def test_lenient_mode_preserves_legacy_behaviour():
+    # The 12V profile must behave exactly as before this change.
+    from main import apply_manual_override
+    from tests.fakes import FakeClock
+    decision = {"action": "OFF", "next_state": {"pump_state": "OFF"},
+                "flags": {"max_runtime_rest": True},
+                "reason": "MAX_RUNTIME_REST"}
+    manual = {"action": "ON", "expires_ms": None}
+    out, _ = apply_manual_override(decision, manual, FakeClock(), strict=False)
+    assert out["action"] == "ON"
+
+
+def test_manual_off_is_honoured_in_strict_mode():
+    # Stopping is always safe, in every profile.
+    from main import apply_manual_override
+    from tests.fakes import FakeClock
+    decision = {"action": "ON", "next_state": {"pump_state": "ON"},
+                "flags": {"max_runtime_rest": True}, "reason": "HIGH_WATER"}
+    manual = {"action": "OFF", "expires_ms": None}
+    out, _ = apply_manual_override(decision, manual, FakeClock(), strict=True)
+    assert out["action"] == "OFF"
+
+
+def test_build_decider_selects_the_mode():
+    import control_logic
+    from main import build_decider
+    assert build_decider("DRAIN") is control_logic.decide
+    assert build_decider("COLLECT") is control_logic.decide_collect
+
+
+def test_build_decider_rejects_an_unknown_mode():
+    import pytest
+    from main import build_decider
+    with pytest.raises(ValueError):
+        build_decider("SIPHON")
+
+
+def test_apply_boot_holdoff_forces_off_while_the_holdoff_runs():
+    import control_logic
+    from main import apply_boot_holdoff
+    decision = {"action": "ON", "next_state": {"pump_state": "ON"},
+                "flags": {}, "reason": "HIGH_WATER"}
+    out = apply_boot_holdoff(decision, 45000)
+    assert out["action"] == "OFF"
+    assert out["next_state"]["pump_state"] == "OFF"
+    assert out["reason"] == control_logic.BOOT_HOLDOFF
+    assert out["flags"]["boot_holdoff"] is True
+    assert out["flags"]["boot_holdoff_remaining_ms"] == 45000
+
+
+def test_apply_boot_holdoff_passes_through_once_expired():
+    # No residue: the normal control path must resume untouched.
+    from main import apply_boot_holdoff
+    decision = {"action": "ON", "next_state": {"pump_state": "ON"},
+                "flags": {}, "reason": "HIGH_WATER"}
+    assert apply_boot_holdoff(decision, 0) is decision
+    assert apply_boot_holdoff(decision, None) is decision
+
+
+def test_apply_boot_holdoff_preserves_the_underlying_flags():
+    # Telemetry must still report WHY the pump would otherwise be running.
+    from main import apply_boot_holdoff
+    decision = {"action": "ON", "next_state": {"pump_state": "ON"},
+                "flags": {"rain_trigger": True}, "reason": "RAIN_TRIGGER"}
+    out = apply_boot_holdoff(decision, 1000)
+    assert out["flags"]["rain_trigger"] is True
+    assert decision["flags"] == {"rain_trigger": True}   # input not mutated
+
+
+def test_strict_mode_rejects_manual_on_during_boot_holdoff():
+    # An operator clicking ON must not defeat the reset-loop protection.
+    from main import apply_manual_override
+    from tests.fakes import FakeClock
+    decision = {"action": "OFF", "next_state": {"pump_state": "OFF"},
+                "flags": {"boot_holdoff": True,
+                          "boot_holdoff_remaining_ms": 30000},
+                "reason": "BOOT_HOLDOFF"}
+    manual = {"action": "ON", "expires_ms": None}
+    out, new_manual = apply_manual_override(decision, manual, FakeClock(), strict=True)
+    assert out["action"] == "OFF"
+    assert new_manual["last_rejected_remaining_ms"] == 30000
+
+
+# ---- Configuration errors must report, not reset ----
+
+def test_resolve_runtime_returns_the_configured_profile():
+    import main
+    profile, decider, err = main.resolve_runtime()
+    assert err is None
+    assert profile["min_off_ms"] == 0        # PUMP_12V ships as the default
+    assert decider is not None
+
+
+def test_resolve_runtime_reports_an_unknown_mode_instead_of_raising(monkeypatch):
+    # A one-character typo in PUMP_MODE must not become a boot loop. The
+    # init block it used to raise inside ends in machine.reset(), and a
+    # config error recurs on every boot, so the node would vanish rather
+    # than report — before register_boot() ever runs, so without even a
+    # boot counter to show for it.
+    import config, main
+    monkeypatch.setattr(config, "PUMP_MODE", "SIPHON")
+    profile, decider, err = main.resolve_runtime()
+    assert err is not None and "SIPHON" in err
+    assert profile is not None and decider is not None   # inert stand-ins
+
+
+def test_resolve_runtime_reports_a_missing_watchdog_instead_of_raising(monkeypatch):
+    # WDT_ENABLED = False is a documented debugging step (config.py:60);
+    # under SOCKET_220V it is forbidden, and it must fail loudly-and-online
+    # rather than loudly-and-offline.
+    import config, main
+    monkeypatch.setattr(config, "ACTUATOR_PROFILE", "SOCKET_220V")
+    monkeypatch.setattr(config, "WDT_ENABLED", False)
+    profile, decider, err = main.resolve_runtime()
+    assert err is not None and "WDT_ENABLED" in err

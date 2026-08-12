@@ -24,6 +24,12 @@ MIN_OFF_WAIT = "MIN_OFF_WAIT"
 CONTAINER_FULL = "CONTAINER_FULL"
 COLLECT_RAIN_ON = "COLLECT_RAIN_ON"
 SOURCE_DRY = "SOURCE_DRY"
+# Imposed ABOVE the pure core (main.apply_boot_holdoff / the config-error loop),
+# so decide() never returns these — they live here only so every reason string
+# the fleet can publish has one home. Adding them does not change decide()'s
+# output, so the golden baseline is unaffected.
+BOOT_HOLDOFF = "BOOT_HOLDOFF"
+CONFIG_ERROR = "CONFIG_ERROR"
 
 DEFAULT_CONFIG = {
     "high_threshold": 80.0,
@@ -159,6 +165,7 @@ def _safety_guards(state, timing, config, float_dry, conflict_now, flags):
         rest_elapsed = timing.get("rest_elapsed_ms") or 0
         if rest_elapsed < config["rest_ms"]:
             flags["max_runtime_rest"] = True
+            flags["rest_remaining_ms"] = config["rest_ms"] - rest_elapsed
             return _mk("OFF", state, flags, MAX_RUNTIME_REST)
         state["resting"] = False  # rest complete -> resume normal control
     elif state.get("pump_state") == "ON" and on_elapsed is not None \

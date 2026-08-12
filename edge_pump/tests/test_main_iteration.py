@@ -98,3 +98,43 @@ def test_synthesize_display_level_digital_only_all_dry():
     # sensors disabled entirely (None everywhere)
     assert main.synthesize_display_level(
         {"level_pct": None, "high_water": None, "float_dry": None}) == 0.0
+
+
+def test_run_iteration_suppresses_the_pump_during_boot_holdoff():
+    # Same flooded scenario as test_run_iteration_turns_pump_on_when_flooded,
+    # which asserts the pump turns ON. The ONLY difference is the hold-off,
+    # so a pump that turns on here means the wiring is missing.
+    clk = FakeClock()
+    cfg = main.build_config()
+    config = {"level_enabled": True, "float_enabled": True, "rain_enabled": False,
+              "high_water_enabled": False, "float_active_low": True,
+              "rain_active_low": True, "high_water_active_low": False,
+              "debounce_ms": 2500}
+    readers = {"adc": make_reader(0), "float": make_reader(1),
+               "rain": make_reader(1), "high_water": make_reader(0)}
+    ss = sensors.SensorSet(config, readers, clk)
+    pc = build_pc(clk)
+    published = []
+    d = main.run_iteration(ss, pc, None, cfg, lambda **kw: published.append(kw),
+                           boot_holdoff=lambda readings: 30000)
+    assert d["action"] == "OFF"
+    assert pc.state == "OFF"
+    assert d["reason"] == control_logic.BOOT_HOLDOFF
+    assert published[0]["flags"]["boot_holdoff_remaining_ms"] == 30000
+
+
+def test_run_iteration_resumes_when_the_holdoff_expires():
+    clk = FakeClock()
+    cfg = main.build_config()
+    config = {"level_enabled": True, "float_enabled": True, "rain_enabled": False,
+              "high_water_enabled": False, "float_active_low": True,
+              "rain_active_low": True, "high_water_active_low": False,
+              "debounce_ms": 2500}
+    readers = {"adc": make_reader(0), "float": make_reader(1),
+               "rain": make_reader(1), "high_water": make_reader(0)}
+    ss = sensors.SensorSet(config, readers, clk)
+    pc = build_pc(clk)
+    d = main.run_iteration(ss, pc, None, cfg, lambda **kw: None,
+                           boot_holdoff=lambda readings: 0)
+    assert d["action"] == "ON"
+    assert pc.state == "ON"
