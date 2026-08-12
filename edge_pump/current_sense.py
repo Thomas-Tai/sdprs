@@ -60,3 +60,33 @@ def sample_count_for_cycles(sample_rate_hz, cycles=3, mains_hz=_MAINS_HZ):
     spec flags as unverified against MQTT and the 30s WDT (§9.5).
     """
     return int(round(sample_rate_hz * cycles / float(mains_hz)))
+
+
+def diagnose(commanded_on, band, hoa_hand):
+    """Compare what we commanded against what the wire actually reports.
+
+    Returns "OVERLOAD", "WELDED_CONTACT", "PUMP_NOT_RUNNING", or None.
+
+    `hoa_hand` suppresses the welded-contact verdict: with the panel switch
+    in HAND the operator is energising the coil directly, so current while
+    we command OFF is expected. Without this, every maintenance visit fires
+    a CRITICAL weld alarm and the alarm stops meaning anything (spec §4.5).
+
+    Note what this CANNOT tell apart: "pump unplugged", "MPCB tripped",
+    "rotor seized" and "contactor failed to close" all read as no-current-
+    while-commanded-on. They get one verdict and a human diagnoses on site
+    (spec §7).
+    """
+    if commanded_on:
+        if band == "high":
+            return "OVERLOAD"
+        if band == "none":
+            return "PUMP_NOT_RUNNING"
+        return None
+
+    # Commanded OFF.
+    if band == "none":
+        return None
+    if hoa_hand:
+        return None
+    return "WELDED_CONTACT"

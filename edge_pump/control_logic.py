@@ -24,12 +24,13 @@ MIN_OFF_WAIT = "MIN_OFF_WAIT"
 CONTAINER_FULL = "CONTAINER_FULL"
 COLLECT_RAIN_ON = "COLLECT_RAIN_ON"
 SOURCE_DRY = "SOURCE_DRY"
-# Imposed ABOVE the pure core (main.apply_boot_holdoff / the config-error loop),
-# so decide() never returns these — they live here only so every reason string
-# the fleet can publish has one home. Adding them does not change decide()'s
-# output, so the golden baseline is unaffected.
+# Imposed ABOVE the pure core (main.apply_boot_holdoff / apply_overload_interlock
+# / the config-error loop), so decide() never returns these — they live here only
+# so every reason string the fleet can publish has one home. Adding them does not
+# change decide()'s output, so the golden baseline is unaffected.
 BOOT_HOLDOFF = "BOOT_HOLDOFF"
 CONFIG_ERROR = "CONFIG_ERROR"
+OVERLOAD_TRIP = "OVERLOAD_TRIP"
 
 DEFAULT_CONFIG = {
     "high_threshold": 80.0,

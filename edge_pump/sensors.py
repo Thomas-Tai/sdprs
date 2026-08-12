@@ -101,4 +101,18 @@ def build_readers(config):
         pull = machine.Pin.PULL_UP if config[al_key] else machine.Pin.PULL_DOWN
         pin = machine.Pin(config[pin_key], machine.Pin.IN, pull)
         readers[key] = pin.value
+    # Mains-box peripherals. Built only when the profile enables them, so a
+    # 12V node never touches these pins.
+    if config.get("ct_enabled"):
+        ct = machine.ADC(machine.Pin(config["ct_adc_pin"]))
+        ct.atten(machine.ADC.ATTN_11DB)
+        ct.width(machine.ADC.WIDTH_12BIT)
+        readers["ct"] = ct.read
+    if config.get("hoa_enabled"):
+        # Pull toward NOT-HAND: a broken auxiliary-contact wire then reads
+        # AUTO, which leaves weld detection ARMED (false alarms). The
+        # reverse would disable weld detection permanently on a wire fault
+        # — a blind spot, which is worse (spec §4.5).
+        pull = machine.Pin.PULL_UP if config["hoa_hand_active_low"] else machine.Pin.PULL_DOWN
+        readers["hoa_hand"] = machine.Pin(config["hoa_hand_pin"], machine.Pin.IN, pull).value
     return readers

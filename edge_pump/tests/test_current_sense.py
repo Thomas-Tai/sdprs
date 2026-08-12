@@ -58,3 +58,44 @@ def test_sample_count_covers_whole_cycles():
     # 1000 Hz, 3 cycles at 50 Hz -> 60 samples == 60 ms.
     assert cs.sample_count_for_cycles(1000, cycles=3, mains_hz=50) == 60
     assert cs.sample_count_for_cycles(1000, cycles=1, mains_hz=50) == 20
+
+
+# ---- Actuation feedback truth table (spec §7) ----
+
+def test_commanded_on_and_running_is_healthy():
+    assert cs.diagnose(True, "normal", hoa_hand=False) is None
+    assert cs.diagnose(True, "low", hoa_hand=False) is None
+
+
+def test_commanded_on_with_no_current_is_not_running():
+    # Unplugged pump, tripped MPCB, seized rotor, or a contactor that
+    # failed to close — indistinguishable from here, diagnosis needs a
+    # human on site.
+    assert cs.diagnose(True, "none", hoa_hand=False) == "PUMP_NOT_RUNNING"
+
+
+def test_commanded_on_with_excess_current_is_overload():
+    assert cs.diagnose(True, "high", hoa_hand=False) == "OVERLOAD"
+
+
+def test_commanded_off_with_no_current_is_healthy():
+    assert cs.diagnose(False, "none", hoa_hand=False) is None
+
+
+def test_commanded_off_with_current_is_a_welded_contact():
+    assert cs.diagnose(False, "normal", hoa_hand=False) == "WELDED_CONTACT"
+    assert cs.diagnose(False, "low", hoa_hand=False) == "WELDED_CONTACT"
+    assert cs.diagnose(False, "high", hoa_hand=False) == "WELDED_CONTACT"
+
+
+def test_hoa_hand_suppresses_the_welded_verdict():
+    # With the panel switch in HAND the operator energises the coil, not
+    # us. Without this suppression a technician trips a CRITICAL alarm on
+    # every single maintenance visit (spec §4.5).
+    assert cs.diagnose(False, "normal", hoa_hand=True) is None
+    assert cs.diagnose(False, "high", hoa_hand=True) is None
+
+
+def test_hoa_hand_does_not_suppress_overload_while_commanded_on():
+    # HAND explains unexpected current, not excess current.
+    assert cs.diagnose(True, "high", hoa_hand=True) == "OVERLOAD"

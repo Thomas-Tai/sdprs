@@ -47,8 +47,8 @@ def build_decider(mode):
     raise ValueError("unknown PUMP_MODE: %r" % (mode,))
 
 
-def build_sensor_config():
-    return {
+def build_sensor_config(profile=None):
+    cfg = {
         "level_enabled": config.LEVEL_ENABLED,
         "float_enabled": config.FLOAT_ENABLED,
         "rain_enabled": config.RAIN_ENABLED,
@@ -59,7 +59,14 @@ def build_sensor_config():
         "debounce_ms": config.DEBOUNCE_MS,
         "adc_pin": config.ADC_PIN, "float_pin": config.FLOAT_PIN,
         "rain_pin": config.RAIN_PIN, "high_water_pin": config.HIGH_WATER_PIN,
+        "ct_enabled": False, "hoa_enabled": False,
+        "ct_adc_pin": config.CT_ADC_PIN, "hoa_hand_pin": config.HOA_HAND_PIN,
+        "hoa_hand_active_low": config.HOA_HAND_ACTIVE_LOW,
     }
+    if profile is not None:
+        cfg["ct_enabled"] = profile["ct_enabled"]
+        cfg["hoa_enabled"] = profile["hoa_enabled"]
+    return cfg
 
 
 def synthesize_display_level(readings):
@@ -190,6 +197,33 @@ def apply_manual_override(decision, manual_state, clock, strict=False):
 
     # Unknown action — ignore, clear the slot to avoid a stuck state.
     return decision, {"action": None, "expires_ms": None}
+
+
+def apply_overload_interlock(decision, verdict):
+    """Force OFF on an overload verdict, as a COMPLETE decision dict.
+
+    This is the ONE place CT data touches the control path, and it is
+    hardware protection sitting ABOVE decide() rather than a control
+    decision inside it — the pure safety core stays CT-free (spec §5.5).
+
+    NEVER drive the relay directly here. Poking the pin behind the state
+    machine leaves ctrl_state saying ON while the contactor is open:
+    _on_since keeps accumulating against a pump that is not running, the
+    next decide() returns HOLD (which correctly leaves the relay alone, so
+    everything LOOKS fine), and because no ON->OFF transition was recorded
+    the rest timer never starts. apply_manual_override() already returns a
+    decision rather than acting — this follows the same shape.
+    """
+    if verdict != "OVERLOAD":
+        return decision
+    next_state = dict(decision["next_state"])
+    next_state["pump_state"] = "OFF"
+    return {
+        "action": "OFF",
+        "next_state": next_state,
+        "flags": dict(decision["flags"], overload_trip=True),
+        "reason": control_logic.OVERLOAD_TRIP,
+    }
 
 
 def apply_boot_holdoff(decision, remaining_ms):
@@ -356,12 +390,12 @@ def main():
             from machine import WDT
             wdt = WDT(timeout=config.WDT_TIMEOUT)
         from sensors import build_readers
-        readers = build_readers(build_sensor_config())
+        readers = build_readers(build_sensor_config(profile))
         relay = machine.Pin(config.RELAY_PIN, machine.Pin.OUT)
         led_red = machine.Pin(config.LED_RED_PIN, machine.Pin.OUT)
         led_green = machine.Pin(config.LED_GREEN_PIN, machine.Pin.OUT)
         clock = _RealClockShim()
-        sensor_set = SensorSet(build_sensor_config(), readers, clock)
+        sensor_set = SensorSet(build_sensor_config(profile), readers, clock)
         pump = PumpController(relay, led_red, led_green,
                               {"low_threshold": float(config.LOW_THRESHOLD)}, clock)
         mqtt = PumpMQTTClient(
