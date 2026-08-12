@@ -53,6 +53,8 @@ Three build constraints follow, and they bind Task 12's commissioning document e
 
 Task 12's mains-box commissioning document must carry all three as sign-off items; spec §8.3 now lists them.
 
+> **Round-6 (installer/bench electrician review), 2026-08-12 — spec amended, firmware tasks unchanged.** Four hardware/BOM/commissioning findings (E1–E4) were adjudicated and folded into the design spec (§4.1/§4.2 BOM, §4.2.2(2b), §4.3, §7, §8.3, §9.1, §11 Round 6): **E1** coil suppression = flyback diode + series Zener/TVS, with MOSFET **`V_DS ≥ 60V`**; **E2** contactor **AC3 ≥ ~18A frame**; **E3** **Type-2 coordinated** MPCB+contactor pair; **E4** control supply kept downstream of the RCD (attribution gap documented; the pre-sized 24V DC-UPS is the Phase-2 fix). **No firmware task (1–11) changes.** Task 12 inherits the new §8.3 sign-off rows by reference.
+
 **Task ordering is not arbitrary.** Task 1 must precede Task 2 (the fixture is worthless captured after the refactor). Task 2 must precede Tasks 4 and 6 (spec §5.4 mandates the two-commit sequence). Tasks 8–10 depend on Task 3's profile table.
 
 ---
