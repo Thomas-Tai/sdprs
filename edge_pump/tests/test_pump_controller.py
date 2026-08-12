@@ -138,3 +138,54 @@ def test_min_off_and_rest_timers_stay_in_lockstep():
     clock.advance(1000)
     r, m = both()
     assert r == m == 1000
+
+
+def test_contactor_close_callback_fires_only_on_off_to_on():
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+    calls = []
+    pump = PumpController(FakePin(0), FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, FakeClock(),
+                          on_contactor_close=lambda: calls.append(1))
+
+    on = dict(pump.ctrl_state, pump_state="ON")
+    pump.apply({"action": "ON", "next_state": on, "flags": {}, "reason": "HIGH_WATER"})
+    assert len(calls) == 1
+
+    # HOLD while already ON must not count a second closure.
+    pump.apply({"action": "HOLD", "next_state": dict(on), "flags": {}, "reason": "HOLD"})
+    assert len(calls) == 1
+
+    off = dict(pump.ctrl_state, pump_state="OFF")
+    pump.apply({"action": "OFF", "next_state": off, "flags": {}, "reason": "STANDBY"})
+    assert len(calls) == 1
+
+    pump.apply({"action": "ON", "next_state": dict(on), "flags": {}, "reason": "HIGH_WATER"})
+    assert len(calls) == 2
+
+
+def test_contactor_counter_is_optional():
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+    pump = PumpController(FakePin(0), FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, FakeClock())
+    on = dict(pump.ctrl_state, pump_state="ON")
+    pump.apply({"action": "ON", "next_state": on, "flags": {}, "reason": "HIGH_WATER"})
+    assert pump.contactor_ops == 1
+
+
+def test_contactor_callback_failure_does_not_stop_the_pump():
+    # A worn flash partition must not prevent the pump from running.
+    from pump_controller import PumpController
+    from tests.fakes import FakeClock, FakePin
+
+    def explode():
+        raise OSError("flash worn out")
+
+    relay = FakePin(0)
+    pump = PumpController(relay, FakePin(0), FakePin(0),
+                          {"low_threshold": 20.0}, FakeClock(),
+                          on_contactor_close=explode)
+    on = dict(pump.ctrl_state, pump_state="ON")
+    pump.apply({"action": "ON", "next_state": on, "flags": {}, "reason": "HIGH_WATER"})
+    assert relay.value() == 1

@@ -6,13 +6,20 @@ import control_logic
 
 
 class PumpController:
-    def __init__(self, relay, led_red, led_green, config, clock):
+    def __init__(self, relay, led_red, led_green, config, clock,
+                 on_contactor_close=None):
         # clock 由呼叫端注入：裝置上為 main._RealClockShim，測試為 FakeClock。
         self._relay = relay
         self._led_red = led_red
         self._led_green = led_green
         self._config = config
         self._clock = clock
+        # Fired on each OFF->ON transition. The contactor is the only
+        # wearing part in the mains box and its electrical life is counted
+        # in operations, so this is how a service-due alert becomes
+        # possible BEFORE the contacts weld (spec §5.8).
+        self._on_contactor_close = on_contactor_close
+        self.contactor_ops = 0
 
         self.ctrl_state = control_logic.initial_state()
         self._on_since = None
@@ -92,6 +99,12 @@ class PumpController:
         if nxt["pump_state"] == "ON":
             if prev["pump_state"] != "ON":
                 self._on_since = now
+                self.contactor_ops += 1
+                if self._on_contactor_close is not None:
+                    try:
+                        self._on_contactor_close()
+                    except Exception:
+                        pass   # a worn flash must never stop the pump
             self._off_since = None            # running -> not resting
             self._min_off_since = None
         else:  # nxt OFF

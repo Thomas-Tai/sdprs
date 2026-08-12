@@ -396,8 +396,13 @@ def main():
         led_green = machine.Pin(config.LED_GREEN_PIN, machine.Pin.OUT)
         clock = _RealClockShim()
         sensor_set = SensorSet(build_sensor_config(profile), readers, clock)
+        def _count_contactor_close():
+            if profile["contactor_service_ops"]:
+                persist.bump_contactor_ops(nvs)
+
         pump = PumpController(relay, led_red, led_green,
-                              {"low_threshold": float(config.LOW_THRESHOLD)}, clock)
+                              {"low_threshold": float(config.LOW_THRESHOLD)}, clock,
+                              on_contactor_close=_count_contactor_close)
         mqtt = PumpMQTTClient(
             ssid=config.SSID, password=config.WIFI_PASS, broker=config.MQTT_BROKER,
             port=config.MQTT_PORT, node_id=config.NODE_ID, topic=config.MQTT_TOPIC_STATUS,
