@@ -387,3 +387,45 @@ payload 應該包含 `float_dry`、`raining` 欄位（先前 `False` 時這兩�
 | Section D 節點重啟後拒連 MQTT | 燒錄未寫入 `config.py`，或 SSID/broker 有改動 | REPL 檢查 `config.SSID` 值 |
 | Section E 假負載題 5 沒觸發 DRY_RUN_OFF | debounce 未達 `DEBOUNCE_MS=2500`，或 float 極性錯 | 確認拆開浮球至少 3 秒後再看 payload |
 | E.3 真泵不動 | 繼電器接錯（NO / NC 反）或抽水機無電 | 用電表量繼電器 COM–NO 導通 |
+
+---
+
+## §H 組態矩陣 · Configuration matrix (Mode C)
+
+`ACTUATOR_PROFILE` × `PUMP_MODE` = 四種合法部署。每一格都必須獨立驗收；
+通過其中一格**不代表**其他格可用。
+
+| | `DRAIN` | `COLLECT` |
+|---|---|---|
+| **`PUMP_12V`** | 現行台架節點（回歸基準） | 桌上展示收集情境 |
+| **`SOCKET_220V`** | 淹水基坑，現場水泵 | 雨水收集，現場水泵 |
+
+### 前置條件（不可跳過）
+
+- [ ] **§A 感測器極性驗證已完成並簽署。** `FLOAT_ACTIVE_LOW` /
+      `RAIN_ACTIVE_LOW` / `HIGH_WATER_ACTIVE_LOW` 目前是推測值
+      （`config.py:81-83`）。四種組態全部繼承這個前提；極性錯誤會讓
+      「水位到頂」讀成「水位見底」。
+- [ ] `SOCKET_220V` 任一格開始前，NVS 開機計數器（規格 §5.6）必須已實作。
+
+### 每一格的驗收項目
+
+| # | 項目 | DRAIN 預期 | COLLECT 預期 |
+|---|---|---|---|
+| 1 | 觸發 `high_water` | 水泵**啟動** | 水泵**停止**，回報 `CONTAINER_FULL` |
+| 2 | 觸發確認下雨（>30s） | 啟泵門檻降至 60% | 水泵**啟動**，回報 `COLLECT_RAIN_ON` |
+| 3 | 浮球報乾 | 水泵停止，`DRY_RUN_OFF` | 同左（共用安全核心） |
+| 4 | 連續運轉達 `MAX_RUN_MS` | 強制休息，`MAX_RUNTIME_REST` | 同左 |
+| 5 | 休息期間點擊手動 ▶ | 12V：允許／220V：**拒絕**並回報剩餘秒數 | 同左 |
+| 6 | 斷電後重新上電 | 220V：套用開機保留；`boot_count` 遞增 | 同左 |
+
+### 僅 `SOCKET_220V` 需要
+
+| # | 項目 | 預期 |
+|---|---|---|
+| 7 | HOA 切至 HAND | `hoa_hand=true`，**不得**發出熔接告警 |
+| 8 | HOA 輔助接點拔線 | 讀為 AUTO，熔接偵測維持啟用（傾向誤報） |
+| 9 | 命令 OFF 但插座有電流 | `WELDED_CONTACT` |
+| 10 | 命令 ON 但無電流 | `PUMP_NOT_RUNNING` |
+| 11 | 連續 3 次快速重開機 | 判定重置迴圈，保留延長至 300s |
+| 12 | 60ms CT 取樣 vs 30s WDT | 一小時內無 WDT 重置（規格 §9.5 未驗證項） |
