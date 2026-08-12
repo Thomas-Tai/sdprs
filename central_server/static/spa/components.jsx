@@ -1,6 +1,9 @@
 // Shared UI components
 
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
+// COMP-018: useMemo/useCallback were destructured here but never used
+// anywhere in this file (every memoization in components.jsx goes through
+// React.memo on whole components, not these hooks).
+const { useState, useEffect, useRef } = React;
 
 // ---------- Safe meta lookups ----------
 // Backend can send severities / states / detector-health values the UI has not
@@ -144,13 +147,23 @@ const AudioController = (() => {
       notify();
     },
     isArmed: () => armed,
+    // COMP-015: both guards used to stamp lastCriticalTime/lastWarningTime
+    // BEFORE checking `muted` — beep() itself no-ops while muted, but the
+    // timestamp still advanced on every call. A burst of alerts arriving
+    // during a muted period silently "used up" the overlap window, so the
+    // very FIRST real alert tone after the operator unmuted got swallowed
+    // by this guard (which exists to stop double-beeps within one real
+    // burst, not to suppress the first sound after a mute period ends).
+    // Checking `muted` first means a muted call never touches the timestamp.
     playCritical: () => {
+      if (muted) return;
       const now = Date.now();
       if (now - lastCriticalTime < 1000) return;
       lastCriticalTime = now;
       beep(880, 0.25); beep(660, 0.25, 'sine', 0.30); beep(880, 0.40, 'sine', 0.60);
     },
     playWarning: () => {
+      if (muted) return;
       const now = Date.now();
       if (now - lastWarningTime < 600) return;
       lastWarningTime = now;
@@ -444,10 +457,22 @@ const trapTab = (e, container) => {
   if (focusable.length === 0) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
-  if (e.shiftKey && document.activeElement === first) {
+  const active = document.activeElement;
+  // CMP-003: MuteDrawer / NodeSidePanel deliberately focus their own heading
+  // (tabIndex={-1}) on open, for screen-reader announcement — but tabindex=-1
+  // elements are intentionally excluded from FOCUSABLE_SELECTOR (they are not
+  // real tab stops), so the heading is never `first`. A Shift+Tab pressed
+  // before the operator has tabbed anywhere else therefore fell through to
+  // the browser default, which walks to the nearest focusable element BEFORE
+  // the heading in the DOM — i.e. straight out of the modal. Treat "focus is
+  // inside the trap but not part of its focusable set" the same as sitting at
+  // the start boundary.
+  const atStart = active === first ||
+    (container.contains(active) && Array.prototype.indexOf.call(focusable, active) === -1);
+  if (e.shiftKey && atStart) {
     e.preventDefault();
     last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
+  } else if (!e.shiftKey && active === last) {
     e.preventDefault();
     first.focus();
   }
@@ -475,7 +500,12 @@ const useBackdropDismiss = (onClose) => {
 
 // ---------- Status Strip ----------
 
-const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, onOpenShortcuts, page, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
+// COMP-011: `page` and `setMuted` were accepted here but never read anywhere
+// in this component — `setPage` (a distinct prop) drives navigation, and
+// muting goes through `window.SDPRS_AUDIO.setMuted` / `onOpenMuteDrawer`, not
+// a `setMuted` prop. Dead parameters removed; callers may still pass them
+// (JS ignores extra props) with no behavior change.
+const StatusStrip = React.memo(({ unackCount, muted, theme, setTheme, onOpenShortcuts, setPage, onOpenMuteDrawer, audioReplayIn, muteState, operators, staleAckCount, onOpenCmdK, focusMode, onToggleFocus }) => {
   const { liveSec } = React.useContext(LiveClockContext);
   const liveState = liveSec < 10 ? 'ok' : liveSec < 30 ? 'warn' : 'critical';
   // CMP-F17: the degraded/failed connection states — the two an operator most
@@ -627,12 +657,20 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             )}
             <span className="flex items-center gap-1 text-ink-secondary tnum">
               <Icon.Wind size={12}/>
-              <span className="font-mono">{window.WEATHER.wind.dir || ''} {window.WEATHER.wind.speed}<span className="text-ink-muted">km/h</span></span>
+              {/* COMP-008: a partial WEATHER payload (schema drift / a load
+                  that populated `available` but not every nested field) could
+                  leave `.wind` undefined — unguarded access crashed the ENTIRE
+                  status strip (nav, mute, logout — everything), not just this
+                  chip. Optional-chain + a neutral fallback degrade instead. */}
+              <span className="font-mono">{window.WEATHER.wind?.dir || ''} {window.WEATHER.wind?.speed ?? '—'}<span className="text-ink-muted">km/h</span></span>
             </span>
             <span className="text-ink-dim">|</span>
             <span className="flex items-center gap-1 text-ink-secondary tnum">
               <Icon.CloudRain size={12}/>
-              <span className="font-mono">{window.WEATHER.rain.now}<span className="text-ink-muted">mm/h</span></span>
+              {/* NEW-UX-007: hide the rain chip when rain.now is permanently null
+                  (backend has no sub-24h rain buckets — api.jsx always maps now=null). */}
+              {window.WEATHER.rain.now != null && <span className="font-mono">{window.WEATHER.rain.now}<span className="text-ink-muted">mm/h</span></span>}
+              {window.WEATHER.rain.now == null && <span className="font-mono text-ink-muted">—</span>}
             </span>
             {window.WEATHER.lightning && window.WEATHER.lightning.count > 0 && (
               <>
@@ -685,17 +723,25 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             type="button"
             onClick={() => { try { window.SDPRS_AUDIO.arm(); } catch (_) {} }}
             title={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效 (瀏覽器需要一次使用者互動)'}
+            aria-label={audioArmed ? '瀏覽器音效已啟用' : '點擊啟用瀏覽器音效'}
             disabled={audioArmed}
-            className={`hidden md:inline-flex flex-shrink-0 items-center gap-1 h-8 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
+            className={`inline-flex flex-shrink-0 items-center gap-1 h-8 px-2 rounded border text-[10px] font-medium tnum whitespace-nowrap transition-colors ${audioArmed ? 'border-sev-ok/40 bg-sev-ok/10 text-sev-ok cursor-default' : 'border-sev-warn/40 bg-sev-warn/10 text-sev-warn hover:bg-sev-warn/20 animate-live-blink'}`}
           >
-            {audioArmed ? '🔊 音效已啟用' : '🔇 點擊啟用音效'}
+            <span aria-hidden="true">{audioArmed ? '🔊' : '🔇'}</span>
+            <span className="hidden md:inline">{audioArmed ? ' 音效已啟用' : ' 點擊啟用音效'}</span>
           </button>
         )}
         <button
           type="button"
           onClick={onOpenMuteDrawer}
           title={`音效 (M) — ${activeMutes} 個來源已抑制`}
-          aria-pressed={activeMutes > 0}
+          // COMP-012: this button OPENS the MuteDrawer overlay (role="dialog")
+          // — it does not toggle its own state, so aria-pressed (which tells
+          // assistive tech "activating me flips MY boolean state") was the
+          // wrong contract. aria-haspopup announces "activating me opens a
+          // dialog"; the active-mute count is still conveyed by the visible
+          // badge + aria-label below.
+          aria-haspopup="dialog"
           aria-label={
             muted
               ? `開啟音效抽屜（目前全域靜音，${activeMutes} 個來源已抑制）`
@@ -715,7 +761,9 @@ const StatusStrip = React.memo(({ unackCount, muted, setMuted, theme, setTheme, 
             <div className="text-xs font-medium">{window.SDPRS_USER || '—'}</div>
             <div className="text-[10px] text-ink-muted font-mono tnum">已登入</div>
           </div>
-          <Icon.ChevronDown size={12} className="text-ink-muted"/>
+          {/* NEW-UX-023: removed ChevronDown (implied a dropdown menu, but the
+              button opens a single-action confirm dialog — the title tooltip
+              "點擊登出" is the correct affordance). */}
         </button>
       </div>
       {logoutConfirmOpen && (
@@ -748,7 +796,6 @@ const NAV_ITEMS = [
 const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, offlineCount }) => {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const drawerRef = useRef(null);
-  const hamburgerRef = useRef(null);
   // Element that had focus before the drawer opened; restored on close so
   // keyboard/screen-reader users don't get dumped back at <body>. WCAG 2.4.3.
   const lastFocusedRef = useRef(null);
@@ -837,8 +884,11 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
           ))}
         </div>
         <div className="text-[10px] text-ink-muted font-mono px-1 pt-1 flex justify-between">
-          <span>build 2026.05.18-r4</span>
-          <span className="text-sev-ok">●</span>
+          {/* NEW-UX-024: build string sourced from window.__SDPRS_BUILD (falls
+              back to a constant), status dot bound to the WS connection signal
+              (window.__SDPRS_WS_CONNECTED) instead of unconditionally green. */}
+          <span>{(window.__SDPRS_BUILD || 'build —')}</span>
+          <span className={window.__SDPRS_WS_CONNECTED ? 'text-sev-ok' : 'text-ink-muted'}>●</span>
         </div>
       </div>
     </>
@@ -848,7 +898,6 @@ const NavRail = React.memo(({ page, setPage, density, setDensity, unackCount, of
     <>
       {/* Mobile hamburger — floats over the top-left of StatusStrip on <md */}
       <button
-        ref={hamburgerRef}
         type="button"
         onClick={() => setMobileNavOpen(v => !v)}
         aria-label={mobileNavOpen ? '關閉導覽' : '開啟導覽'}
@@ -908,22 +957,45 @@ const Sparkline = React.memo(({ data, width = 240, height = 28 }) => {
       </div>
     );
   }
-  const max = Math.max(...data, 1);
-  const avg = data.reduce((a,b)=>a+b,0) / data.length;
-  const cur = data[data.length-1];
+  // COMP-010: a non-numeric bucket (null/undefined/NaN/a stray string from a
+  // malformed rate payload) fed straight into Math.max(...data) and `v / max`
+  // — Math.max is poisoned by a single NaN-coercible argument, so ONE bad
+  // bucket turned `max` (and therefore every bar's height) into NaN. The
+  // resulting "NaNpx" inline style is an invalid CSS length that the browser
+  // silently refuses to apply, so the whole sparkline rendered as collapsed,
+  // heightless bars instead of a labelled placeholder for just the bad
+  // bucket. Sanitize once up front; a bad bucket now reads as a real 0.
+  const nums = data.map(v => (typeof v === 'number' && Number.isFinite(v)) ? v : 0);
+  const max = Math.max(...nums, 1);
+  const avg = nums.reduce((a,b)=>a+b,0) / nums.length;
+  const cur = nums[nums.length-1];
   const surge = avg > 0 && cur > avg * 2;
   return (
     <div className="flex items-end gap-px h-7" style={{ width, height }}>
-      {data.map((v, i) => {
+      {nums.map((v, i) => {
         const h = Math.max(2, (v / max) * (height - 2));
-        const isLast = i === data.length - 1;
+        const isLast = i === nums.length - 1;
         return (
-          <div key={i} className={`flex-1 ${surge && i >= data.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} 則警報`}/>
+          <div key={i} className={`flex-1 ${surge && i >= nums.length - 4 ? 'bg-sev-critical' : isLast ? 'bg-sev-info' : 'bg-sev-info/60'} rounded-sm`} style={{ height: h + 'px' }} title={`${v} 則警報`}/>
         );
       })}
     </div>
   );
-}, (prev, next) => prev.data === next.data && prev.width === next.width && prev.height === next.height);
+}, (prev, next) => {
+  // COMP-014: comparing `data` by reference made this React.memo ineffective
+  // — every ~20s poll (and every WS event) hands Footer a FRESH array
+  // computed from the current alert list, so `prev.data === next.data` was
+  // false on every single render and the memo never once bailed out (pure
+  // overhead, zero benefit). Two arrays with the same bucket VALUES are the
+  // same sparkline; compare contents so an unchanged rate actually skips
+  // the re-render.
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  const a = prev.data, b = next.data;
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+});
 
 const Footer = React.memo(({ data, handover }) => {
   const arr = Array.isArray(data) && data.length ? data : [0];
@@ -989,6 +1061,7 @@ const SHORTCUTS = [
 const ShortcutsModal = ({ open, onClose }) => {
   const [q, setQ] = useState('');
   const dialogRef = useRef(null);
+  const inputRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
   // CMP-F1: hold onClose in a ref so the lifecycle effect below can depend on
@@ -1005,7 +1078,20 @@ const ShortcutsModal = ({ open, onClose }) => {
 
   React.useEffect(() => {
     if (!open) return;
+    // COMP-002: the search input used to carry a native `autoFocus` attribute.
+    // React applies `autoFocus` during the commit/mutation phase, which runs
+    // BEFORE this passive effect — so by the time `document.activeElement` was
+    // read here, it was already the about-to-unmount input, not the element
+    // that had focus before the modal opened. Restoring focus to that captured
+    // (now-detached) input on close is a silent no-op, so focus fell through
+    // to <body> and the operator's next keystrokes hit the global single-key
+    // hotkeys (A = ack!). Capture the REAL previous element first, then focus
+    // the input ourselves via ref — same pattern MuteDrawer/NodeSidePanel
+    // already use for their heading focus.
     lastFocusedRef.current = document.activeElement;
+    if (inputRef.current) {
+      try { inputRef.current.focus(); } catch (_) {}
+    }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
@@ -1049,7 +1135,7 @@ const ShortcutsModal = ({ open, onClose }) => {
           <div className="relative">
             <Icon.Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted"/>
             <input
-              autoFocus
+              ref={inputRef}
               value={q} onChange={e => setQ(e.target.value)}
               placeholder="搜尋捷徑或動作..."
               aria-label="搜尋快捷鍵"
@@ -1125,8 +1211,10 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
     setTestFeedback('');
     setUnsnoozing(new Set());
     setUnsnoozingAll(false);
-    inFlightRef.current = new Set();
-    allInFlightRef.current = false;
+    // NEW-RT-005: do NOT reset inFlightRef/allInFlightRef here — they guard
+    // against duplicate in-flight requests. Wiping them on reopen allows a
+    // genuine duplicate if the original request was still pending when the
+    // drawer closed. Only display-only state (errors, feedback) is cleared.
   }, [open]);
 
   // CMP-F13: clear any pending test-feedback timer on unmount.
@@ -1285,7 +1373,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
         role="dialog"
         aria-modal="true"
         aria-label="音效抑制 / 音量"
-        className="w-[380px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        className="w-[380px] max-w-[100vw] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10">
@@ -1423,7 +1511,7 @@ const MuteDrawer = ({ open, onClose, muteState, setMuteState, nodes }) => {
                   );
                 })}
                 {unsnoozeErr && (
-                  <div role="status" aria-live="polite" className="text-[10px] text-sev-critical mt-1 px-1">
+                  <div role="alert" aria-live="assertive" className="text-[10px] text-sev-critical mt-1 px-1">
                     {unsnoozeErr.nid ? `${unsnoozeErr.nid}: ` : ''}{unsnoozeErr.msg}
                   </div>
                 )}
@@ -1589,8 +1677,11 @@ const StaleAckPill = ({ count, onClick }) => {
 
 // ---------- New Alert Banner (floating, when scrolled past) ----------
 
-const NewAlertBanner = ({ count, onClick }) => {
+const NewAlertBanner = ({ count, onClick, stacked }) => {
   if (!count) return null;
+  // NEW-UX-008: when the full-width dataWarnings bar (app.jsx, top-12) is
+  // showing, this banner needs to drop below it instead of overlapping.
+  const topCls = stacked ? 'top-24' : 'top-16';
   // CMP-F18: `role="alert"` on the <button> overrode its button role, so
   // screen readers announced the text but never that it was operable — and an
   // element that is its own live region re-announces itself on every count
@@ -1604,7 +1695,7 @@ const NewAlertBanner = ({ count, onClick }) => {
       </div>
       <button type="button" onClick={onClick}
         aria-label={`${count} 個新警報 — 點擊或按上鍵跳轉`}
-        className="new-alert-banner fixed top-16 left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 h-8 px-3 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors">
+        className={`new-alert-banner fixed ${topCls} left-1/2 -translate-x-1/2 z-30 inline-flex items-center gap-2 h-8 px-3 rounded-full bg-sev-critical text-white shadow-2xl border border-sev-critical hover:bg-red-700 transition-colors`}>
         <Icon.ArrowUp size={14} strokeWidth={2.5} aria-hidden="true"/>
         <span className="text-sm font-semibold tnum" aria-hidden="true">{count} 新警報</span>
         <Kbd aria-hidden="true">↑</Kbd>
@@ -1615,7 +1706,10 @@ const NewAlertBanner = ({ count, onClick }) => {
 
 // ---------- Shift Banner (start/end of shift) ----------
 
-const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
+const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover, stacked }) => {
+  // NEW-UX-008: when the full-width dataWarnings bar (app.jsx, top-12) is
+  // showing, this banner needs to drop below it instead of overlapping.
+  const topCls = stacked ? 'top-24' : 'top-14';
   const s = shiftSummary || {};
   const operator = s.operator ?? window.SDPRS_USER ?? '—';
   // Field-name flex: try the audit-suggested name first, then fall back to
@@ -1631,7 +1725,7 @@ const ShiftBanner = ({ shiftSummary, onDismiss, onViewHandover }) => {
   const recent = s.recentIncident
     ?? (Array.isArray(s.highlights) && s.highlights.length ? s.highlights.join(' · ') : '尚無交接事項');
   return (
-    <div className="fixed top-14 right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden">
+    <div className={`fixed ${topCls} right-4 z-40 w-[360px] bg-surface-panel border border-sev-info/40 rounded-lg shadow-2xl overflow-hidden`}>
       <div className="px-4 py-2.5 bg-sev-info/15 border-b border-sev-info/30 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sev-info">
           <Icon.ClipboardList size={14}/>
@@ -1681,6 +1775,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
   const paletteRef = useRef(null);
+  const inputRef = useRef(null);
   const lastFocusedRef = useRef(null);
   const isTop = useOverlayTop(open);
   // CMP-F1: stable close handle so the lifecycle effect can depend on `open`.
@@ -1696,7 +1791,18 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   // overlay (F4 / useOverlayTop above).
   React.useEffect(() => {
     if (!open) return;
+    // COMP-002: was relying on the search input's native `autoFocus` attribute
+    // plus reading `document.activeElement` here to remember "what to restore
+    // focus to". React applies `autoFocus` during commit, before this effect
+    // runs, so the captured element was always the palette's OWN (soon to
+    // unmount) input — restoring focus to a detached node on close is a
+    // silent no-op, dropping focus to <body> and sending the operator's next
+    // keystrokes to the global hotkeys. Capture the real trigger first, then
+    // move focus into the palette ourselves.
     lastFocusedRef.current = document.activeElement;
+    if (inputRef.current) {
+      try { inputRef.current.focus(); } catch (_) {}
+    }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         if (!isTop()) return;
@@ -1728,7 +1834,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
 
   // Build searchable items
   const items = [
-    ...window.NAV_ITEMS.map(n => ({ kind: 'nav', id: n.id, label: `頁面: ${n.label}`, hint: `Hotkey ${n.hotkey}`, icon: n.Icon })),
+    ...window.NAV_ITEMS.map(n => ({ kind: 'nav', id: n.id, label: `頁面: ${n.label}`, hint: `快捷鍵 ${n.hotkey}`, icon: n.Icon })),
     ...alerts.map(a => ({ kind: 'alert', id: a.id, label: `${a.id} · ${window.alertTypeLabel(a.type)}`, hint: `${a.node} · ${a.state}`, sev: a.sev })),
     ...nodeList.map(n => ({ kind: 'node', id: n.id, label: `節點: ${n.id} · ${n.name}`, hint: n.location, status: n.status })),
     { kind: 'cmd', id: 'mute-all', label: '指令: 開啟音效抑制面板', hint: 'M', icon: Icon.VolumeX },
@@ -1741,6 +1847,15 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
   const matches = q
     ? items.filter(it => (it.label + ' ' + (it.hint || '') + ' ' + it.id).toLowerCase().includes(q.toLowerCase()))
     : items.slice(0, 15);
+
+  // COMP-009: `hi` only got reset on typing (setHi(0) alongside setQ above) —
+  // but the underlying list can also shrink while the operator types NOTHING
+  // at all, because app.jsx's ~20s poll can hand this component a smaller
+  // `alerts`/`nodes` array (an alert got resolved elsewhere, a node was
+  // removed) while the palette sits open on the same query. Clamp on every
+  // render so the highlight never points past the end of the CURRENT list,
+  // for whichever reason it changed.
+  const hiSafe = matches.length ? Math.min(hi, matches.length - 1) : 0;
 
   const fire = (it) => {
     if (it.kind === 'nav') onNav(it.id);
@@ -1767,9 +1882,16 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
     // Firefox, which delivers keydown before the IME swallows the key. The
     // app-level shortcut handler in app.jsx already guards exactly this way.
     if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(matches.length - 1, h + 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, h - 1)); }
-    else if (e.key === 'Enter') { e.preventDefault(); matches[hi] && fire(matches[hi]); }
+    // COMP-009: navigate with a functional updater so rapid arrow presses that
+    // land in the SAME render cycle still accumulate (a plain value computed
+    // from the closure-captured hiSafe would make every press in that cycle
+    // compute the same next index). Clamp the previous index against the
+    // CURRENT (possibly shrunk) list first, so a stale hi never carries an
+    // out-of-range base into the next step. Enter fires from hiSafe — the
+    // clamped position the operator actually sees highlighted.
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(matches.length - 1, Math.min(h, matches.length - 1) + 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, Math.min(h, matches.length - 1) - 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); matches[hiSafe] && fire(matches[hiSafe]); }
   };
 
   return (
@@ -1788,7 +1910,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
               the listbox actually has results, or a screen reader announces an
               expanded popup over the empty 「找不到符合的項目」 state. */}
           <input
-            autoFocus
+            ref={inputRef}
             value={q}
             onChange={e => { setQ(e.target.value); setHi(0); }}
             onKeyDown={onKey}
@@ -1799,7 +1921,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
             aria-expanded={matches.length > 0}
             aria-controls="cmdk-listbox"
             aria-autocomplete="list"
-            aria-activedescendant={matches.length > 0 ? `cmd-item-${hi}` : undefined}
+            aria-activedescendant={matches.length > 0 ? `cmd-item-${hiSafe}` : undefined}
           />
           <Kbd>Esc</Kbd>
         </div>
@@ -1814,7 +1936,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
           ) : (
             matches.map((it, i) => {
               const Ico = it.icon;
-              const selected = hi === i;
+              const selected = hiSafe === i;
               return (
                 <button key={`${it.kind}-${it.id}-${i}`}
                   type="button"
@@ -1843,7 +1965,8 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
                       {nodeStatusLabel(it.status)}
                     </span>
                   )}
-                  <span className="text-[10px] text-ink-dim uppercase font-mono tnum w-12 text-right flex-shrink-0">{it.kind}</span>
+                  {/* NEW-UX-025: map raw kind enum to zh-TW labels */}
+                  <span className="text-[10px] text-ink-dim uppercase font-mono tnum w-12 text-right flex-shrink-0">{{ nav: '頁面', alert: '警報', node: '節點', cmd: '指令' }[it.kind] || it.kind}</span>
                 </button>
               );
             })
@@ -1866,7 +1989,7 @@ const CommandPalette = ({ open, onClose, alerts, nodes, onSelectAlert, onNav, on
 
 // ---------- Node Detail Side Panel (from monitor wall / status) ----------
 
-const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSelectAlert, openAlerts, onUpdateNode }) => {
+const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSelectAlert, openAlerts = [], onUpdateNode }) => {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
   const [locationError, setLocationError] = useState(null);
@@ -1935,7 +2058,12 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
   }, [node?.id]);
 
   if (!node) return null;
-  const nodeAlerts = openAlerts.filter(a => a.node === node.id);
+  // COMP-017: `openAlerts` had no default and was called unguarded — a
+  // caller that hadn't finished loading/wiring the alerts list (or passed
+  // `null` explicitly) crashed the whole panel on `.filter` of undefined.
+  // The default parameter above covers an omitted prop; Array.isArray here
+  // also covers an explicit null/non-array value.
+  const nodeAlerts = (Array.isArray(openAlerts) ? openAlerts : []).filter(a => a.node === node.id);
   // Prefer prop-supplied history (fresh from caller's useState); fall back to
   // the window global for legacy call sites that haven't been updated yet.
   // See C-8 — direct window reads were non-reactive so panel history looked
@@ -1948,10 +2076,19 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
       setLocationError('位置為必填');
       return;
     }
+    // COMP-007: `onUpdateNode?.(...)` evaluates to `undefined` (no call, no
+    // throw) when the prop is missing — `await undefined` resolves
+    // immediately, so saveEdits fell straight into the success path and
+    // closed the editor as if the location had actually been persisted.
+    // Never claim success for a save that never happened.
+    if (typeof onUpdateNode !== 'function') {
+      setLocationError('儲存功能尚未就緒');
+      return;
+    }
     setLocationError(null);
     setSaving(true);
     try {
-      await onUpdateNode?.(node.id, { location: newLocation });
+      await onUpdateNode(node.id, { location: newLocation });
       setEditing(false);
     } catch (e) {
       setLocationError('儲存失敗，請重試');
@@ -1980,7 +2117,7 @@ const NodeSidePanel = ({ node, history, onClose, onJumpAlert, onNavigate, onSele
         role="dialog"
         aria-modal="true"
         aria-label={`節點詳情 ${node.id}`}
-        className="w-[420px] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
+        className="w-[420px] max-w-[100vw] h-full bg-surface-panel border-l border-border-strong overflow-y-auto scroll-thin"
         onClick={e => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-border-subtle sticky top-0 bg-surface-panel z-10 flex items-center justify-between">
@@ -2277,10 +2414,34 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
   const videoRef = React.useRef(null);
   const hlsRef = React.useRef(null);
   const retryCount = React.useRef(0);
+  // NEW-RT-004: idempotency guard — destroy() is called from both the fatal-
+  // error fallback (3rd retry) and the effect cleanup. When the fatal-error
+  // path fires first, it triggers onFallback which unmounts HlsPlayer,
+  // running the cleanup on the already-destroyed instance.
+  const destroyedRef = React.useRef(false);
+  // COMP-030: `onFallback` was read from the closure but NOT listed in the
+  // effect's deps ([nodeId] only) — deliberately, since app.jsx recreates
+  // this callback on every render and adding it would tear down/recreate
+  // the whole hls.js session (a fresh mount, a fresh manifest fetch) on
+  // every parent re-render, not just a real node change. But leaving it out
+  // entirely meant the ERROR handler's closure stayed frozen on whatever
+  // onFallback was current AT MOUNT TIME — a stale reference, the same
+  // class of bug useLatestRef (above) exists to close for the overlay
+  // components. Holding it in that same ref keeps the effect keyed on
+  // nodeId alone while every call site below always invokes the CURRENT
+  // onFallback.
+  const onFallbackRef = useLatestRef(onFallback);
 
   React.useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    // COMP-004: retryCount is a ref, so it survives across effect re-runs —
+    // switching to a DIFFERENT node re-runs this effect (dep [nodeId]) but
+    // used to inherit whatever strike count the PREVIOUS node's session had
+    // already accumulated. A camera the operator had just been viewing (2
+    // strikes in) handed the next camera only 1 more error's worth of budget
+    // before a premature permanent fallback. Each node gets its own session.
+    retryCount.current = 0;
     const src = `/api/webcam/${nodeId}/hls/playlist.m3u8`;
 
     // OPS-003: decide the playback path explicitly instead of the old
@@ -2297,7 +2458,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       // show a black frame under a false ● LIVE.
       if (hasNative) {
         video.src = src;
-        const onErr = () => { if (onFallback) onFallback(); };
+        const onErr = () => { if (onFallbackRef.current) onFallbackRef.current(); };
         video.addEventListener('error', onErr);
         video.play().catch(() => {});
         return () => {
@@ -2306,7 +2467,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
           video.load();
         };
       }
-      if (onFallback) onFallback();
+      if (onFallbackRef.current) onFallbackRef.current();
       return;
     }
 
@@ -2329,9 +2490,19 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       if (data.fatal) {
         retryCount.current += 1;
         if (retryCount.current >= 3) {
-          hls.destroy();
+          if (!destroyedRef.current) { destroyedRef.current = true; hls.destroy(); }
           hlsRef.current = null;
-          if (onFallback) onFallback();
+          if (onFallbackRef.current) onFallbackRef.current();
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // COMP-005: recoverMediaError() only repairs the MSE/media buffer;
+          // it does nothing for a failed network fetch (the manifest 404ing
+          // or timing out — "hls.js fails to load"). Calling the media
+          // recovery for a network-type error left the loader permanently
+          // stalled: hls.js never emitted another ERROR event, so the retry
+          // counter above never reached the fallback threshold and the tile
+          // stayed a silent, unexplained black frame forever. startLoad() is
+          // hls.js's own documented recovery action for a fatal network error.
+          hls.startLoad();
         } else {
           hls.recoverMediaError();
         }
@@ -2339,7 +2510,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
     });
 
     return () => {
-      hls.destroy();
+      if (!destroyedRef.current) { destroyedRef.current = true; hls.destroy(); }
       hlsRef.current = null;
     };
   }, [nodeId]);
@@ -2350,6 +2521,7 @@ const HlsPlayer = ({ nodeId, onFallback }) => {
       autoPlay
       muted
       playsInline
+      aria-label={nodeId ? `${nodeId} 即時影像` : '即時影像'}
       className="absolute inset-0 w-full h-full object-cover"
     />
   );

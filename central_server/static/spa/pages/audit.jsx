@@ -13,12 +13,18 @@ const SHIFT_WINDOW_MS = 12 * 60 * 60 * 1000;
 // HH:MM:SS with no date. Uses the browser's LOCAL Date getters only — `ts`
 // is already-correct epoch ms (parseTs upstream), so this is a pure display
 // conversion, not a compensating offset (see forecast-timezone contract).
+// AUD-004: include the year when the row is not in the current year, so
+// multi-day / cross-year audit reviews remain unambiguous. Uses browser-local
+// Date getters only — no manual UTC offset (would reintroduce API-F1-class
+// timezone bug).
 const formatAuditTs = (ts) => {
   if (ts == null) return null;
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return null;
   const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const thisYear = new Date().getFullYear();
+  const prefix = d.getFullYear() !== thisYear ? `${d.getFullYear()}-` : '';
+  return `${prefix}${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
 const AuditPage = ({ auditLog = [] }) => {
@@ -220,6 +226,7 @@ const AuditPage = ({ auditLog = [] }) => {
         <div className="flex-1"></div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setMeOnly(!meOnly)}
+            aria-pressed={meOnly}
             title="僅顯示我在近 12 小時內的操作"
             className={`inline-flex items-center gap-1 h-7 px-2 rounded text-xs border transition-colors ${meOnly ? 'bg-sev-info/15 border-sev-info/40 text-sev-info' : 'bg-surface-elevated border-border-subtle text-ink-secondary hover:border-border-strong'}`}>
             <Icon.User size={12}/> 本班 · 我的動作
@@ -227,39 +234,39 @@ const AuditPage = ({ auditLog = [] }) => {
           </button>
           <div className="inline-flex items-center">
             <FilterChip active={operatorFilter !== 'all'} onClick={cycleOperator}>
-              操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.ChevronDown size={10}/>
+              操作者: {operatorFilter === 'all' ? '全部' : operatorFilter} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {operatorFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除操作者篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setOperatorFilter('all'); }}
               >×</button>
             )}
           </div>
           <div className="inline-flex items-center">
             <FilterChip active={actionFilter !== 'all'} onClick={cycleAction}>
-              動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.ChevronDown size={10}/>
+              動作: {actionFilter === 'all' ? '全部' : (actionMeta[actionFilter]?.label || actionFilter)} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {actionFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除動作篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setActionFilter('all'); }}
               >×</button>
             )}
           </div>
           <div className="inline-flex items-center">
             <FilterChip active={dateFilter !== 'all'} onClick={cycleDate}>
-              日期: {dateLabel} <Icon.ChevronDown size={10}/>
+              日期: {dateLabel} <Icon.RefreshCw size={10}/>
             </FilterChip>
             {dateFilter !== 'all' && (
               <button
                 type="button"
                 aria-label="清除日期篩選"
-                className="ml-1 text-slate-500 hover:text-slate-200"
+                className="ml-1 text-ink-muted hover:text-ink-primary"
                 onClick={(e) => { e.stopPropagation(); setDateFilter('all'); }}
               >×</button>
             )}
@@ -307,6 +314,10 @@ const AuditPage = ({ auditLog = [] }) => {
                       <EmptyState icon={Icon.ShieldAlert}
                         title="無權限查看稽核紀錄,請聯絡管理員"
                         hint="需具備管理員權限才能檢視稽核紀錄"/>
+                    ) : meOnly && !_sessionUser ? (
+                      <EmptyState icon={Icon.User}
+                        title="無法辨識目前使用者"
+                        hint="系統無法確認您的身分，請確認登入狀態"/>
                     ) : (
                       <EmptyState icon={Icon.ClipboardList}
                         title={filtersActive ? '無符合條件的稽核紀錄' : '尚無稽核紀錄'}
@@ -316,14 +327,17 @@ const AuditPage = ({ auditLog = [] }) => {
                 </td>
               </tr>
             )}
-            {records.map((a) => {
+            {records.map((a, i) => {
               const m = actionMeta[a.action] || { tone: 'stale', label: a.action };
               // WHA-L6 fix (2026-07-20): was keyed on array index, which
               // shifts every time a new row is prepended by a refresh —
               // React then reuses/misattributes DOM nodes across unrelated
               // rows. Synthesize a stable-enough key from the row's own
               // content (no backend row id is mapped through mapAuditRow).
-              const rowKey = `${a.ts != null ? a.ts : 'na'}-${a.by}-${a.action}-${a.target}`;
+              // AUD-006: append array index as a tiebreaker so two bulk-op
+              // rows with identical ts/by/action/target don't collide on key.
+              // Index-only keys were the WHA-L6 bug — content+index is stable.
+              const rowKey = `${a.ts != null ? a.ts : 'na'}-${a.by}-${a.action}-${a.target}-${i}`;
               return (
                 <tr key={rowKey} className="border-b border-border-subtle/60 hover:bg-surface-elevated/60">
                   {/* WHA-H2 fix (2026-07-20): `a.t` is a time-only HH:MM:SS
@@ -347,7 +361,17 @@ const AuditPage = ({ auditLog = [] }) => {
                   </td>
                   <td className="px-4 py-2 font-mono text-ink-secondary">{a.target}</td>
                   <td className="px-4 py-2 font-mono text-[10px] text-ink-muted">
-                    {JSON.stringify(a.detail)}
+                    {/* AUD-002 / NEW-UX-020: format detail as readable key-value pairs
+                        instead of raw JSON.stringify (which dumps "{}" noise and causes
+                        unbounded row stretching). */}
+                    {a.detail && typeof a.detail === 'object'
+                      ? Object.entries(a.detail).map(([k, v]) => (
+                          <span key={k} className="inline-block mr-2">
+                            <span className="text-ink-dim">{k}:</span>{' '}
+                            <span className="text-ink-secondary">{String(v)}</span>
+                          </span>
+                        ))
+                      : (a.detail != null ? String(a.detail) : '—')}
                   </td>
                 </tr>
               );

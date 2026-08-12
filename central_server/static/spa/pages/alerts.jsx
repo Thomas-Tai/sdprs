@@ -54,7 +54,7 @@ const SystemOKState = ({ nodes = [] }) => {
   );
 };
 
-const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount, nodes = [] }) => {
+const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCheck, flash, siblingCount, nodes = [], showCheckbox = true }) => {
   const m = window.safeSevMeta(alert.sev);
   const node = nodes.find(n => n.id === alert.node);
   // Fixed row height only applies at md+ (real table row). Below md the row
@@ -71,9 +71,11 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
       className={`relative ${rowH} flex items-start md:items-center pl-3 py-2 md:py-0 border-b border-border-subtle/60 transition-colors sev-bar ${m.bar} ${selected ? 'row-selected' : 'hover:bg-surface-elevated/60'} ${flash ? 'row-flash' : ''} ${isUrgent ? 'animate-pulse-critical' : ''}`}
     >
       <div className="w-6 flex-shrink-0 flex items-center justify-center">
+        {showCheckbox && (
         <input type="checkbox" checked={checked} onChange={() => onCheck(alert.id)}
           aria-label={`選取警報 ${alert.id}`}
           className="w-3.5 h-3.5 rounded border-border-strong bg-surface-base text-sev-info focus:ring-sev-info"/>
+        )}
       </div>
       {/* Button-role region is a SIBLING of the checkbox (not parent) — nesting
           interactive elements inside role="button" collapses screen-reader
@@ -95,7 +97,7 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
         <div className="flex items-center gap-2 md:contents">
           <div className="w-4 flex-shrink-0 flex items-center justify-center">
             {!alert.seen && alert.state === 'pending' && (
-              <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱"></span>
+              <span className="w-1.5 h-1.5 rounded-full bg-sev-info animate-live-blink" title="未閱" aria-label="未閱" role="status"></span>
             )}
           </div>
           <div className="w-auto md:w-20 flex-shrink-0"><AgeCell sec={alert.ageSec}/></div>
@@ -141,10 +143,11 @@ const AlertRow = React.memo(({ alert, selected, onSelect, density, checked, onCh
     pa.ackBy === na.ackBy && (pa.timeline?.length || 0) === (na.timeline?.length || 0) &&
     prev.selected === next.selected && prev.density === next.density &&
     prev.checked === next.checked && prev.flash === next.flash &&
-    prev.siblingCount === next.siblingCount && prev.nodes === next.nodes;
+    prev.siblingCount === next.siblingCount && prev.nodes === next.nodes &&
+    prev.showCheckbox === next.showCheckbox;
 });
 
-const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onRefresh, onVisibleChange, ackedIds, resolveNote, setResolveNote, busy, nodes = [], nodeHistory = {} }) => {
+const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResolve, onSnooze, onUnsnooze, onRefresh, onVisibleChange, ackedIds, resolveNote, setResolveNote, busy, nodes = [], nodeHistory = {} }) => {
   const [tab, setTab] = useState_p('active');
   const [filterSev, setFilterSev] = useState_p('all');
   const [checked, setChecked] = useState_p(new Set());
@@ -210,9 +213,24 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
     flashTimersRef.current.clear();
   }, []);
 
-  const activeList = tab === 'active'
-    ? alerts.filter(a => a.state !== 'resolved')
-    : window.HISTORY_ALERTS;
+  // ALR-008: memoize so `filtered`'s useMemo isn't defeated by a fresh
+  // activeList identity every render. Deps are the only real inputs.
+  const activeList = useMemo_p(() => {
+    if (window.__SDPRS_ALR008_COUNT != null) window.__SDPRS_ALR008_COUNT++;
+    return tab === 'active'
+      ? alerts.filter(a => a.state !== 'resolved')
+      : window.HISTORY_ALERTS;
+  }, [tab, alerts]);
+
+  // ALR-009: precompute node→active-count map once per render instead of
+  // O(n²) per-row filter. Badge values are identical to before.
+  const activeCountByNode = useMemo_p(() => {
+    const map = {};
+    alerts.forEach(a => {
+      if (a.state !== 'resolved') map[a.node] = (map[a.node] || 0) + 1;
+    });
+    return map;
+  }, [alerts]);
 
   const filtered = useMemo_p(() => {
     return activeList.filter(a => {
@@ -432,6 +450,9 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
       const t = e.target;
       const tag = t && t.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+      // NEW-RT-002: if any overlay (drawer/modal) is open on top, Escape
+      // belongs to it — don't also silently wipe the bulk selection.
+      if (window.__SDPRS_OVERLAY_STACK && window.__SDPRS_OVERLAY_STACK.length > 0) return;
       setChecked(new Set());
       setBulkNote('');
       disarmResolve();
@@ -468,10 +489,15 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   // the operator's own filter (harmless — the alert is unchanged, just off
   // screen), and surface each as an explicit, dismissible banner in the
   // detail pane below rather than acting behind the operator's back.
-  const [stateChangeAck, setStateChangeAck] = useState_p(false);
+  // ALR-001 + ALR-011: track the state value the operator has acknowledged
+  // seeing (not a boolean — that made the banner one-shot). Also detect
+  // self-action: the banner must fire ONLY for genuine peer changes, never
+  // for the current operator's own ack/resolve/snooze.
+  const [acknowledgedState, setAcknowledgedState] = useState_p(null);
   const selectedStateAtSelectRef = useRef_p(null);
   useEffect_p(() => {
     selectedStateAtSelectRef.current = selected ? selected.state : null;
+    setAcknowledgedState(selected ? selected.state : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -481,13 +507,22 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
   useEffect_p(() => {
     setSnoozeOpen(false);
     setResolveNote('');
-    setStateChangeAck(false);
+    setAcknowledgedState(selected ? selected.state : null);
   }, [selectedId]);
 
+  // ALR-001 + ALR-011: the banner fires only for genuine peer changes.
+  // 1. Self-action detection: if the state change was caused by the current
+  //    operator (ackBy/resBy === SDPRS_USER), suppress the banner.
+  // 2. Acknowledged-state-value: track the last state the operator dismissed,
+  //    so a SECOND distinct peer transition re-arms the banner (not one-shot).
+  const isSelfAction = selected && (
+    (selected.ackBy && selected.ackBy === window.SDPRS_USER) ||
+    (selected.resBy && selected.resBy === window.SDPRS_USER)
+  );
   const selectedStateChanged = !!selected
-    && selectedStateAtSelectRef.current != null
-    && selected.state !== selectedStateAtSelectRef.current
-    && !stateChangeAck;
+    && acknowledgedState != null
+    && selected.state !== acknowledgedState
+    && !isSelfAction;
   const selectedHiddenByFilter = selectedId != null && !!selected
     && !filtered.some(a => a.id === selectedId);
 
@@ -512,11 +547,16 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         {/* Tabs + filters */}
         <div className="border-b border-border-subtle bg-surface-panel">
           <div className="flex items-center px-3 pt-2.5">
-            <div className="flex gap-1 text-sm">
-              <button onClick={() => setTab('active')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors flex items-center gap-2 ${tab === 'active' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
+            {/* NEW-UX-018: the filtered list below is one shared DOM subtree
+                whose DATA changes with `tab` (not a distinct per-tab panel
+                element), so wiring aria-controls/tabpanel here would
+                misrepresent the structure — ship the core tablist/tab/
+                aria-selected semantics only. */}
+            <div className="flex gap-1 text-sm" role="tablist">
+              <button onClick={() => setTab('active')} role="tab" aria-selected={tab === 'active'} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors flex items-center gap-2 ${tab === 'active' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
                 作用中 <span className={`text-[10px] font-mono tnum px-1.5 rounded ${tab==='active' ? 'bg-sev-critical text-white' : 'bg-surface-elevated text-ink-muted'}`}>{activeAlertsCount}</span>
               </button>
-              <button onClick={() => setTab('history')} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors ${tab === 'history' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
+              <button onClick={() => setTab('history')} role="tab" aria-selected={tab === 'history'} className={`px-3 py-1.5 rounded-t border-b-2 transition-colors ${tab === 'history' ? 'border-sev-info text-ink-primary' : 'border-transparent text-ink-muted hover:text-ink-secondary'}`}>
                 歷史
               </button>
             </div>
@@ -564,9 +604,18 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
           </div>
         )}
 
+        {/* ALR-004: history tab truncation banner — mirrors the active tab's
+            banner so operators know the history list is also capped. */}
+        {tab === 'history' && window.HISTORY_ALERTS && window.HISTORY_ALERTS.truncated && (
+          <div className="px-3 py-1.5 bg-sev-warn/10 border-b border-sev-warn/30 text-[11px] text-sev-warn flex items-center gap-1.5">
+            <Icon.AlertTriangle size={11} className="flex-shrink-0"/>
+            <span>已達顯示上限 — 歷史警報至少有 <span className="font-mono tnum font-semibold">{window.HISTORY_ALERTS.totalAvailable}</span> 筆，較早的紀錄可能未顯示</span>
+          </div>
+        )}
+
         {/* Bulk bar */}
         {checked.size > 0 && (
-          <div className="bg-sev-info/10 border-b border-sev-info/30 px-3 py-2 flex items-center gap-2 text-xs">
+          <div className="bg-sev-info/10 border-b border-sev-info/30 px-3 py-2 flex flex-wrap items-center gap-2 text-xs">
             <span className="text-sev-info font-medium tnum">已選 {checked.size}</span>
             <span className="text-ink-muted">|</span>
             <button onClick={handleBulkAck} disabled={bulkBusy}
@@ -613,7 +662,19 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
         <div className="flex-1 overflow-y-auto scroll-thin">
           {filtered.length === 0 ? (
             activeList.length === 0 ? (
-              <SystemOKState nodes={nodes}/>
+              // ALR-005: on the history tab, show history-appropriate empty
+              // copy instead of the active-state "目前沒有作用中的警報".
+              tab === 'history' ? (
+                <div className="flex flex-col items-center justify-center text-center py-12 px-6">
+                  <div className="w-16 h-16 rounded-full bg-surface-elevated flex items-center justify-center mb-4">
+                    <Icon.Clock size={28} className="text-ink-muted" strokeWidth={2}/>
+                  </div>
+                  <div className="text-base text-ink-primary font-medium">目前沒有歷史警報紀錄</div>
+                  <div className="text-sm text-ink-muted mt-1.5">此班次的已解決警報會顯示在這裡</div>
+                </div>
+              ) : (
+                <SystemOKState nodes={nodes}/>
+              )
             ) : (
               <FilteredEmptyState hiddenCount={activeList.length}
                 // ALR-L6: this button clears the severity/search filters — it
@@ -624,14 +685,8 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             )
           ) : (
             filtered.map(a => {
-              // ALR-L8: sibling "+N" must always count truly-active
-              // (non-resolved) alerts on the same node — never `activeList`,
-              // which is tab-dependent and becomes window.HISTORY_ALERTS
-              // (including resolved rows) while viewing 歷史. The badge's
-              // warn styling implies "other live problems here right now";
-              // showing it for resolved history entries would be a false
-              // alarm. Mirrors AlertDetail's `siblings` filter below.
-              const sib = alerts.filter(x => x.state !== 'resolved' && x.node === a.node && x.id !== a.id).length;
+              // ALR-009: use precomputed map instead of per-row O(n) filter.
+              const sib = (activeCountByNode[a.node] || 0) - (a.state !== 'resolved' ? 1 : 0);
               return (
                 <AlertRow key={a.id} alert={a}
                   selected={selectedId === a.id}
@@ -642,6 +697,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
                   flash={ackedIds.has(a.id) && !window.__SDPRS_FLASHED_ALERT_IDS.has(a.id)}
                   siblingCount={sib}
                   nodes={nodes}
+                  showCheckbox={tab === 'active'}
                 />
               );
             })
@@ -674,7 +730,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             <div className="flex items-center gap-2">
               <Icon.AlertTriangle size={14} className="flex-shrink-0"/>
               <span className="flex-1">此警報狀態已變更為「{window.safeStateMeta(selected.state).label}」— 可能已由其他操作人員處理。</span>
-              <button onClick={() => setStateChangeAck(true)}
+              <button onClick={() => setAcknowledgedState(selected.state)}
                 className="px-2 py-0.5 rounded border border-sev-warn/50 hover:bg-sev-warn/20 flex-shrink-0">知道了</button>
             </div>
             {resolveNote && resolveNote.trim().length > 0 && (
@@ -695,7 +751,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
             <button onClick={() => setSelectedId(null)} className="text-ink-secondary hover:text-ink-primary underline flex-shrink-0">返回列表</button>
           </div>
         )}
-        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy} nodes={nodes} nodeHistory={nodeHistory}/> : (
+        {selected ? <AlertDetail key={selected.id} alert={selected} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onUnsnooze={onUnsnooze} resolveNote={resolveNote} setResolveNote={setResolveNote} snoozeOpen={snoozeOpen} setSnoozeOpen={setSnoozeOpen} allAlerts={alerts} onSelectAlert={setSelectedId} busy={busy} nodes={nodes} nodeHistory={nodeHistory}/> : (
           <EmptyState icon={Icon.AlertCircle} title="選擇警報以查看詳情" hint="使用 ↑/↓ 鍵或滑鼠點選"/>
         )}
       </div>
@@ -709,7 +765,7 @@ const AlertsPage = ({ density, selectedId, setSelectedId, alerts, onAck, onResol
 // the trigger, focus outside the menu also closes it.
 const SNOOZE_DURATIONS = [30, 60, 120];
 
-const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
+const SnoozeMenu = ({ alert, open, setOpen, onSnooze, onUnsnooze, busy, nodes = [] }) => {
   const triggerRef = useRef_p(null);
   const menuRef = useRef_p(null);
   const itemRefs = useRef_p([]);
@@ -792,6 +848,31 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
           onKeyDown={onKeyDown}
           className="absolute bottom-full mb-1 right-0 bg-surface-overlay border border-border-strong rounded shadow-xl py-1 min-w-[200px] z-10"
         >
+          {/* ALR-010: detect if this alert's node is currently snoozed and
+              show the current-snooze state + unsnooze affordance. */}
+          {(() => {
+            const node = nodes.find(n => n.id === alert.node);
+            const isSnoozed = node && node.snoozeMin > 0;
+            if (!isSnoozed) return null;
+            return (
+              <div className="px-3 py-1.5 bg-sev-warn/10 border-b border-sev-warn/20">
+                <div className="text-[10px] text-sev-warn font-medium flex items-center gap-1">
+                  <Icon.VolumeX size={10} className="flex-shrink-0"/>
+                  此節點目前已靜音 {node.snoozeMin} 分鐘
+                </div>
+                {typeof onUnsnooze === 'function' && (
+                  <button
+                    role="menuitem"
+                    onClick={async () => {
+                      try { await onUnsnooze(alert.id); setOpen(false); triggerRef.current?.focus(); }
+                      catch (e) { /* keep open for retry */ }
+                    }}
+                    className="mt-1 w-full px-2 py-1 text-left text-[11px] font-medium text-sev-warn hover:bg-sev-warn/20 rounded border border-sev-warn/30"
+                  >解除靜音</button>
+                )}
+              </div>
+            );
+          })()}
           <div className="px-3 pt-1 pb-1.5 text-[10px] text-ink-muted">延期 {alert.node} · 期間將不發告警音</div>
           {SNOOZE_DURATIONS.map((m, i) => (
             <button
@@ -799,6 +880,7 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
               ref={el => (itemRefs.current[i] = el)}
               role="menuitem"
               tabIndex={i === activeIdx ? 0 : -1}
+              disabled={busy}
               onClick={async () => {
                 try {
                   await onSnooze(alert.id, m);
@@ -808,7 +890,7 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
                   /* keep menu open so operator can retry — parent already toasts */
                 }
               }}
-              className="w-full px-3 py-1.5 text-left text-sm hover:bg-surface-panel focus:bg-surface-panel focus:outline-none focus:ring-1 focus:ring-sev-info flex items-center justify-between"
+              className={`w-full px-3 py-1.5 text-left text-sm hover:bg-surface-panel focus:bg-surface-panel focus:outline-none focus:ring-1 focus:ring-sev-info flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               <span>{m} 分鐘</span><span className="font-mono text-xs text-ink-muted tnum" aria-hidden="true">{m}m</span>
             </button>
@@ -819,7 +901,7 @@ const SnoozeMenu = ({ alert, open, setOpen, onSnooze, busy }) => {
   );
 };
 
-const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert, busy, nodes = [], nodeHistory = {} }) => {
+const AlertDetail = ({ alert, onAck, onResolve, onSnooze, onUnsnooze, resolveNote, setResolveNote, snoozeOpen, setSnoozeOpen, allAlerts, onSelectAlert, busy, nodes = [], nodeHistory = {} }) => {
   const node = nodes.find(n => n.id === alert.node);
   const m = window.safeSevMeta(alert.sev);
   const runbook = window.RUNBOOKS[alert.type];
@@ -943,7 +1025,9 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
                 // (resolved/acked timestamp) + `type` is what this data
                 // actually has for identity — no backend id exists on these
                 // rows — combined with the index only to break ties.
-                <div key={`${h.t}-${h.type}-${i}`} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong cursor-pointer transition-colors`}>
+                // NEW-UX-019: removed cursor-pointer + hover:border — no onClick,
+                // so those were a false affordance (informational cards only).
+                <div key={`${h.t}-${h.type}-${i}`} className={`flex-shrink-0 w-24 bg-surface-elevated rounded border ${i === 0 ? 'border-sev-info/40' : 'border-border-subtle'} overflow-hidden transition-colors`}>
                   <div className={`relative aspect-video snapshot-placeholder`}>
                     {/* ALR-L7: `h.snapshot_url` was the same always-dead field
                         as the alert-level snapshot above — never populated,
@@ -997,13 +1081,14 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
 
       {/* Timeline / node info / processing log — real tabs */}
       <div className="px-4 py-4 flex-1 overflow-y-auto scroll-thin">
-        <div className="flex items-center gap-3 mb-3 text-xs border-b border-border-subtle pb-2">
+        <div className="flex items-center gap-3 mb-3 text-xs border-b border-border-subtle pb-2" role="tablist">
           {[
             { id: 'timeline', label: '事件時間軸' },
             { id: 'node',     label: '節點資訊' },
             { id: 'log',      label: '處理紀錄' },
           ].map(t => (
-            <button key={t.id} onClick={() => setDetailTab(t.id)}
+            <button key={t.id} id={`detail-tab-${t.id}`} onClick={() => setDetailTab(t.id)}
+              role="tab" aria-selected={detailTab === t.id} aria-controls={`detail-tabpanel-${t.id}`}
               className={detailTab === t.id
                 ? 'font-semibold text-ink-primary border-b-2 border-sev-info pb-1.5 -mb-2'
                 : 'text-ink-muted hover:text-ink-secondary'}>
@@ -1012,7 +1097,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           ))}
         </div>
         {detailTab === 'timeline' && (
-          <div className="relative pl-5">
+          <div className="relative pl-5" id="detail-tabpanel-timeline" role="tabpanel" aria-labelledby="detail-tab-timeline">
             <div className="absolute left-1.5 top-1 bottom-1 w-px bg-border-strong"></div>
             {alert.timeline?.map((ev, i) => (
               <div key={i} className="relative pb-3 last:pb-0">
@@ -1041,7 +1126,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </div>
         )}
         {detailTab === 'node' && (
-          <dl className="text-xs grid grid-cols-[6rem_1fr] gap-y-1.5 gap-x-3">
+          <dl className="text-xs grid grid-cols-[6rem_1fr] gap-y-1.5 gap-x-3" id="detail-tabpanel-node" role="tabpanel" aria-labelledby="detail-tab-node">
             <dt className="text-ink-muted">節點 ID</dt><dd className="font-mono tnum text-ink-primary">{alert.node}</dd>
             <dt className="text-ink-muted">類型</dt><dd className="text-ink-secondary">{node ? (node.type === 'camera' ? '攝影機' : '抽水站') : '—'}</dd>
             <dt className="text-ink-muted">名稱</dt><dd className="text-ink-secondary">{node?.name || '—'}</dd>
@@ -1068,7 +1153,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           </dl>
         )}
         {detailTab === 'log' && (
-          <div className="text-xs space-y-2">
+          <div className="text-xs space-y-2" id="detail-tabpanel-log" role="tabpanel" aria-labelledby="detail-tab-log">
             {alert.state === 'pending' && <div className="text-ink-muted">尚未處理。</div>}
             {alert.ackAt && (
               <div className="bg-surface-panel border border-border-subtle rounded p-2">
@@ -1101,7 +1186,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
         {alert.state === 'acknowledged' && alert.ackAgeSec > 1500 && (
           <div className="flex items-center gap-2 text-xs px-2 py-1.5 bg-sev-warn/10 border border-sev-warn/30 rounded text-sev-warn">
             <Icon.Clock size={12}/>
-            <span>已認領 <span className="font-mono tnum font-semibold">{window.fmtAge(alert.ackAgeSec)}</span> by {alert.ackBy} — 仍未解決</span>
+            <span>已認領 <span className="font-mono tnum font-semibold">{window.fmtAge(alert.ackAgeSec)}</span> 由 {alert.ackBy} — 仍未解決</span>
           </div>
         )}
 
@@ -1172,7 +1257,7 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
           )}
           {alert.state === 'resolved' && (
             <div className="flex-1 h-9 bg-sev-ok/10 border border-sev-ok/30 text-sev-ok rounded font-medium text-sm flex items-center justify-center gap-2">
-              <Icon.CheckCircle size={14}/> 已解決於 {alert.resAt} by {alert.resBy}
+              <Icon.CheckCircle size={14}/> 已解決於 {alert.resAt} 由 {alert.resBy}
             </div>
           )}
           {alert.state !== 'resolved' && (
@@ -1181,7 +1266,9 @@ const AlertDetail = ({ alert, onAck, onResolve, onSnooze, resolveNote, setResolv
               open={snoozeOpen}
               setOpen={setSnoozeOpen}
               onSnooze={onSnooze}
+              onUnsnooze={onUnsnooze}
               busy={busy}
+              nodes={nodes}
             />
           )}
         </div>
@@ -1224,18 +1311,21 @@ const Floorplan = ({ highlightNode, nodes = [] }) => {
         </div>
       ) : (
       <svg viewBox="0 0 320 170" className="w-full h-24" preserveAspectRatio="xMidYMid meet">
-        {/* Rooms */}
-        <rect x="10" y="10" width="140" height="70" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="160" y="10" width="150" height="55" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="10" y="90" width="100" height="70" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
-        <rect x="120" y="75" width="100" height="50" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1" strokeDasharray="2,2"/>
-        <rect x="220" y="80" width="90" height="80" fill="rgba(30,41,59,0.4)" stroke="#334155" strokeWidth="1"/>
+        {/* Rooms — NEW-UX-006: fills come from the theme-aware .floorplan-room
+            / .floorplan-label classes (styles.css) instead of a hardcoded
+            dark-navy fill that nearly vanished against the light-theme
+            (white) panel background. */}
+        <rect x="10" y="10" width="140" height="70" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="160" y="10" width="150" height="55" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="10" y="90" width="100" height="70" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
+        <rect x="120" y="75" width="100" height="50" className="floorplan-room" stroke="#334155" strokeWidth="1" strokeDasharray="2,2"/>
+        <rect x="220" y="80" width="90" height="80" className="floorplan-room" stroke="#334155" strokeWidth="1"/>
         {/* Labels */}
-        <text x="20" y="25" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">西側走廊</text>
-        <text x="170" y="25" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">北側出入口</text>
-        <text x="20" y="105" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">機房</text>
-        <text x="130" y="92" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">集水井區</text>
-        <text x="230" y="95" fill="#64748B" fontSize="7" fontFamily="JetBrains Mono">東側大廳</text>
+        <text x="20" y="25" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">西側走廊</text>
+        <text x="170" y="25" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">北側出入口</text>
+        <text x="20" y="105" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">機房</text>
+        <text x="130" y="92" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">集水井區</text>
+        <text x="230" y="95" className="floorplan-label" fontSize="11" fontFamily="JetBrains Mono">東側大廳</text>
         {/* Pins */}
         {Object.entries(PINS).map(([id, p]) => {
           const node = nodes.find(n => n.id === id);
@@ -1246,7 +1336,7 @@ const Floorplan = ({ highlightNode, nodes = [] }) => {
             <g key={id}>
               {isHi && <circle cx={p.x} cy={p.y} r="9" fill={color} opacity="0.25" className="animate-live-blink"/>}
               <circle cx={p.x} cy={p.y} r={isHi ? 5 : 3} fill={color} stroke={isHi ? '#FFF' : 'none'} strokeWidth={isHi ? 1.5 : 0}/>
-              {isHi && <text x={p.x + 8} y={p.y + 3} fill="#F8FAFC" fontSize="8" fontFamily="JetBrains Mono" fontWeight="600">{id}</text>}
+              {isHi && <text x={p.x + 8} y={p.y + 3} className="floorplan-label-pin" fontSize="8" fontFamily="JetBrains Mono" fontWeight="600">{id}</text>}
             </g>
           );
         })}

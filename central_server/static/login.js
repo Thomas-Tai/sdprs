@@ -39,4 +39,30 @@
       if (caps) caps.classList.add("hidden");
     });
   }
+
+  // --- UX-003: lockout countdown ---
+  // On a 429 lockout the server renders the error banner with data-retry-after
+  // (seconds). Tick it down so the operator sees exactly when they can retry,
+  // and keep the submit button disabled until then — hammering the locked form
+  // does nothing but log more lockout rows. The server value is authoritative;
+  // no reload needed.
+  var lockAlert = document.querySelector("[data-retry-after]");
+  var submitBtn = document.querySelector('form button[type="submit"]');
+  if (lockAlert && submitBtn) {
+    var remaining = parseInt(lockAlert.getAttribute("data-retry-after"), 10);
+    if (isFinite(remaining) && remaining > 0) {
+      submitBtn.disabled = true;
+      var tick = function () {
+        if (remaining <= 0) {
+          submitBtn.disabled = false;
+          lockAlert.textContent = "您現在可以再次嘗試登入";
+          return;
+        }
+        lockAlert.textContent = "嘗試次數過多，請於 " + remaining + " 秒後再試";
+        remaining -= 1;
+        window.setTimeout(tick, 1000);
+      };
+      tick();
+    }
+  }
 })();

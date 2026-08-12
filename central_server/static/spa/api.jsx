@@ -11,6 +11,11 @@
 // then refreshLive() on a timer and on every relevant WebSocket event.
 
 (function () {
+  // FIX-024: WebSocket connection state for UI indicators. Initialized
+  // false; set true in ws.onopen, false in ws.onclose. Mirrors the
+  // __SDPRS_SESSION_EXPIRED global idiom already in this file.
+  window.__SDPRS_WS_CONNECTED = false;
+
   // ---- low-level fetch ---------------------------------------------------
 
   const FETCH_TIMEOUT_MS = 10_000;
@@ -48,13 +53,23 @@
     const t = setTimeout(() => ac.abort(), timeoutMs);
     // Compose the built-in timeout signal with any caller-supplied signal so
     // a page-level AbortController (e.g. cancel-on-navigate) does NOT defeat
-    // the timeout. If the runtime lacks AbortSignal.any (all evergreen
-    // browsers ship it since 2024), fall back to letting the timeout win —
-    // i.e. spread opts BEFORE signal so opts.signal can't override it.
+    // the timeout, and the timeout does NOT defeat the caller's cancel.
     const callerSignal = opts && opts.signal;
-    const signal = (callerSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function')
-      ? AbortSignal.any([ac.signal, callerSignal])
-      : ac.signal;
+    let signal;
+    if (callerSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+      signal = AbortSignal.any([ac.signal, callerSignal]);
+    } else {
+      // DATA-012: runtimes without AbortSignal.any (all evergreen browsers have
+      // shipped it since 2024, but not every embedded webview). The old code
+      // fell back to `ac.signal` alone, silently DROPPING the caller's signal —
+      // a page-level cancel-on-navigate would then never abort the request.
+      // Forward the caller's abort onto our controller by hand so both still win.
+      signal = ac.signal;
+      if (callerSignal) {
+        if (callerSignal.aborted) ac.abort();
+        else callerSignal.addEventListener('abort', () => ac.abort(), { once: true });
+      }
+    }
     let res;
     try {
       res = await fetch(path, { credentials: 'same-origin', ...opts, signal });
@@ -104,7 +119,14 @@
     }
     if (res.status === 204) return null;
     const ct = res.headers.get('content-type') || '';
-    return ct.includes('application/json') ? res.json() : res.text();
+    if (ct.includes('application/json')) {
+      return res.json().catch((e) => {
+        const err = new Error('invalid JSON on ' + path + ': ' + (e && e.message ? e.message : 'parse error'));
+        err.status = res.status;
+        throw err;
+      });
+    }
+    return res.text();
   }
 
   const jsonBody = (method, obj) => ({
@@ -212,7 +234,7 @@
     const db = e.audio_db_peak;
     const created = e.created_at || e.timestamp;
     const state = STATE_MAP[e.status] || 'pending';
-    const ageSec = secsSince(created) || 0;
+    const ageSec = secsSince(created);
 
     const timeline = [];
     timeline.push({
@@ -229,10 +251,10 @@
       });
     }
     if (e.acknowledged_at) {
-      timeline.push({ t: fmtClock(parseTs(e.acknowledged_at)), label: 'ACKNOWLEDGED', detail: 'by ' + (e.acknowledged_by || '—') });
+      timeline.push({ t: fmtClock(parseTs(e.acknowledged_at)), label: 'ACKNOWLEDGED', detail: '由 ' + (e.acknowledged_by || '—') });
     }
     if (e.resolved_at) {
-      timeline.push({ t: fmtClock(parseTs(e.resolved_at)), label: 'RESOLVED', detail: 'by ' + (e.resolved_by || '—') });
+      timeline.push({ t: fmtClock(parseTs(e.resolved_at)), label: 'RESOLVED', detail: '由 ' + (e.resolved_by || '—') });
     }
 
     let message = '玻璃震動偵測';
@@ -255,6 +277,13 @@
       resBy: e.resolved_by || null,
       resAt: e.resolved_at ? fmtClock(parseTs(e.resolved_at)) : null,
       note: e.notes || null,
+      // DATA-022: raw epoch-ms timestamps retained so buildShiftSummary can
+      // compute real time-to-ack / time-to-resolve medians. (ackAt/resAt above
+      // are display-only HH:MM:SS strings; ackAgeSec is age-since-now, not
+      // latency.) null when the stage never happened or the stamp won't parse.
+      createdMs: created ? parseTsMs(created) : null,
+      ackMs: e.acknowledged_at ? parseTsMs(e.acknowledged_at) : null,
+      resolveMs: e.resolved_at ? parseTsMs(e.resolved_at) : null,
     };
   }
 
@@ -352,10 +381,10 @@
       mac: n.mac || null,
       bitrate: ss.bitrate_mbps != null ? ss.bitrate_mbps
              : ss.bitrate_kbps != null ? ss.bitrate_kbps / 1000
-             : ss.bitrate != null ? ss.bitrate : 0,
+             : ss.bitrate != null ? ss.bitrate : null,
       drops: ss.dropped_frames != null ? ss.dropped_frames
            : ss.dropped != null ? ss.dropped
-           : ss.drops != null ? ss.drops : 0,
+           : ss.drops != null ? ss.drops : null,
       level, // null = sensor down / no reading (was previously coerced to 0 → misleading)
       // MSP-F1 fix: the actual reported pump state, distinct from `status`
       // (which is derived from water level / online-ness, not the relay).
@@ -396,7 +425,7 @@
       // pages CAN switch off their own hardcoded >20/>15 magic numbers
       // (which silently drift if PUMP_CYCLE_ALERT_THRESHOLD ever changes)
       // without recomputing anything client-side.
-      cycles: (n._cycles && n._cycles.count != null) ? n._cycles.count : 0,
+      cycles: n._cyclesUnknown ? null : ((n._cycles && n._cycles.count != null) ? n._cycles.count : 0),
       cyclesAlert: !!(n._cycles && n._cycles.alert),
       cycleHistory: null,
       raining: n.raining,
@@ -425,6 +454,13 @@
       // edge pushes a new snapshot, so the browser refetches only then. Null
       // when the node has never uploaded a snapshot (offline / pump / new node).
       snapshotTimestamp: n.snapshot_timestamp || null,
+      // Track 1 per-node edge keys: whether this node currently has a
+      // provisioned API key. true/false for glass/pump nodes; null for
+      // webcam rows (the key concept doesn't apply there — webcams use
+      // createWebcamClient/revokeWebcamKey instead). `?? null` (not `||`)
+      // so a real `false` (no key) is preserved rather than collapsed to
+      // null — Task 11 gates its provision/clear controls on this field.
+      hasKey: (n.has_key ?? null),
     };
   }
 
@@ -480,16 +516,17 @@
         degree: current.wind_direction_deg != null ? current.wind_direction_deg : null,
       },
       rain: {
-        // Backend only exposes rainfall_24h_mm (see services/weather_service.py
-        // CurrentWeather). There are NO sub-24h buckets (no rainfall_10min_mm,
-        // no rainfall_1h_mm). Deriving `now` as rainfall_24h_mm / 24 would
-        // fabricate an instantaneous rate from a daily total — dishonest during
-        // a typhoon where rain is anything but uniform. Keep now/hour null.
-        // The weather.jsx display MUST render null as "—" / "N/A" (honest
-        // labeling), never substitute the 24h value under a different label.
-        // TODO(dashboard-audit-2026-07-15): bind now/hour only when backend
-        // exposes true rainfall_10min_mm / rainfall_1h_mm fields.
-        now: null,
+        // 2026-08-06 rainfall reconciliation: the backend now exposes an
+        // honest live rate AND a genuine daily total (previously the single
+        // rainfall_24h_mm field secretly held an hourly value). rainfall_rate_mmh
+        // is the instantaneous mm/h (SMG Type-3 / Open-Meteo current precip /
+        // HKO past-hour); rainfall_24h_mm is the true daily accumulation
+        // (SMG Type-5 / Open-Meteo daily=precipitation_sum). Keep ONE decimal
+        // on the rate (like visibility below) so light drizzle — 0.4 mm/h —
+        // doesn't round to a misleading "0". `hour` stays null: there is no
+        // separate 1-hour bucket, and the live rate already covers "now".
+        // null still renders as "—" / the no-source line per source-chip rules.
+        now: current.rainfall_rate_mmh != null ? Math.round(current.rainfall_rate_mmh * 10) / 10 : null,
         hour: null,
         day: roundOrNull(current.rainfall_24h_mm),
       },
@@ -501,7 +538,10 @@
       // through so tile renders "1005 hPa · 17km" not "1005.4 hPa".
       pressure: current.pressure_hpa != null ? Math.round(current.pressure_hpa) : null,
       visibility: current.visibility_km != null ? Math.round(current.visibility_km * 10) / 10 : null,
-      lightning: { count: null, nearest: null },
+      // WXA-004: flow the backend's aggregated lightning through (was
+      // permanently hardcoded null). `sources.lightning` rides through the
+      // `sources: backendSources` line below — no separate wiring needed.
+      lightning: current.lightning || { count: null, nearest: null },
       source: current.source || 'SMG',
       // Per-field sources dict from backend Phase 1 multi-source merge.
       // Keys match CurrentWeather dataclass field names (temperature_c,
@@ -559,27 +599,39 @@
     const rows = await apiFetch('/api/nodes');
     const list = Array.isArray(rows) ? rows : (rows.nodes || []);
     const pumps = list.filter((n) => n.node_type === 'pump');
+    let pumpCyclesFailed = false;
     if (pumps.length) {
       // One batch call for every pump's cycle-count instead of one request per
-      // pump (was N+1). Degrades gracefully to all-zeros if the endpoint is
-      // missing (older server 404s) or errors.
+      // pump (was N+1).
       let cycles = {};
       try {
         const resp = await apiFetch('/api/pumps/cycles?window=1h');
         cycles = (resp && resp.nodes) || {};
-      } catch (e) { cycles = {}; }
+      } catch (e) { cycles = {}; pumpCyclesFailed = true; }
       pumps.forEach((n) => {
         const c = cycles[n.node_id];
-        // API-F9 fix: was `n._cycles = c.count` — kept only the raw count and
-        // threw away `c.alert` (computed server-side at nodes.py:704 against
-        // PUMP_CYCLE_ALERT_THRESHOLD), so the server's alert verdict never
-        // reached the UI at all. Carry the whole {count, alert} object
-        // through; mapNode splits it back into `cycles` (number, unchanged
-        // contract) + `cyclesAlert` (new, boolean).
-        n._cycles = c || { count: 0, alert: false };
+        // DATA-014: the old code degraded a FAILED batch fetch to all-zeros, so
+        // every pump read as a measured "0 cycles this hour" — a fabricated
+        // healthy value that hides short-cycling. When the fetch failed we don't
+        // KNOW the count, so mark it unknown → mapNode renders '—'. (A pump
+        // merely absent from a SUCCESSFUL response is a genuine 0 and stays 0.)
+        if (pumpCyclesFailed) {
+          n._cyclesUnknown = true;
+          n._cycles = null;
+        } else {
+          // API-F9 fix: carry the whole {count, alert} object through (not just
+          // the raw count) so the server's threshold verdict (nodes.py:704)
+          // reaches the UI; mapNode splits it into `cycles` + `cyclesAlert`.
+          n._cycles = c || { count: 0, alert: false };
+        }
       });
     }
-    return list.map(mapNode);
+    const mapped = list.map(mapNode);
+    // DATA-014: ride the failure flag on the returned array (mirrors
+    // loadAlerts.truncated) so the shell can raise a "泵啟動次數暫時無法取得"
+    // banner instead of silently presenting every pump at 0.
+    mapped.pumpCyclesFailed = pumpCyclesFailed;
+    return mapped;
   }
 
   // ALR-M7 fix: the backend silently caps this list at LIMIT (oldest/
@@ -603,8 +655,15 @@
   }
 
   async function loadHistory() {
-    const rows = await apiFetch('/api/alerts?status_filter=RESOLVED&limit=80');
-    return (Array.isArray(rows) ? rows : []).map(mapAlert);
+    const _HISTORY_LIMIT = 80;
+    const rows = await apiFetch('/api/alerts?status_filter=RESOLVED&limit=' + _HISTORY_LIMIT);
+    const arr = Array.isArray(rows) ? rows : [];
+    const list = arr.map(mapAlert);
+    // ALR-004: expose truncation metadata so alerts.jsx can mirror the active
+    // tab's truncation banner for history (more rows exist on the server).
+    list.truncated = arr.length >= _HISTORY_LIMIT;
+    list.totalAvailable = list.truncated ? _HISTORY_LIMIT : arr.length;
+    return list;
   }
 
   async function loadRate() {
@@ -732,7 +791,11 @@
       // 401: session expired (soft-401 flag already set by apiFetch)
       // Keep prior state so audit rows don't disappear mid-shift
       if (msg === 'unauthorized' || status === 401) {
-        return window.AUDIT;
+        const prior = window.AUDIT || [];
+        if (prior.forbidden == null) prior.forbidden = false;
+        if (prior.truncated == null) prior.truncated = false;
+        if (prior.totalAvailable == null) prior.totalAvailable = prior.length;
+        return prior;
       }
 
       // 403: non-admin operator — expected, silence without banner
@@ -768,15 +831,48 @@
     return byNode;
   }
 
+  function _median(nums) {
+    if (!nums.length) return null;
+    const s = nums.slice().sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
   function buildShiftSummary(history, alerts) {
+    // DATA-022: duration / ackMedian / resolveMedian used to be hardcoded '—'
+    // even though every history row now carries created/ack/resolve epoch-ms.
+    // Derive real medians of time-to-acknowledge and time-to-resolve, plus the
+    // span of the handled window. Each falls back to '—' honestly when no row
+    // supplies the underlying data (empty shift, cold start, unparseable stamp).
+    const fmtDur = window.formatDurationShort || ((v) => (v == null ? '—' : Math.round(v) + 's'));
+    const ackSecs = [];
+    const resolveSecs = [];
+    let firstMs = null;
+    let lastMs = null;
+    history.forEach((a) => {
+      if (a.createdMs != null) {
+        if (firstMs == null || a.createdMs < firstMs) firstMs = a.createdMs;
+        if (lastMs == null || a.createdMs > lastMs) lastMs = a.createdMs;
+      }
+      if (a.createdMs != null && a.ackMs != null && a.ackMs >= a.createdMs) {
+        ackSecs.push((a.ackMs - a.createdMs) / 1000);
+      }
+      if (a.createdMs != null && a.resolveMs != null && a.resolveMs >= a.createdMs) {
+        resolveSecs.push((a.resolveMs - a.createdMs) / 1000);
+        if (lastMs == null || a.resolveMs > lastMs) lastMs = a.resolveMs;
+      }
+    });
+    const ackMed = _median(ackSecs);
+    const resolveMed = _median(resolveSecs);
+    const spanSec = (firstMs != null && lastMs != null && lastMs > firstMs) ? (lastMs - firstMs) / 1000 : null;
     return {
-      duration: '—',
+      duration: spanSec != null ? fmtDur(spanSec) : '—',
       alertsHandled: history.length,
       critical: history.filter((a) => a.sev === 'critical').length,
       warn: history.filter((a) => a.sev === 'warn').length,
       info: history.filter((a) => a.sev === 'info').length,
-      ackMedian: '—',
-      resolveMedian: '—',
+      ackMedian: ackMed != null ? fmtDur(ackMed) : '—',
+      resolveMedian: resolveMed != null ? fmtDur(resolveMed) : '—',
       carryOver: alerts.filter((a) => a.state === 'acknowledged').length,
       highlights: [],
     };
@@ -990,6 +1086,14 @@
     };
   }
 
+  // OPS-013: getStreamHealth(nodeId) hits /api/stream/health every call but
+  // returns only ONE node's entry. With N cameras on the Status page that's N
+  // identical fetches. getStreamHealthAll returns the bridge-level response
+  // once so the caller can extract every node's entry locally.
+  async function getStreamHealthAll() {
+    return apiFetch('/api/stream/health');
+  }
+
   // Audit CSV export — preflight against the sibling GET /api/audit endpoint
   // (same admin-only gate as export.csv, see api/audit.py) to detect 401/403
   // BEFORE the anchor-click download, otherwise the browser would silently
@@ -1013,17 +1117,41 @@
     const qs = params.toString();
     const url = '/api/audit/export.csv' + (qs ? '?' + qs : '');
 
-    // apiFetch handles 401 (sets window.__SDPRS_SESSION_EXPIRED for the
-    // soft-401 modal flow — no hard redirect) and re-throws non-2xx with
-    // `.status` attached, so a 403 non-admin surfaces to the caller's toast.
+    // DATA-013 / AUD-001: fetch the CSV as a blob in ONE authenticated request.
+    // The old shape — an auth preflight on /api/audit followed by a fire-and-
+    // forget anchor.click() navigation — had a TOCTOU gap, let a failed export
+    // download its JSON error body as a .csv, and resolved (firing the page's
+    // 已匯出 CSV toast) before any download existed. Now we only resolve once
+    // the blob is actually in hand, and a non-OK / JSON body rejects with
+    // .status so the caller shows an error instead.
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+    let res;
     try {
-      await apiFetch('/api/audit?limit=1');
+      res = await fetch(url, { credentials: 'same-origin', signal: ac.signal });
     } catch (e) {
-      const err = new Error('audit export failed: ' + (e && e.status != null ? e.status : (e && e.message) || 'unknown'));
-      err.status = (e && e.status) || 0;
-      err.cause = e;
+      if (e && e.name === 'AbortError') {
+        const err = new Error('timeout on export'); err.status = 0; err.timeout = true; throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
+    if (res.status === 401) {
+      window.__SDPRS_SESSION_EXPIRED = true;
+      const err = new Error('unauthorized'); err.status = 401; throw err;
+    }
+    const ct = res.headers.get('content-type') || '';
+    if (!res.ok || ct.includes('application/json')) {
+      // A JSON body here is an error payload — never let it download as a .csv.
+      let body = null;
+      if (ct.includes('application/json')) body = await res.json().catch(() => null);
+      const err = new Error('HTTP ' + res.status + ' on ' + url);
+      err.status = res.status;
+      err.detail = _extractDetail(body);
       throw err;
     }
+    const blob = await res.blob();
 
     // SHL-16: this used to be `new Date().toISOString().slice(0,10)`, i.e. the
     // UTC date. Macau is UTC+8, so for the whole 00:00–08:00 local night shift
@@ -1036,14 +1164,16 @@
     const _now = new Date();
     const _p = (n) => String(n).padStart(2, '0');
     const ymd = String(_now.getFullYear()) + _p(_now.getMonth() + 1) + _p(_now.getDate());
+    const objUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = objUrl;
     a.download = 'audit_' + ymd + '.csv';
     // Some browsers (Firefox pre-93) require the anchor to be in the DOM.
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
   }
 
   const snoozeNode = (nodeId, minutes, reason) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/snooze',
@@ -1166,17 +1296,17 @@
   // RTSP/mediamtx pipeline). createWebcamClient/revokeWebcamKey manage the
   // per-node webcam client credential issued by /api/nodes/webcam.
   async function startWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/start`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/start`, jsonBody('POST', {}));
   }
   async function stopWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/stop`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/stop`, jsonBody('POST', {}));
   }
   // Renews the 90s server-side viewer lease so an actively-watched stream is not
   // force-stopped mid-view. The dashboard calls this every ~30s while a tile is
   // 'live' (see monitor.jsx); a lapsed lease lets cleanup_stale_streams enqueue
   // stream_stop to the client.
   async function renewWebcamStream(nodeId) {
-    return apiFetch(`/api/webcam/${nodeId}/stream/renew`, jsonBody('POST', {}));
+    return apiFetch(`/api/webcam/${encodeURIComponent(nodeId)}/stream/renew`, jsonBody('POST', {}));
   }
   // Live-view readiness probe. The dashboard used to flip a webcam tile to
   // 'live' on a blind 3s timer, which on a slow client mounts <video> against a
@@ -1201,7 +1331,7 @@
     return apiFetch('/api/nodes/webcam', jsonBody('POST', { name }));
   }
   async function revokeWebcamKey(nodeId) {
-    return apiFetch(`/api/nodes/${nodeId}/revoke-key`, jsonBody('POST', {}));
+    return apiFetch(`/api/nodes/${encodeURIComponent(nodeId)}/revoke-key`, jsonBody('POST', {}));
   }
   // Permanently removes a webcam client (node row + its API key). Server
   // contract: 204 on success, 404 if it is already gone — callers should treat
@@ -1209,6 +1339,20 @@
   // a double-click or a peer operator's delete lands there and the operator's
   // intent is satisfied either way.
   const deleteWebcamClient = (nodeId) => apiFetch('/api/nodes/webcam/' + encodeURIComponent(nodeId),
+    { method: 'DELETE' });
+
+  // ---- per-node edge API keys (Track 1) ----------------------------------
+  // Provisions (or rotates) a per-node API key for a glass/pump edge node.
+  // Server contract: 201 { node_id, api_key } — the raw key is shown exactly
+  // once, same handling rules as createWebcamClient/revokeWebcamKey (never
+  // logged, never put in a title attribute).
+  async function provisionNodeKey(nodeId) {
+    return apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/key', jsonBody('POST', {}));
+  }
+  // Clears a node's provisioned key. Server contract: 204 on success, 404 if
+  // the node has no key — callers should treat the 404 like deleteWebcamClient's
+  // does (already-gone, not an error).
+  const clearNodeKey = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/key',
     { method: 'DELETE' });
 
   // ---- websocket ---------------------------------------------------------
@@ -1269,6 +1413,7 @@
       try { ws = new WebSocket(proto + '//' + location.host + '/ws'); }
       catch (e) { reconnectTimer = setTimeout(connect, retry); return; }
       ws.onopen = () => {
+        window.__SDPRS_WS_CONNECTED = true;
         // Delay backoff reset — see _WS_STABLE_MS comment.
         clearStable();
         stableTimer = setTimeout(() => { retry = 1000; stableTimer = null; }, _WS_STABLE_MS);
@@ -1299,9 +1444,15 @@
           console.warn('[SDPRS] ws handler error for', type, e);
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
+        window.__SDPRS_WS_CONNECTED = false;
         clearStable();
         if (closed) return;
+        // 1008 = policy violation / auth-expiry: the session is gone, so
+        // reconnecting just spins against an immediate re-close. Stop here; the
+        // session-expiry modal (driven by __SDPRS_SESSION_EXPIRED / auth_expired)
+        // is the operator's path back.
+        if (ev && ev.code === 1008) { closed = true; return; }
         reconnectTimer = setTimeout(connect, retry);
         retry = Math.min(retry * 2, 15000);
       };
@@ -1312,14 +1463,15 @@
   }
 
   window.SDPRS_API = {
-    loadInitial, refreshLive, markSeen,
+    loadInitial, refreshLive, loadWeather, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
     snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
-    startStream, stopStream, getStreamHealth,
+    startStream, stopStream, getStreamHealth, getStreamHealthAll,
     startWebcamStream, stopWebcamStream, renewWebcamStream, getWebcamPlaylist,
     createWebcamClient, revokeWebcamKey, deleteWebcamClient,
+    provisionNodeKey, clearNodeKey,
     extendSession,
     openSocket,
   };

@@ -324,6 +324,75 @@ class TestUploadVideo:
         assert response.status_code == 401
 
 
+class TestUploadVideoNodeBinding:
+    """Security fix (2026-08-06): PUT /alerts/{id}/video accepts per-node
+    edge API keys (Depends(verify_api_key)) but, before this fix, never
+    called verify_node_binding -- so a key provisioned for node X could
+    upload a video into node Y's alert. Covers the three binding outcomes:
+    cross-node -> 403, own-node -> not 403, shared/unbound key -> not 403.
+    """
+
+    def test_cross_node_key_forbidden(self, client, api_headers, sample_alert):
+        """A per-node key bound to a DIFFERENT node than the alert's owner
+        must be rejected with 403 (this is the RED assertion pre-fix)."""
+        import central_server.database as db_module
+
+        # Alert belongs to sample_alert's node_id ("glass_node_01").
+        create_response = client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        alert_id = create_response.json()["alert_id"]
+
+        # Per-node key provisioned for a DIFFERENT node.
+        out = db_module.provision_edge_node_key("glass_node_99")
+        fake_mp4 = io.BytesIO(b"fake mp4 content for testing")
+
+        response = client.put(
+            f"/api/alerts/{alert_id}/video",
+            files={"file": ("test.mp4", fake_mp4, "video/mp4")},
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code == 403
+
+    def test_own_node_key_allowed(self, client, api_headers, sample_alert):
+        """A per-node key bound to the SAME node as the alert must proceed
+        (not be rejected as a binding mismatch)."""
+        import central_server.database as db_module
+
+        create_response = client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        alert_id = create_response.json()["alert_id"]
+
+        # Per-node key provisioned for the alert's OWN node.
+        out = db_module.provision_edge_node_key(sample_alert["node_id"])
+        fake_mp4 = io.BytesIO(b"fake mp4 content for testing")
+
+        response = client.put(
+            f"/api/alerts/{alert_id}/video",
+            files={"file": ("test.mp4", fake_mp4, "video/mp4")},
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code != 403
+        assert response.status_code == 204
+
+    def test_shared_key_allowed_any_node(self, client, api_headers, sample_alert):
+        """The shared EDGE_API_KEY leaves edge_auth_node None (grace-period /
+        unbound) -- verify_node_binding must remain a no-op for it, or every
+        node still on the shared key would regress and stop being able to
+        upload video at all."""
+        create_response = client.post("/api/alerts", json=sample_alert, headers=api_headers)
+        alert_id = create_response.json()["alert_id"]
+
+        fake_mp4 = io.BytesIO(b"fake mp4 content for testing")
+        response = client.put(
+            f"/api/alerts/{alert_id}/video",
+            files={"file": ("test.mp4", fake_mp4, "video/mp4")},
+            headers=api_headers  # shared key -> edge_auth_node is None
+        )
+
+        assert response.status_code != 403
+        assert response.status_code == 204
+
+
 class TestGetAlert:
     """Tests for GET /api/alerts/{alert_id} endpoint."""
     

@@ -164,7 +164,7 @@ sdprs/
 |   |-- templates/                   # 僅剩 login.html（舊 Jinja 儀表板 2026-07-16 淘汰）
 |   |   +-- login.html
 |   |-- static/
-|   |   |-- css/styles.css           # login 頁樣式
+|   |   |-- css/                         # (empty — login.html uses inline Tailwind CDN)
 |   |   +-- spa/                     # V2 React SPA（/）
 |   |       |-- index.html · styles.css
 |   |       |-- app.jsx · api.jsx · components.jsx

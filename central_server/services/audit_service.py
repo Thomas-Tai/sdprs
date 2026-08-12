@@ -37,6 +37,8 @@ ACTION_DELETE_NODE    = "DELETE_NODE"
 ACTION_PUMP_COMMAND   = "PUMP_COMMAND"
 ACTION_WEBCAM_CREATE     = "webcam_create"
 ACTION_WEBCAM_REVOKE_KEY = "webcam_revoke_key"
+ACTION_EDGE_KEY_PROVISION = "EDGE_KEY_PROVISION"
+ACTION_EDGE_KEY_CLEAR     = "EDGE_KEY_CLEAR"
 
 
 def log_action(
@@ -229,8 +231,26 @@ def get_snooze_provenance(node_ids: List[str]) -> Dict[str, Dict[str, str]]:
         tid = r.get("target_id")
         if not tid or tid in out:
             continue
-        out[tid] = {"by": r.get("operator") or "", "at": r.get("timestamp") or ""}
+        out[tid] = {"by": r.get("operator") or "", "at": _coerce_timestamp_to_iso(r.get("timestamp"))}
     return out
+
+
+def _coerce_timestamp_to_iso(value: Any) -> str:
+    """Coerce a raw operator_actions.timestamp value to an ISO string.
+
+    NEW-API-001: on PostgreSQL, SQLAlchemy hands back a real `datetime`
+    object for this column (SQLite returns a str). Every downstream
+    consumer expects a str (get_snooze_provenance's own annotation is
+    Dict[str, Dict[str, str]], and NodeStatus.snoozed_at is Optional[str] —
+    Pydantic v2 does not coerce datetime -> str, so a raw datetime here
+    used to raise ValidationError and 500 the whole GET /api/nodes list).
+    Coerce once, at the source, so every caller sees a plain string.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value:
+        return value
+    return ""
 
 
 def _sqlite_snooze_provenance(node_ids: List[str]) -> List[Dict[str, Any]]:
@@ -271,4 +291,5 @@ __all__ = [
     "ACTION_DELETE_NODE",
     "ACTION_PUMP_COMMAND",
     "ACTION_WEBCAM_CREATE", "ACTION_WEBCAM_REVOKE_KEY",
+    "ACTION_EDGE_KEY_PROVISION", "ACTION_EDGE_KEY_CLEAR",
 ]

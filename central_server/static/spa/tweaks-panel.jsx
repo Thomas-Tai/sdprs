@@ -46,8 +46,16 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
+// COMP-021: z-index was 90 for both the open panel and its closed trigger —
+// higher than every overlay in components.jsx, including the logout
+// confirmation dialog (z-[80]). A settings widget floating on top of a
+// destructive confirm dialog could visually obscure/intercept clicks meant
+// for it. 45 sits above the persistent chrome (Footer z-30, StatusStrip
+// z-40) but below every modal/drawer in the app (MuteDrawer/NodeSidePanel
+// z-50 up through the logout dialog's z-80), so no app overlay can ever be
+// covered by it.
 const __TWEAKS_STYLE = `
-  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:90;width:280px;
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:45;width:280px;
     max-height:calc(100vh - 32px);display:flex;flex-direction:column;
     transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
     background:rgba(250,249,247,.78);color:#29261b;
@@ -59,7 +67,7 @@ const __TWEAKS_STYLE = `
     padding:10px 8px 10px 14px;cursor:move;user-select:none}
   .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
   .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
-    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
+    width:22px;height:22px;border-radius:6px;cursor:pointer;font-size:13px;line-height:1}
   .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
   .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
     overflow-y:auto;overflow-x:hidden;min-height:0;
@@ -93,9 +101,9 @@ const __TWEAKS_STYLE = `
     border-radius:999px;background:rgba(0,0,0,.12);outline:none}
   .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
     width:14px;height:14px;border-radius:50%;background:#fff;
-    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:pointer}
   .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
-    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:pointer}
 
   .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
     background:rgba(0,0,0,.06);user-select:none}
@@ -105,11 +113,11 @@ const __TWEAKS_STYLE = `
   .twk-seg.dragging .twk-seg-thumb{transition:none}
   .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
     background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
-    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
+    border-radius:6px;cursor:pointer;padding:4px 6px;line-height:1.2;
     overflow-wrap:anywhere}
 
   .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
-    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
+    background:rgba(0,0,0,.15);transition:background .15s;cursor:pointer;padding:0}
   .twk-toggle[data-on="1"]{background:#34c759}
   .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
     background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
@@ -127,13 +135,13 @@ const __TWEAKS_STYLE = `
   .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
 
   .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
-    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
+    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:pointer}
   .twk-btn:hover{background:rgba(0,0,0,.88)}
   .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
   .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
 
   .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
-    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
+    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:pointer;
     background:transparent;flex-shrink:0}
   .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
   .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
@@ -141,7 +149,7 @@ const __TWEAKS_STYLE = `
 
   .twk-chips{display:flex;gap:6px}
   .twk-chip{position:relative;appearance:none;flex:1;min-width:0;height:46px;
-    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:default;
+    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:pointer;
     box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.06);
     transition:transform .12s cubic-bezier(.3,.7,.4,1),box-shadow .12s}
   .twk-chip:hover{transform:translateY(-1px);
@@ -194,10 +202,10 @@ const __TWEAKS_STYLE = `
 // only ever mounted when the panel is closed, whereas __TWEAKS_STYLE is
 // only mounted when open, so the two never need to coexist.
 const __TWEAKS_TRIGGER_STYLE = `
-  .twk-trigger{position:fixed;right:16px;bottom:16px;z-index:90;
+  .twk-trigger{position:fixed;right:16px;bottom:16px;z-index:45;
     width:36px;height:36px;border-radius:50%;
     display:flex;align-items:center;justify-content:center;
-    appearance:none;cursor:default;
+    appearance:none;cursor:pointer;
     background:rgba(250,249,247,.78);color:#29261b;
     border:.5px solid rgba(255,255,255,.6);
     box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 6px 20px rgba(0,0,0,.18);
@@ -227,12 +235,30 @@ const __TWEAKS_TRIGGER_STYLE = `
 // localStorage (`sdprs.tweaks`, atomic JSON object) AND echoes to the host
 // (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
 const __TWEAKS_LS_KEY = 'sdprs.tweaks';
+// COMP-025: is `val`'s runtime SHAPE (not exact value) the same kind of
+// thing as `def`? Arrays need their own check (typeof [] === 'object', same
+// as a plain object) — everything else is a plain typeof match.
+const __twkSameShape = (def, val) =>
+  Array.isArray(def) ? Array.isArray(val) : (typeof val === typeof def && !Array.isArray(val));
 const __readTweaks = (defaults) => {
   try {
     const raw = localStorage.getItem(__TWEAKS_LS_KEY);
     if (!raw) return { ...defaults };
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...parsed };
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const merged = { ...defaults, ...parsed };
+      // A persisted value whose TYPE no longer matches this build's default
+      // (schema drift across a deploy, a hand-edited localStorage entry, or
+      // a corrupted write) used to silently overwrite the default — a
+      // numeric/boolean/array consumer could receive the wrong shape
+      // entirely with no error. Revert any KNOWN key (one that exists in
+      // `defaults`) whose persisted shape doesn't match back to its
+      // default; unrecognized keys pass through unchanged, same as before.
+      for (const key of Object.keys(defaults)) {
+        if (!__twkSameShape(defaults[key], merged[key])) merged[key] = defaults[key];
+      }
+      return merged;
+    }
   } catch (_) { /* corrupt / unavailable — fall back to defaults */ }
   return { ...defaults };
 };
@@ -240,8 +266,18 @@ const __writeTweaks = (obj) => {
   try { localStorage.setItem(__TWEAKS_LS_KEY, JSON.stringify(obj)); }
   catch (_) { /* quota / private mode — in-memory only is fine */ }
 };
+// COMP-028: a slider (or the number scrub-label) fires onChange once per
+// pixel/step moved — dozens of times a second during a real drag. Both the
+// localStorage write and the outbound host postMessage used to fire on
+// EVERY one of those, flooding disk I/O and spamming a host editor with
+// consecutive "rewrite the file" requests. 150ms is short enough that a
+// drag still feels instantly saved once the operator stops moving, long
+// enough that a real drag gesture coalesces into one write.
+const TWEAKS_PERSIST_DEBOUNCE_MS = 150;
 function useTweaks(defaults) {
   const [values, setValues] = React.useState(() => __readTweaks(defaults));
+  const valuesRef = React.useRef(values);
+  React.useEffect(() => { valuesRef.current = values; }, [values]);
   // WHA-M13 fix (2026-07-20): this used to do
   //   let next; setValues(prev => { next = {...}; return next; }); __writeTweaks(next);
   // — reading `next` immediately after calling setValues relies on React
@@ -253,21 +289,49 @@ function useTweaks(defaults) {
   // resetting every tweak on next reload. Persist from a useEffect keyed on
   // `values` instead — that only runs after React has actually committed
   // the new state, so it can never observe a stale/undefined value.
-  React.useEffect(() => { __writeTweaks(values); }, [values]);
+  //
+  // COMP-028: that effect used to call __writeTweaks(values) directly on
+  // every change — debounce the actual disk write instead, so a drag
+  // settles into ONE write, not one per pixel. React state (`values`)
+  // itself still updates synchronously above, so the UI stays live during
+  // the drag; only the side-effecting write is delayed. The unmount-only
+  // effect below still flushes the latest value immediately, so a fast
+  // navigate-away mid-drag never drops the final position.
+  React.useEffect(() => {
+    const t = setTimeout(() => { __writeTweaks(values); }, TWEAKS_PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [values]);
+  React.useEffect(() => () => { __writeTweaks(valuesRef.current); }, []);
   // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
   // useState-style call doesn't write a "[object Object]" key into the persisted
   // JSON block.
+  const hostSyncTimerRef = React.useRef(null);
+  const pendingEditsRef = React.useRef({});
   const setTweak = React.useCallback((keyOrEdits, val) => {
     const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
       ? keyOrEdits : { [keyOrEdits]: val };
     setValues((prev) => ({ ...prev, ...edits }));
-    // G5: was '*'; the inbound listener already gates on same-origin, so
-    // tighten the outbound target to match — nothing legitimate reads these
-    // from a cross-origin parent.
-    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, window.location.origin);
     // Same-window signal so in-page listeners (deck-stage rail thumbnails)
-    // can react — the parent message only reaches the host, not peers.
+    // can react — the parent message only reaches the host, not peers. Kept
+    // immediate (not debounced): it is a cheap in-page event, not an I/O
+    // or cross-window round trip.
     window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
+    // COMP-028: same per-pixel flood as the localStorage write, on the
+    // OUTBOUND host sync — the host round-trips this into a disk rewrite of
+    // the EDITMODE block, so forwarding every drag-pixel edit as its own
+    // postMessage produced one file rewrite per pixel too. Coalesce rapid
+    // edits and forward the merged set once they settle.
+    Object.assign(pendingEditsRef.current, edits);
+    if (hostSyncTimerRef.current) clearTimeout(hostSyncTimerRef.current);
+    hostSyncTimerRef.current = setTimeout(() => {
+      hostSyncTimerRef.current = null;
+      const pending = pendingEditsRef.current;
+      pendingEditsRef.current = {};
+      // G5: was '*'; the inbound listener already gates on same-origin, so
+      // tighten the outbound target to match — nothing legitimate reads
+      // these from a cross-origin parent.
+      window.parent.postMessage({ type: '__edit_mode_set_keys', edits: pending }, window.location.origin);
+    }, TWEAKS_PERSIST_DEBOUNCE_MS);
   }, []);
   return [values, setTweak];
 }
@@ -279,9 +343,22 @@ function useTweaks(defaults) {
 // The close button posts __edit_mode_dismissed so the host's toolbar toggle
 // flips off in lockstep; the host echoes __deactivate_edit_mode back which
 // is what actually hides the panel.
-function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
+// COMP-026: app.jsx mounts <window.TweaksPanel> with no `title` prop, so
+// this default is the literal string operators see in the (zh-TW-only)
+// production console — it was the English word "Tweaks".
+function TweaksPanel({ title = '顯示設定', noDeckControls = false, children }) {
   const [open, setOpen] = React.useState(false);
   const dragRef = React.useRef(null);
+  // COMP-020: element that had focus right before the panel opened, so it
+  // can be restored on close. Captured synchronously at the moment of
+  // activation (the trigger's onClick, and the postMessage handler below) —
+  // NOT in a later effect keyed on `open`: the trigger button is UNMOUNTED
+  // the instant `open` flips true (this component renders either the
+  // trigger OR the panel, never both), so by the time a post-commit effect
+  // could read document.activeElement the browser has already reverted
+  // focus to <body> on its own. Capturing it at the activation call site is
+  // the only point it is still the real element.
+  const lastFocusedRef = React.useRef(null);
   // Auto-inject a rail toggle when a <deck-stage> is on the page. The
   // toggle drives the deck's per-viewer _railVisible via window message;
   // state is mirrored from the same localStorage key the deck reads so
@@ -357,7 +434,12 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     const onMsg = (e) => {
       if (e.origin !== window.location.origin) return;
       const t = e?.data?.type;
-      if (t === '__activate_edit_mode') setOpen(true);
+      if (t === '__activate_edit_mode') {
+        // COMP-020: capture focus before this host-driven open, same as the
+        // trigger's own onClick below.
+        lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
+        setOpen(true);
+      }
       else if (t === '__deactivate_edit_mode') setOpen(false);
     };
     window.addEventListener('message', onMsg);
@@ -372,6 +454,40 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
     window.parent.postMessage({ type: '__edit_mode_dismissed' }, window.location.origin);
   };
 
+  // COMP-020: this panel previously had no dialog role, no Escape
+  // dismissal, and never moved focus — a keyboard/screen-reader operator
+  // who tabbed into it had no signal they'd entered a settings surface and
+  // no keyboard way out except tabbing past every control to reach the
+  // small ✕ button. On open, move focus onto the panel itself (labelled via
+  // role="dialog"/aria-label); Escape closes it; on close, focus returns to
+  // whatever was focused before it opened.
+  React.useEffect(() => {
+    if (!open) return;
+    const panel = dragRef.current;
+    if (panel) { try { panel.focus(); } catch (_) {} }
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        dismiss();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      const el = lastFocusedRef.current;
+      lastFocusedRef.current = null;
+      if (el && typeof el.focus === 'function') {
+        try { el.focus(); } catch (_) {}
+      }
+    };
+  }, [open]);
+
+  // COMP-022: this used to attach mousemove/mouseup only — touch input never
+  // fires those, so the panel was undraggable on a touchscreen console.
+  // Pointer Events unify mouse/touch/pen behind one API; TweakRadio's
+  // segmented control and TweakNumber's scrub-label already use
+  // onPointerDown for exactly this reason (see below in this same file) —
+  // this brings the panel's own drag handle in line with that idiom.
   const onDragStart = (e) => {
     const panel = dragRef.current;
     if (!panel) return;
@@ -387,11 +503,11 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
       clampToViewport();
     };
     const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
     };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   };
 
   if (!open) {
@@ -417,7 +533,11 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
         <style>{__TWEAKS_TRIGGER_STYLE}</style>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            // COMP-020: capture focus before this click-driven open too.
+            lastFocusedRef.current = (typeof document !== 'undefined') ? document.activeElement : null;
+            setOpen(true);
+          }}
           className="twk-trigger"
           aria-label="開啟顯示設定"
           title="顯示設定（主題／密度／4K 牆面模式）"
@@ -434,12 +554,17 @@ function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
   return (
     <>
       <style>{__TWEAKS_STYLE}</style>
+      {/* COMP-020: no backdrop blocks the rest of the page (this is a
+          floating, non-blocking settings panel, unlike the app's true
+          modals), so aria-modal is deliberately omitted — role + label give
+          it an identity without falsely claiming the background is inert. */}
       <div ref={dragRef} className="twk-panel" data-noncommentable=""
+           role="dialog" aria-label={title} tabIndex={-1}
            style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
-        <div className="twk-hd" onMouseDown={onDragStart}>
+        <div className="twk-hd" onPointerDown={onDragStart}>
           <b>{title}</b>
-          <button className="twk-x" aria-label="Close tweaks"
-                  onMouseDown={(e) => e.stopPropagation()}
+          <button className="twk-x" aria-label="關閉顯示設定"
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={dismiss}>✕</button>
         </div>
         <div className="twk-body">
@@ -481,20 +606,34 @@ function TweakRow({ label, value, children, inline = false }) {
 // ── Controls ────────────────────────────────────────────────────────────────
 
 function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  // COMP-006: the visual label was a plain <span> with no programmatic
+  // association to the range input — a screen reader announced a bare
+  // "slider", not "字體大小 slider". aria-label ties the visible text to the
+  // control without requiring an id that would need to stay unique across
+  // every panel instance.
   return (
     <TweakRow label={label} value={`${value}${unit}`}>
       <input type="range" className="twk-slider" min={min} max={max} step={step}
-             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+             value={value} aria-label={label} onChange={(e) => onChange(Number(e.target.value))} />
     </TweakRow>
   );
 }
 
 function TweakToggle({ label, value, onChange }) {
+  // COMP-019: the visual label was a plain, non-interactive <span> — only
+  // the 32x18px switch itself was clickable, a tiny target on a touch
+  // console. Making the label row clickable too (mirroring the native
+  // <label>-toggles-its-control pattern) gives the whole row a real hit
+  // area without changing the switch's own size/markup.
   return (
     <div className="twk-row twk-row-h">
-      <div className="twk-lbl"><span>{label}</span></div>
+      <div className="twk-lbl" onClick={() => onChange(!value)} style={{ cursor: 'pointer' }}>
+        <span>{label}</span>
+      </div>
+      {/* COMP-006: role="switch" with no accessible name announced as a bare
+          "switch". */}
       <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
-              role="switch" aria-checked={!!value}
+              role="switch" aria-checked={!!value} aria-label={label}
               onClick={() => onChange(!value)}><i /></button>
     </div>
   );
@@ -604,9 +743,21 @@ function TweakRadio({ label, value, options, onChange }) {
 }
 
 function TweakSelect({ label, value, options, onChange }) {
+  // COMP-006: same missing-accessible-name issue as the slider/toggle above.
+  // COMP-024: a native <select> always yields a STRING via e.target.value,
+  // even when `options` are numbers/booleans (a font-size preset list, a
+  // numeric zoom level). A numeric consumer breaks silently — e.g.
+  // style={{fontSize: t.fontSize}} only gets React's auto 'px' suffix for
+  // an actual number, not a numeric-looking string. Resolve back to the
+  // ORIGINAL option's value/type, the same pattern TweakRadio's own
+  // <select> fallback already uses below.
+  const resolve = (s) => {
+    const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
+    return m === undefined ? s : (typeof m === 'object' ? m.value : m);
+  };
   return (
     <TweakRow label={label}>
-      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+      <select className="twk-field" value={value} aria-label={label} onChange={(e) => onChange(resolve(e.target.value))}>
         {options.map((o) => {
           const v = typeof o === 'object' ? o.value : o;
           const l = typeof o === 'object' ? o.label : o;
@@ -642,7 +793,22 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
   // real number, and resync from the external `value` on blur (or whenever
   // it changes from outside, e.g. another control resetting this tweak).
   const [text, setText] = React.useState(() => String(value));
-  React.useEffect(() => { setText(String(value)); }, [value]);
+  // COMP-023: this resync used to run unconditionally on every `value`
+  // change — including the one the CURRENT keystroke itself just caused.
+  // Typing "0" then "5" to build "05" (meaning 5): after "0", onChange(0)
+  // fires and `value` becomes 0, syncing text back to "0" (invisible, no
+  // harm yet); after "5", text is locally "05" and onChange(5) fires —
+  // `value` changes 0 -> 5, so this effect fires AGAIN and stomped the
+  // in-progress "05" back down to "5", visibly deleting the leading zero
+  // the operator just typed. Skip the resync whenever the currently-typed
+  // text ALREADY represents the incoming value — only an externally-driven
+  // change (a different control resetting this tweak, e.g.) should override
+  // what the operator is mid-typing.
+  React.useEffect(() => {
+    const n = Number(text);
+    if (text !== '' && !Number.isNaN(n) && n === value) return;
+    setText(String(value));
+  }, [value]);
   const onScrubStart = (e) => {
     e.preventDefault();
     startRef.current = { x: e.clientX, val: value };
@@ -669,8 +835,14 @@ function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) 
   };
   const onInputBlur = () => {
     const n = Number(text);
-    if (text === '' || Number.isNaN(n)) setText(String(value)); // revert
-    else onChange(clamp(n));
+    if (text === '' || Number.isNaN(n)) { setText(String(value)); return; } // revert
+    const clamped = clamp(n);
+    onChange(clamped);
+    // COMP-023: normalize the display now that editing has ended. The
+    // resync effect above deliberately leaves an in-progress "05"-style
+    // string alone while it still parses to the current value — blur is
+    // the moment to collapse it to the canonical "5" the value actually is.
+    setText(String(clamped));
   };
   return (
     <div className="twk-num">
@@ -713,7 +885,16 @@ function TweakColor({ label, value, options, onChange }) {
     return (
       <div className="twk-row twk-row-h">
         <div className="twk-lbl"><span>{label}</span></div>
-        <input type="color" className="twk-swatch" value={value}
+        {/* COMP-027: an undefined/null `value` here is React's own signal
+            for "this input is uncontrolled" — the DOM's native default
+            (#000000) fills in, but the component then depends on the
+            browser's own uncontrolled-input semantics rather than always
+            being driven by React, which is fragile in general (React warns
+            "changing an uncontrolled input to be controlled" the moment a
+            real value shows up in a dev build) and easy to reintroduce a
+            real bug into with a future edit. Always pass a concrete hex
+            string so this input is controlled from its very first render. */}
+        <input type="color" className="twk-swatch" value={value || '#000000'}
                onChange={(e) => onChange(e.target.value)} />
       </div>
     );

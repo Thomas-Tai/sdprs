@@ -27,6 +27,15 @@ from ..timeutil import utcnow
 logger = logging.getLogger("weather_service")
 
 SMG_XML_URL = "https://xml.smg.gov.mo/c_actualweather.xml"
+# SMG emits multiple <Rainfall> elements per station, distinguished by
+# <Type>: 3 = current-hour rate (mm/h), 5 = daily total since local midnight
+# (mm). Type 4 is an intermediate accumulation we don't surface. Verified
+# against the live feed 2026-08-06 (see
+# docs/superpowers/specs/2026-08-06-weather-rainfall-reconcile-design.md).
+# Single source of truth for the Type->field mapping — re-validate during a
+# rain event and adjust here if SMG's Type semantics ever differ.
+SMG_RAINFALL_TYPE_RATE = "3"    # -> rainfall_rate_mmh (live mm/h)
+SMG_RAINFALL_TYPE_DAILY = "5"   # -> rainfall_24h_mm   (daily total)
 CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 HKO_RHRREAD_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
@@ -65,6 +74,12 @@ class CurrentWeather:
     # suspicious default.
     pressure_hpa: Optional[float] = None
     visibility_km: Optional[float] = None
+    # Live rainfall intensity in mm/h (SMG Type-3 element / Open-Meteo
+    # current precipitation / HKO past-hour district max). Optional so
+    # "no provider supplied a live rate" (absent from sources) is distinct
+    # from a genuine 0.0 during dry weather — same idiom as pressure_hpa.
+    # rainfall_24h_mm remains the DAILY total; this is the instantaneous rate.
+    rainfall_rate_mmh: Optional[float] = None
 
 
 @dataclass
@@ -225,11 +240,25 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
 
                 pressure_hpa = _get_optional_plain_float('MeanSeaLevelPressure/Value')
 
-                # Rainfall - SMG usually emits multiple <Rainfall> elements
-                # differentiated by <Type> (3=current hour, 5=daily total).
-                # findtext returns the FIRST match; Type 3 (hourly) is the
-                # instantaneous rate suitable for the dashboard's mm/h field.
-                rainfall_hourly = _get_float('Rainfall/Value')
+                # Rainfall: SMG emits several <Rainfall> elements per station,
+                # differentiated by <Type>. Select explicitly rather than
+                # taking findtext's first match — Type 3 is the live rate
+                # (mm/h), Type 5 is the daily total (mm). See the
+                # SMG_RAINFALL_TYPE_* constants.
+                def _get_rainfall_by_type(type_code: str) -> Optional[float]:
+                    for rf in station.findall('Rainfall'):
+                        if (rf.findtext('Type') or '').strip() == type_code:
+                            val = rf.findtext('Value')
+                            if val is None or val.strip() in ('', '-', 'X', 'x', '-99'):
+                                return None
+                            try:
+                                return float(val)
+                            except (TypeError, ValueError):
+                                return None
+                    return None
+
+                rainfall_rate = _get_rainfall_by_type(SMG_RAINFALL_TYPE_RATE)    # mm/h (Type 3)
+                rainfall_daily = _get_rainfall_by_type(SMG_RAINFALL_TYPE_DAILY)  # mm   (Type 5)
 
                 # WindDirection has <Value>SW</Value> (compass letters) plus
                 # <Degree>230</Degree> (numeric). We need the numeric.
@@ -261,8 +290,9 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     sources['wind_direction_deg'] = station_label
                 if gust_ms is not None:
                     sources['gust_speed_ms'] = station_label
-                if station.find('Rainfall/Value') is not None and \
-                        (station.findtext('Rainfall/Value') or '').strip() not in ('', '-', 'X', 'x', '-99'):
+                if rainfall_rate is not None:
+                    sources['rainfall_rate_mmh'] = station_label
+                if rainfall_daily is not None:
                     sources['rainfall_24h_mm'] = station_label
                 if pressure_hpa is not None:
                     sources['pressure_hpa'] = station_label
@@ -271,7 +301,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     obs_time=utcnow(),  # API-F12 (2026-07-20): naive UTC, matches the wire contract
                     wind_speed_ms=wind_ms,
                     wind_direction_deg=wind_dir,
-                    rainfall_24h_mm=rainfall_hourly,
+                    rainfall_24h_mm=rainfall_daily if rainfall_daily is not None else 0.0,
                     temperature_c=temp_c,
                     humidity_pct=humidity,
                     is_stale=False,
@@ -282,6 +312,7 @@ async def _fetch_smg_current(client: httpx.AsyncClient, station_name: str = "外
                     sources=sources,
                     pressure_hpa=pressure_hpa,
                     visibility_km=None,  # SMG XML has no visibility data
+                    rainfall_rate_mmh=rainfall_rate,
                 )
 
         logger.warning(f"SMG XML: station '{station_name}' not found")
@@ -371,6 +402,12 @@ async def _fetch_openmeteo_current(
             # purpose and buffer size.
             "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,pressure_msl",
             "hourly": "visibility",
+            # Daily precipitation total (mm) for the genuine 24h rainfall
+            # figure — summed over the UTC day (timezone=UTC below). The
+            # `current.precipitation` value is the live rate; this is the
+            # honest daily accumulation, replacing the old "hourly-as-24h"
+            # approximation.
+            "daily": "precipitation_sum",
             "forecast_hours": 1,
             "wind_speed_unit": "ms",
             # API-F1 trap (2026-07-20): this is the exact bug just fixed in the
@@ -394,9 +431,27 @@ async def _fetch_openmeteo_current(
         if not cur:
             return None
 
-        # Open-Meteo precipitation is hourly; approximate 24h by multiplying
-        # For display, we use the hourly value as "24h" since it's the available data
-        precip_current = float(cur.get("precipitation", 0) or 0)
+        # Open-Meteo `current.precipitation` is the live rate (mm/h). The
+        # daily=precipitation_sum block carries the genuine 24h total.
+        precip_raw = cur.get("precipitation")
+        rainfall_rate = None
+        if precip_raw is not None:
+            try:
+                rainfall_rate = float(precip_raw)
+            except (TypeError, ValueError):
+                rainfall_rate = None
+
+        # Daily total (mm): daily.precipitation_sum[0] is today's accumulation.
+        # Missing/empty => None so the merge/UI renders '—' rather than a
+        # fabricated 0.
+        daily = data.get("daily", {})
+        precip_sum_arr = daily.get("precipitation_sum", []) if isinstance(daily, dict) else []
+        rainfall_daily = None
+        if precip_sum_arr:
+            try:
+                rainfall_daily = float(precip_sum_arr[0])
+            except (TypeError, ValueError):
+                rainfall_daily = None
 
         # Wind gusts — Open-Meteo returns wind_gusts_10m in the same unit as
         # wind_speed_unit (m/s here). May be absent in some response shapes;
@@ -420,7 +475,9 @@ async def _fetch_openmeteo_current(
             sources['wind_direction_deg'] = station_label
         if gust_ms is not None:
             sources['gust_speed_ms'] = station_label
-        if cur.get("precipitation") is not None:
+        if rainfall_rate is not None:
+            sources['rainfall_rate_mmh'] = station_label
+        if rainfall_daily is not None:
             sources['rainfall_24h_mm'] = station_label
 
         # Pressure (Option D): pressure_msl arrives in the same current
@@ -460,7 +517,7 @@ async def _fetch_openmeteo_current(
             obs_time=datetime.fromisoformat(cur.get("time", "").replace("Z", "+00:00")),
             wind_speed_ms=float(cur.get("wind_speed_10m", 0) or 0),
             wind_direction_deg=int(cur.get("wind_direction_10m", 0) or 0),
-            rainfall_24h_mm=precip_current,
+            rainfall_24h_mm=rainfall_daily if rainfall_daily is not None else 0.0,
             temperature_c=float(cur.get("temperature_2m", 0) or 0),
             humidity_pct=int(float(cur.get("relative_humidity_2m", 0) or 0)),
             is_stale=False,
@@ -471,6 +528,7 @@ async def _fetch_openmeteo_current(
             sources=sources,
             pressure_hpa=pressure_hpa,
             visibility_km=visibility_km,
+            rainfall_rate_mmh=rainfall_rate,
         )
     except Exception as e:
         logger.warning(f"Open-Meteo fetch failed: {e}")
@@ -654,13 +712,13 @@ async def _fetch_hko_current(
             'humidity_pct': f"HKO Hong Kong Observatory",  # always this station
         }
         if rain_data:  # only claim rainfall if the API actually returned district data
-            sources['rainfall_24h_mm'] = f"HKO 全港最大值 (18 districts)"
+            sources['rainfall_rate_mmh'] = f"HKO 全港最大值 (18 districts)"
 
         return CurrentWeather(
             obs_time=obs_time,
             wind_speed_ms=0.0,       # HKO rhrread has no wind — filled by merge
             wind_direction_deg=0,    # HKO rhrread has no wind — filled by merge
-            rainfall_24h_mm=rainfall_mm,
+            rainfall_24h_mm=0.0,  # HKO rhrread has no daily total — merge fills from another source, else '—'
             temperature_c=temp_c,
             humidity_pct=humidity_pct,
             is_stale=False,
@@ -668,6 +726,7 @@ async def _fetch_hko_current(
             source="HKO",
             station_name=temp_station,
             gust_speed_ms=None,      # HKO rhrread has no gust
+            rainfall_rate_mmh=(rainfall_mm if rain_data else None),  # past-hour district max ≈ live mm/h
             sources=sources,
         )
     except Exception as e:
@@ -704,6 +763,7 @@ _MERGEABLE_FIELDS = (
     "wind_direction_deg",
     "gust_speed_ms",
     "rainfall_24h_mm",
+    "rainfall_rate_mmh",
     "pressure_hpa",
     "visibility_km",
 )
@@ -775,6 +835,7 @@ def merge_currents(
         sources=merged_sources,
         pressure_hpa=merged_values.get("pressure_hpa"),
         visibility_km=merged_values.get("visibility_km"),
+        rainfall_rate_mmh=merged_values.get("rainfall_rate_mmh"),
     )
 
 

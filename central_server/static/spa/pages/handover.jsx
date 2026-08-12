@@ -43,7 +43,7 @@ function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, 
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-[110] bg-slate-950/70 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[110] bg-black/70 flex items-center justify-center p-4"
       onClick={onCancel}
       onKeyDown={handleDialogKeyDown}
       role="dialog"
@@ -52,15 +52,15 @@ function ConfirmDialog({ open, title, message, confirmLabel, tone, returnFocus, 
       aria-describedby="handover-confirm-message"
     >
       <div
-        className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl"
+        className="bg-surface-panel border border-border-subtle rounded-2xl p-6 max-w-md w-full shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="handover-confirm-title" className="text-slate-100 text-lg font-semibold mb-2">{title}</h3>
-        <p id="handover-confirm-message" className="text-slate-300 text-sm mb-5 whitespace-pre-line">{message}</p>
+        <h3 id="handover-confirm-title" className="text-ink-primary text-lg font-semibold mb-2">{title}</h3>
+        <p id="handover-confirm-message" className="text-ink-secondary text-sm mb-5 whitespace-pre-line">{message}</p>
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-4 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800"
+            className="px-4 py-1.5 rounded-lg text-ink-secondary hover:bg-surface-elevated"
             autoFocus
           >取消</button>
           <button
@@ -118,7 +118,7 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-[110] bg-slate-950/70 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[110] bg-black/70 flex items-center justify-center p-4"
       onClick={onCancel}
       onKeyDown={handleDialogKeyDown}
       role="dialog"
@@ -127,23 +127,23 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
       aria-describedby="handover-conflict-message"
     >
       <div
-        className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-2xl w-full shadow-2xl"
+        className="bg-surface-panel border border-border-subtle rounded-2xl p-6 max-w-2xl w-full shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="handover-conflict-title" className="text-slate-100 text-lg font-semibold mb-2">儲存衝突</h3>
-        <p id="handover-conflict-message" className="text-slate-300 text-sm mb-4">
+        <h3 id="handover-conflict-title" className="text-ink-primary text-lg font-semibold mb-2">儲存衝突</h3>
+        <p id="handover-conflict-message" className="text-ink-secondary text-sm mb-4">
           您編輯期間，其他操作員已儲存了新的交接備註。請選擇要保留哪個版本：
         </p>
         <div className="grid grid-cols-2 gap-3 mb-5">
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-1">伺服器目前版本</div>
-            <div className="bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
+            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1">伺服器目前版本</div>
+            <div className="bg-surface-base border border-border-subtle rounded p-2 text-xs text-ink-secondary whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
               {serverText || '(空白)'}
             </div>
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-1">您的草稿</div>
-            <div className="bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
+            <div className="text-[10px] uppercase tracking-wider text-ink-muted font-semibold mb-1">您的草稿</div>
+            <div className="bg-surface-base border border-border-subtle rounded p-2 text-xs text-ink-secondary whitespace-pre-wrap max-h-56 overflow-y-auto scroll-thin">
               {draftText || '(空白)'}
             </div>
           </div>
@@ -151,7 +151,7 @@ function ConflictDialog({ open, serverText, draftText, returnFocus, onCancel, on
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-4 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800"
+            className="px-4 py-1.5 rounded-lg text-ink-secondary hover:bg-surface-elevated"
             autoFocus
           >稍後決定</button>
           <button
@@ -214,7 +214,18 @@ const HandoverPage = () => {
   // effect's comment for why.
   const [updatedAtToken, setUpdatedAtToken] = useState_p(() => (window.HANDOVER && window.HANDOVER.updatedAt) || null);
   const [saving, setSaving] = useState_p(false);
-  const [dirty, setDirty] = useState_p(() => readDraft() != null);
+  // HDO-001: synchronous ref-latch to prevent same-tick double-fire on save.
+  // `saving` state can lag a React tick behind a fast double-click.
+  const saveInFlightRef = React.useRef(false);
+  // HDO-004: only mark dirty when the restored draft actually DIFFERS from
+  // the server's current text — restoring an identical draft must not show
+  // "未儲存變更" or arm the beforeunload prompt for no change.
+  const [dirty, setDirty] = useState_p(() => {
+    const draft = readDraft();
+    if (draft == null) return false;
+    const serverText = (window.HANDOVER && window.HANDOVER.current) || '';
+    return draft !== serverText;
+  });
   const [confirm, setConfirm] = useState_p(null);
   // WHA-M8: populated when saveHandover() 409s — carries the server's
   // current text/token plus the draft we tried to send, so the
@@ -395,6 +406,8 @@ const HandoverPage = () => {
   // `text`/`updatedAtToken`. `!= null` / `!== undefined` distinguish "not
   // provided" from a legitimate empty-string note or null token.
   const performSave = async (overrideNote, overrideExpected) => {
+    if (saveInFlightRef.current) return; // HDO-001: same-tick double-fire guard
+    saveInFlightRef.current = true;
     // WHA-C1: snapshot exactly what we're sending. `text` keeps changing via
     // keystrokes during the await below (setTextTracked runs freely while
     // saving), but this closured value stays fixed for this save's lifetime.
@@ -470,6 +483,7 @@ const HandoverPage = () => {
         setPageToast({ tone: 'error', msg: '儲存失敗: ' + (e.message || e) });
       }
     }
+    saveInFlightRef.current = false;
     setSaving(false);
   };
 
@@ -520,10 +534,11 @@ const HandoverPage = () => {
     }
     const latest = (window.HANDOVER && window.HANDOVER.current) || '';
     if (latest !== baseline && latest !== text) {
+      saveInFlightRef.current = false;
       setSaving(false);
       openConfirm({
         title: '覆蓋對方版本？',
-        message: '伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎？取消可先預覽對方版本。',
+        message: '伺服器上的備註在您編輯期間已被其他操作員更新。\n\n確定要以您的版本覆蓋嗎？取消可保留目前草稿稍後再決定。',
         confirmLabel: '仍要儲存',
         tone: 'danger',
         onConfirm: () => {
@@ -536,7 +551,7 @@ const HandoverPage = () => {
     await performSave();
   };
   return (
-    <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
+    <div className="h-full overflow-y-auto scroll-thin p-6 grid grid-cols-1 gap-6">
       {pageToast && (
         <div role="status" aria-live="polite"
           className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-3 py-2 rounded shadow-lg text-xs border ${
@@ -599,6 +614,14 @@ const HandoverPage = () => {
         <textarea
           value={text}
           onChange={e => setTextTracked(e.target.value)}
+          onKeyDown={e => {
+            // HDO-007: Ctrl+Enter (or ⌘+Enter) saves, matching the rest of
+            // the dashboard's save shortcut convention.
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && dirty && !saving && !overLimit) {
+              e.preventDefault();
+              save();
+            }
+          }}
           rows="14"
           maxLength={HANDOVER_MAX_LEN}
           aria-label="班次交接備註（單筆全域備註，24 小時後自動失效，上限 2000 字）"
@@ -630,14 +653,10 @@ const HandoverPage = () => {
         </div>
       </div>
       <div>
-        <h2 className="text-sm font-semibold mb-3 text-ink-secondary">歷史備註</h2>
-        {/* WHA-M10: window.HANDOVER.history is permanently [] — api.jsx's
-            loadHandover() hardcodes it and no backend endpoint exists to
-            populate it. The old "尚無歷史備註" ("no history yet") copy
-            falsely implied the feature works and is simply empty. Report
-            this as a real gap (hide-or-be-honest) rather than building a
-            fake history list against data that will never arrive. */}
-        <div className="text-xs text-ink-muted bg-surface-panel border border-border-subtle rounded p-3">
+        {/* HDO-006: history is permanently unavailable (WHA-M10) — don't
+            reserve a large section for it. Compact the notice. */}
+        <div className="text-xs text-ink-muted bg-surface-panel border border-border-subtle rounded px-3 py-2 flex items-center gap-2">
+          <Icon.Info size={12} className="flex-shrink-0"/>
           歷史備註功能尚未提供
         </div>
       </div>

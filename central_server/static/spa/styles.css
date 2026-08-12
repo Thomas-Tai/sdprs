@@ -33,7 +33,14 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Custom scrollbar — dark, slim */
+/* Custom scrollbar — dark, slim.
+   SHELL-025: the ::-webkit-scrollbar-* rules below are Chromium/Safari-only —
+   Firefox (and any other non-WebKit engine) ignores them entirely and falls
+   back to its native full-width scrollbar, silently losing the "slim" design
+   intent on every scrollable panel. `scrollbar-width`/`scrollbar-color` are
+   the standard-track equivalent Firefox actually implements; declared once
+   here so it applies everywhere `.scroll-thin` is used. */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: #1E293B transparent; }
 .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
 .scroll-thin::-webkit-scrollbar-track { background: transparent; }
 .scroll-thin::-webkit-scrollbar-thumb {
@@ -135,7 +142,14 @@ html.light .border-border-strong { border-color: #CBD5E1 !important; }
 html.light .text-ink-primary { color: #0F172A !important; }
 html.light .text-ink-secondary { color: #334155 !important; }
 html.light .text-ink-muted { color: #64748B !important; }
-html.light .text-ink-dim { color: #94A3B8 !important; }
+/* SHELL-024: this override existed but reused the DARK-theme value (#94A3B8)
+   verbatim — on a white/near-white panel that's ~2.6:1 against #FFFFFF,
+   failing WCAG 1.4.3 (needs 4.5:1 for body text). #475569 is not a new
+   choice: it's the exact value html.light.focus-mode already uses for the
+   same token below (line ~237) specifically because it passes on light
+   backgrounds (~7.6:1) — reusing it here keeps light-theme .text-ink-dim
+   consistent with its own focus-mode variant instead of contradicting it. */
+html.light .text-ink-dim { color: #475569 !important; }
 html.light .kbd { background: #F8FAFC; color: #475569; border-color: #CBD5E1; }
 html.light .snapshot-placeholder {
   background-image: repeating-linear-gradient(45deg, #E2E8F0 0, #E2E8F0 8px, #F1F5F9 8px, #F1F5F9 16px);
@@ -189,11 +203,12 @@ html.light .text-sev-info  { color: #1D4ED8 !important; }
 html.light .text-sev-stale { color: #475569 !important; }
 
 /* Light-theme scrollbars — the dark slate thumb read as a smear on white. */
+html.light .scroll-thin { scrollbar-color: #CBD5E1 transparent; }
 html.light .scroll-thin::-webkit-scrollbar-thumb { background: #CBD5E1; }
 html.light .scroll-thin::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
 /* Focus rings */
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, [role="button"][tabindex="0"]:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [role="button"][tabindex="0"]:focus-visible {
   outline: 2px solid #3B82F6;
   outline-offset: 2px;
   border-radius: 2px;
@@ -263,3 +278,15 @@ html.light.focus-mode .text-sev-stale { color: #94A3B8 !important; }
   white-space: nowrap;
   border: 0;
 }
+
+/* Floorplan (alerts.jsx) — theme-aware room/label fills. The room fill was a
+   hardcoded dark-navy rgba() and the labels a fixed slate/near-white fill,
+   both tuned only for the dark-theme panel. html.light swaps the panel
+   background to white (see .bg-surface-panel above), which left the same
+   fixed fills illegible on light theme (WCAG contrast fail). NEW-UX-006. */
+.floorplan-room { fill: rgba(30, 41, 59, 0.4); }
+html.light .floorplan-room { fill: rgba(148, 163, 184, 0.35); }
+.floorplan-label { fill: #64748B; }
+html.light .floorplan-label { fill: #334155; }
+.floorplan-label-pin { fill: #F8FAFC; }
+html.light .floorplan-label-pin { fill: #0F172A; }

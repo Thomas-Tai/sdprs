@@ -49,7 +49,11 @@ sudo ./setup_pi.sh glass_node_01 192.168.1.100 --api-key <your-edge-api-key>
 
 - `glass_node_01`：節點唯一 ID（第二台用 `glass_node_02`）
 - `192.168.1.100`：中央伺服器 IP
-- `--api-key`：與中央伺服器 `EDGE_API_KEY` 一致；省略則寫入預設 placeholder（事後 `sudo nano config.yaml` 改）
+- `--api-key`：填入這台節點要用的金鑰；省略則寫入預設 placeholder（事後 `sudo nano config.yaml` 改）。
+  **建議路徑（per-node 金鑰）：** 在儀表板節點列點「設定金鑰」，或呼叫已認證的
+  `POST /api/nodes/{id}/key`，取得**只顯示一次**的原始金鑰 `sk-edge-…`，填進這裡（或事後寫入
+  `config.yaml` 的 `server.api_key`）。過渡期也可以沿用與中央伺服器 `EDGE_API_KEY` 一致的共用值
+  （Legacy 共用金鑰，詳見 [配置參考 › Per-node 金鑰佈建與退場共用金鑰](../reference/configuration.md#per-node-金鑰佈建與退場共用金鑰)）。
 
 腳本會自動完成：hostname / 時區 / tmpfs / watchdog / 依賴 / venv / SSH 金鑰生成 / `config.yaml`（含 API key）/ `.env.tunnel` / systemd 服務啟用 + 啟動。
 

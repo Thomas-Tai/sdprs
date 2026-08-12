@@ -1,7 +1,8 @@
 // Lucide-style icons as inline SVGs (1.5px stroke) — original re-draws
 
-const SIZE = { sm: 14, md: 16, lg: 20, xl: 24, '2xl': 32 };
-
+// COMP-029: this named-size map was never referenced anywhere — every call
+// site passes a raw pixel number (or relies on Svg's default) via the
+// `size` prop, never one of these string keys.
 const Svg = ({ size = 16, children, className = '', strokeWidth = 1.5 }) => (
   <svg
     width={size} height={size} viewBox="0 0 24 24"

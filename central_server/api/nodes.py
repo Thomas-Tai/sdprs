@@ -96,6 +96,10 @@ class NodeStatus(BaseModel):
     battery_voltage: Optional[float] = None
     power_source: Optional[str] = None
     snoozed_until: Optional[str] = None
+    # Per-node edge API key provisioning (Task 9). True iff the nodes-table
+    # row has a non-null api_key_hash; None for webcam rows, which are drawn
+    # from webcam_cameras/webcam_clients and have no api_key_hash column.
+    has_key: Optional[bool] = None
     # Populated by list_nodes from a batch operator_actions lookup — most
     # recent ACTION_SNOOZE row per node (see audit_service.get_snooze_provenance).
     # Absent for nodes never snoozed. SPA renders the "who snoozed and when"
@@ -356,6 +360,7 @@ async def list_nodes(
             snoozed_at=_snooze_at(node_id),
             manual_override=state.get("manual_override") if node_type == "pump" else None,
             last_pump_command=_last_cmds.get(node_id),
+            has_key=bool(db_row.get("api_key_hash")),
         )
 
         result.append(node_status)
@@ -378,6 +383,7 @@ async def list_nodes(
             # No live MQTT state for these — manual_override is unknowable, but
             # the command history still applies (it is server-side).
             last_pump_command=_last_cmds.get(nid),
+            has_key=bool(row.get("api_key_hash")),
         ))
 
     # Task 5 (Step 0a): surface registered webcam cameras as nodes. Webcam
@@ -679,6 +685,7 @@ async def get_node(
         snoozed_at=snoozed_at,
         manual_override=state.get("manual_override") if node_type == "pump" else None,
         last_pump_command=_last_cmd,
+        has_key=bool(db_node.get("api_key_hash")),
     )
 
 
@@ -797,6 +804,31 @@ async def create_webcam_node(
     log_action(user, ACTION_WEBCAM_CREATE, target_id=result["node_id"],
                details={"name": body.name})
     return {"node_id": result["node_id"], "api_key": result["api_key"], "name": body.name}
+
+
+@router.post("/nodes/{node_id}/key", status_code=201)
+async def provision_node_key(node_id: str, request: Request,
+                             user: str = Depends(get_current_user)) -> Dict[str, Any]:
+    """Provision or rotate a per-node edge API key. Raw key shown ONCE."""
+    from ..auth import verify_node_id
+    from ..database import provision_edge_node_key
+    from ..services.audit_service import log_action, ACTION_EDGE_KEY_PROVISION
+    verify_node_id(node_id)
+    result = provision_edge_node_key(node_id)
+    log_action(user, ACTION_EDGE_KEY_PROVISION, target_id=node_id, details={})
+    return {"node_id": node_id, "api_key": result["api_key"]}
+
+
+@router.delete("/nodes/{node_id}/key", status_code=204)
+async def clear_node_key(node_id: str,
+                         user: str = Depends(get_current_user)) -> Response:
+    """Clear a node's per-node key (returns it to the shared-key fallback)."""
+    from ..database import clear_edge_node_key
+    from ..services.audit_service import log_action, ACTION_EDGE_KEY_CLEAR
+    if not clear_edge_node_key(node_id):
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    log_action(user, ACTION_EDGE_KEY_CLEAR, target_id=node_id, details={})
+    return Response(status_code=204)
 
 
 @router.post("/nodes/{node_id}/revoke-key")

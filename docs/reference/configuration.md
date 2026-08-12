@@ -10,13 +10,12 @@
 
 以 `pydantic-settings` 讀取 `.env`＋環境變數；`central_server/config.py::Settings` 為單一定義源。
 
-### 必填（四個之一未設定會 `pydantic ValidationError` crash）
+### 必填（三項未設定會 `pydantic ValidationError` crash）
 
 | 變數           | 說明                                             |
 | -------------- | ------------------------------------------------ |
 | `DASHBOARD_USER` | 儀表板／API 唯一帳號                            |
 | `DASHBOARD_PASS` | 儀表板密碼                                       |
-| `EDGE_API_KEY`   | 邊緣節點呼叫 REST API 的 X-API-Key              |
 | `SECRET_KEY`     | Session Cookie 簽章金鑰（由 Settings 讀取，禁用裸 `os.environ`） |
 
 啟動時若偵測到佔位值（`changeme` / `your-secret-key` / `test-key` 等）會警告。
@@ -25,6 +24,7 @@
 
 | 變數                        | 預設                          | 說明                                                                 |
 | --------------------------- | ----------------------------- | -------------------------------------------------------------------- |
+| `EDGE_API_KEY`               | `""`                          | 邊緣節點呼叫 REST API 的 X-API-Key（Legacy 共用；可改用 per-node 金鑰，見下方「Per-node 金鑰佈建與退場共用金鑰」）。未設 = 只用 per-node 金鑰驗證；若設定則須為強隨機值，否則啟動失敗 |
 | `MQTT_BROKER`               | `localhost`                   | MQTT broker 主機                                                     |
 | `MQTT_PORT`                 | `1883`                        | MQTT TCP 埠                                                          |
 | `MQTT_USERNAME`             | `""`                          | Mosquitto 認證用戶（雲端部署）                                       |
@@ -56,8 +56,10 @@
 # === 必填 ===
 DASHBOARD_USER=admin
 DASHBOARD_PASS=你的強密碼
-EDGE_API_KEY=隨機字串
 SECRET_KEY=另一個隨機字串
+
+# === 選填：Legacy 共用金鑰（未設 = 只用 per-node 金鑰；設定則須為強隨機值）===
+#EDGE_API_KEY=隨機字串
 
 # === 通常保持預設 ===
 MQTT_BROKER=localhost
@@ -80,11 +82,30 @@ CWA_API_KEY=CWA-XXXX
 | 變數 | 必填 | 預設 | 補充 |
 | --- | --- | --- | --- |
 | `DASHBOARD_USER` / `DASHBOARD_PASS` | 是 | — | 缺一即 crash |
-| `EDGE_API_KEY` / `SECRET_KEY` | 是 | — | 缺一即 crash |
+| `SECRET_KEY` | 是 | — | 缺即 crash |
+| `EDGE_API_KEY` | 否（選填） | `""` | Legacy 共用金鑰；未設 = 只用 per-node 金鑰。設定時須為強隨機值，否則啟動失敗 |
 | `DATABASE_URL` | 建議 | `""` | 空 = SQLite；雲端容器應設 PostgreSQL |
 | `COOKIE_SECURE` | 建議 | `false` | HTTPS 部署設 `true` |
 | `CWA_API_KEY` | 選 | `""` | 空即停用天氣頁 |
 | `MEDIAMTX_METRICS_URL` | 選 | `http://localhost:9998/metrics` | 空即隱藏串流健康 |
+
+### Per-node 金鑰佈建與退場共用金鑰
+
+`EDGE_API_KEY` 是過渡期的 Legacy 共用金鑰；正式建議做法是每個邊緣節點各自持有一把獨立的
+per-node 金鑰，並在全部節點都遷移完成後退場共用金鑰。流程如下：
+
+1. **佈建**：在儀表板節點列點「設定金鑰」，或呼叫已認證的 `POST /api/nodes/{node_id}/key`。
+   回應會回傳原始金鑰 `sk-edge-…`，**只顯示這一次**——伺服器端只存雜湊值，之後無法再取得明文。
+   「重設金鑰」會產生新金鑰並讓舊金鑰立即失效（rotate）；「清除金鑰」則移除該節點的 per-node 金鑰——
+   但若共用金鑰 `EDGE_API_KEY` 仍設定（過渡期），該節點會回退用共用金鑰繼續驗證，並未真正斷線；
+   要完全切斷該節點，需搭配退場共用金鑰（見步驟 4）或改用「重設金鑰」讓它換發新的 per-node 金鑰。
+2. **套用並驗證**：把取得的 `sk-edge-…` 填入該節點 `config.yaml` 的 `server.api_key`，重啟邊緣服務，
+   確認節點恢復連線（心跳／遙測資料回復正常，儀表板「系統狀態」頁顯示在線）。
+3. **逐台遷移、零停機**：遷移期間為過渡（grace period）——共用金鑰（`EDGE_API_KEY`，若仍設定）與
+   已佈建的 per-node 金鑰**同時有效**，因此可以一次遷移一台節點，其餘節點不受影響、不需停機。
+4. **退場共用金鑰**：等所有節點都換成各自的 per-node 金鑰後，將 `.env`（或 Zeabur 環境變數面板）裡的
+   `EDGE_API_KEY` 刪除或留空，並重啟中央伺服器。伺服器會以「per-node-only」模式啟動：共用金鑰驗證
+   路徑停用，之後只接受各節點自己的 per-node 金鑰（以及儀表板 session 用於讀取端點）。
 
 ---
 
@@ -154,7 +175,7 @@ thermal:
 # 伺服器連線
 server:
   api_url: "http://192.168.1.100:8000/api"
-  api_key: "和伺服器 EDGE_API_KEY 相同"    # 必須修改
+  api_key: "sk-edge-…"                # 必須修改；建議填入該節點的 per-node 金鑰（見「Per-node 金鑰佈建與退場共用金鑰」），過渡期亦可填與伺服器 EDGE_API_KEY 相同的共用值
   mqtt_broker: "192.168.1.100"
   mqtt_port: 1883
   mqtt_username: ""                   # Mosquitto 帳號（雲端）
@@ -195,7 +216,7 @@ events:
 | 欄位                    | 說明                                                                                     |
 | ----------------------- | ---------------------------------------------------------------------------------------- |
 | `server.api_url`        | Zeabur HTTPS URL（如 `https://sdprs.zeabur.app/api`）                                    |
-| `server.api_key`        | 與雲端 `EDGE_API_KEY` 一致                                                               |
+| `server.api_key`        | 建議填入該節點的 per-node 金鑰（`sk-edge-…`，見「Per-node 金鑰佈建與退場共用金鑰」）；過渡期亦可填與雲端 `EDGE_API_KEY` 一致的共用值 |
 | `server.mqtt_broker`    | Mosquitto 公開 TCP 地址（非 Zeabur 內部名 `mosquitto`）                                  |
 | `server.mqtt_username`  | 與雲端 `MQTT_USERNAME` 一致                                                              |
 | `server.mqtt_password`  | 與雲端 `MQTT_PASSWORD` 一致                                                              |

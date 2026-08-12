@@ -170,7 +170,8 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
             snoozed_until  DATETIME,
             snooze_reason  TEXT,
             battery_voltage REAL,
-            power_source    TEXT
+            power_source    TEXT,
+            api_key_hash    TEXT
         );
     """)
     # Migration: add columns to existing nodes tables
@@ -188,6 +189,8 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE nodes ADD COLUMN battery_voltage REAL;")
     if "power_source" not in existing_cols:             # item 12
         cursor.execute("ALTER TABLE nodes ADD COLUMN power_source TEXT;")
+    if "api_key_hash" not in existing_cols:            # per-node edge keys
+        cursor.execute("ALTER TABLE nodes ADD COLUMN api_key_hash TEXT;")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pump_readings (
@@ -322,6 +325,7 @@ def _create_tables_sqlite(cursor: sqlite3.Cursor):
     # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
     # looks up by api_key_hash — index it so that lookup is not a full scan.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_api_key_hash ON nodes(api_key_hash);")
 
 
 def _create_tables_postgresql(conn):
@@ -359,7 +363,8 @@ def _create_tables_postgresql(conn):
             snoozed_until  TIMESTAMP,
             snooze_reason  TEXT,
             battery_voltage REAL,
-            power_source    TEXT
+            power_source    TEXT,
+            api_key_hash    TEXT
         );
     """))
     # PG supports IF NOT EXISTS on ADD COLUMN since 9.6 — safe migration
@@ -369,6 +374,7 @@ def _create_tables_postgresql(conn):
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS snooze_reason TEXT;"))
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS battery_voltage REAL;"))
     conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS power_source TEXT;"))
+    conn.execute(sqlalchemy.text("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS api_key_hash TEXT;"))
     conn.execute(sqlalchemy.text("""
         CREATE TABLE IF NOT EXISTS pump_readings (
             id          SERIAL PRIMARY KEY,
@@ -464,6 +470,7 @@ def _create_tables_postgresql(conn):
     # Every webcam-client auth (get_webcam_client_by_key / get_webcam_camera_owner)
     # looks up by api_key_hash — index it so that lookup is not a full scan.
     conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_webcam_clients_api_key_hash ON webcam_clients(api_key_hash);"))
+    conn.execute(sqlalchemy.text("CREATE INDEX IF NOT EXISTS idx_nodes_api_key_hash ON nodes(api_key_hash);"))
 
 
 # =============================================================================
@@ -1416,6 +1423,77 @@ def get_webcam_client_by_key(api_key: str) -> Optional[dict]:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def get_edge_node_by_key(api_key: str) -> Optional[dict]:
+    """Look up an edge node by its raw API key (SHA-256 hashed for comparison).
+
+    Returns {"node_id", "status"} or None. An empty/blank key never matches
+    (its hash is never stored; a NULL api_key_hash row must not be resolved by
+    an empty key)."""
+    if not api_key:
+        return None
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        return _pg_fetch_one_sync(
+            "SELECT node_id, status FROM nodes WHERE api_key_hash = :h",
+            {"h": api_key_hash},
+        )
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT node_id, status FROM nodes WHERE api_key_hash = ?",
+            (api_key_hash,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def provision_edge_node_key(node_id: str, node_type: str = "glass") -> dict:
+    """Provision (or rotate) a per-node API key for an edge node. Creates the
+    nodes row if absent, else sets its api_key_hash. Returns {"api_key"} — the
+    raw key is shown ONCE and never stored/returned again."""
+    api_key = f"sk-edge-{secrets.token_urlsafe(32)}"
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if get_backend() == "postgresql":
+        _pg_execute_sync(
+            "INSERT INTO nodes (node_id, node_type, status, api_key_hash) "
+            "VALUES (:id, :t, 'OFFLINE', :h) "
+            "ON CONFLICT (node_id) DO UPDATE SET api_key_hash = :h",
+            {"id": node_id, "t": node_type, "h": api_key_hash},
+        )
+    else:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO nodes (node_id, node_type, status, api_key_hash) "
+                "VALUES (?, ?, 'OFFLINE', ?) "
+                "ON CONFLICT(node_id) DO UPDATE SET api_key_hash = excluded.api_key_hash",
+                (node_id, node_type, api_key_hash),
+            )
+    return {"api_key": api_key}
+
+
+def rotate_edge_node_key(node_id: str) -> dict:
+    """Rotate an existing edge node's key (caller 404-guards existence)."""
+    return provision_edge_node_key(node_id)
+
+
+def clear_edge_node_key(node_id: str) -> bool:
+    """De-provision: NULL the node's api_key_hash so it falls back to the shared
+    key. The node registry row and its telemetry are preserved. Returns True if
+    a row was updated, False if no such node."""
+    if get_backend() == "postgresql":
+        existing = _pg_fetch_one_sync(
+            "SELECT node_id FROM nodes WHERE node_id = :id", {"id": node_id}
+        )
+        if not existing:
+            return False
+        _pg_execute_sync(
+            "UPDATE nodes SET api_key_hash = NULL WHERE node_id = :id", {"id": node_id}
+        )
+        return True
+    with get_db_cursor() as cursor:
+        cursor.execute("UPDATE nodes SET api_key_hash = NULL WHERE node_id = ?", (node_id,))
+        return cursor.rowcount > 0
 
 
 def revoke_webcam_key(node_id: str) -> dict:

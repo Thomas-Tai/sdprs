@@ -14,7 +14,10 @@ Covers the auth-hardening work in central_server/auth.py:
 """
 
 import asyncio
+import os
 import sys
+import tempfile
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -139,16 +142,35 @@ def test_verify_node_id_allowlist_accepts_listed(monkeypatch):
 
 # ===== Auth-G1: api_key logging no longer leaks the first 8 chars =====
 
-def test_verify_api_key_log_omits_raw_prefix_uses_digest():
+def test_verify_api_key_log_omits_raw_prefix_uses_digest(monkeypatch):
     """(9) A wrong api_key must not have its first 8 chars written to the log.
     The digest form must be present instead so operators can still correlate
-    repeated attempts from the same offender."""
+    repeated attempts from the same offender.
+
+    Track 1 (2026-08-05): verify_api_key now checks a per-node key first via
+    database.get_edge_node_by_key(), which opens a DB cursor. conftest.py only
+    sets env vars — it does not initialise a database — so this test needs its
+    own fresh temp SQLite DB (with the `nodes` table) before calling
+    verify_api_key, otherwise it would error on `no such table: nodes` before
+    ever reaching the 401 path. The wrong_key below does not match the
+    conftest EDGE_API_KEY, so with an empty (but present) `nodes` table the
+    per-node lookup finds no match, falls through to the shared-key check,
+    and still 401s exactly as before.
+    """
     wrong_key = "totally-wrong-key-please-do-not-log-my-prefix-here-plz"
     raw_prefix = wrong_key[:8]
 
+    tmp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(tmp_dir, "test.db")
+    monkeypatch.setenv("DATABASE_PATH", db_path)
+    from central_server import database
+    database.init_db(db_path)
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace())
+
     with patch("central_server.auth.logger") as mock_logger:
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(verify_api_key(api_key=wrong_key))
+            asyncio.run(verify_api_key(request, api_key=wrong_key))
         assert exc.value.status_code == 401
 
         # There should be at least one warning call for the failed attempt.

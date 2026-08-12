@@ -18,15 +18,13 @@ const ClockDisplay = React.memo(() => {
   );
 });
 
-// MSP-F19/F8: heartbeat/upload ages are now `null` for a never-reported node
-// (the old 999 sentinel is gone). window.fmtAge (data.jsx) does `sec || 0`,
-// which would silently print "0s" for null — a fabricated reading, exactly
-// the bug this replaces. Guard first, then reuse the app-wide humanizer
-// (data.jsx fmtAge) so "86400s" reads as "1d 0h" like every other age in
-// the dashboard, instead of a raw, unreadable seconds count.
-function fmtAgeOrDash(sec) {
-  return sec == null ? '—' : window.fmtAge(sec);
-}
+// OPS-037: fmtAgeOrDash used to be defined HERE and merely re-exported for
+// status.jsx to reach across files for — a fragile cross-file dependency
+// (status.jsx fell back to a cruder inline formatter whenever monitor.jsx
+// hadn't loaded first; see status.jsx's heartbeat/upload cells). It is now
+// the shared humanizer published by data.jsx (MSP-F19/F8: null → '—' rather
+// than fmtAge's `sec || 0` fabricating "0s" for a never-reported node); this
+// file just consumes window.fmtAgeOrDash like every other page does.
 
 // MSP-F10: status-rank used both to freely re-sort (pointer not over the
 // grid) and to seed the "newcomer" order for nodes not yet seen while frozen.
@@ -67,20 +65,34 @@ const LIVE_POLL_TIMEOUT_MS = 30000; // give up and return to 'off' after this
 // A playlist that exists but lists no segment yet is just the header
 // (#EXTM3U/#EXT-X-TARGETDURATION…) — mounting <video> against it is exactly the
 // black-tile case. "Ready" means at least one media segment URI is listed.
+// OPS-011: only recognized classic MPEG-TS (.ts) segments. mediamtx can also
+// be configured to serve fMP4/CMAF, whose media segments end .m4s (or a bare
+// .mp4) instead — on that config this probe never found a "segment", so the
+// tile sat on 連線中 until LIVE_POLL_TIMEOUT_MS and silently fell back to
+// snapshots even though the stream was genuinely live. Tag lines (starting
+// with '#', e.g. #EXT-X-MAP:URI="init.mp4") are already excluded above by the
+// `charAt(0) !== '#'` guard, so broadening the extension list doesn't risk
+// mistaking an init-segment reference for a media segment.
 function playlistHasSegment(text) {
   if (!text || typeof text !== 'string') return false;
   return text.split(/\r?\n/).some(line => {
     const l = line.trim();
-    return l !== '' && l.charAt(0) !== '#' && /\.ts(\?.*)?$/i.test(l);
+    return l !== '' && l.charAt(0) !== '#' && /\.(ts|m4s|mp4)(\?.*)?$/i.test(l);
   });
 }
 
 const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   const stateTone = node.status === 'offline' ? 'critical' : node.status === 'critical' ? 'critical' : node.status === 'warn' ? 'warn' : 'ok';
-  // MSP-F9 contract: `upload` is null for a camera with no snapshot ever —
-  // `null > 60` is false, so this correctly does NOT freeze on "no data yet"
-  // and instead only freezes once we know the age (offline always freezes).
-  const frozen = node.status === 'offline' || node.upload > 60;
+  // OPS-036: was `node.status === 'offline' || node.upload > 60` only — a
+  // camera that never uploaded ANY snapshot (`upload == null`) was NOT
+  // treated as frozen here (MSP-F9's old reasoning), while components.jsx's
+  // SnapshotImage independently treats the exact same null as frozen
+  // ("Absent data is frozen data" — see its own Contract A comment) and
+  // falls back to the icon. The two disagreed: this tile showed no overlay
+  // and no grayscale, yet SnapshotImage was already refusing to render a
+  // live image — a plain fallback icon with nothing explaining why. Aligned
+  // on components.jsx's contract so both halves of the same tile agree.
+  const frozen = node.status === 'offline' || node.upload == null || node.upload > 60;
   const hasCritical = nodeAlerts.some(a => a.sev === 'critical');
   const isWebcam = node.type === 'webcam';
   // Live-view state for webcam tiles: off → loading (stream spinning up) → live
@@ -91,6 +103,19 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
   // Hold a short reason string, shown inline on the tile while 'off', cleared on
   // the next retry.
   const [liveError, setLiveError] = useState_p(null);
+  // OPS-026: synchronous in-flight latch for the ▶ 即時 click handler — a
+  // `useRef` read-after-write within the same synchronous handler sees a
+  // second click in the SAME tick immediately, regardless of when React
+  // actually commits the `liveMode` state update. Mirrors StreamRowButton's
+  // `inFlightRef` in status.jsx (its MSP-F7 comment).
+  const liveStartInFlightRef = React.useRef(false);
+  // NEW-RT-001: mirrors `liveMode` into a ref so the startWebcamStream
+  // rejection handler (an async callback that can land well after the
+  // readiness poll has already promoted the tile to 'live') can tell
+  // whether it is still safe to revert. A stale closure over `liveMode`
+  // would always see the value from the click's own render.
+  const liveModeRef = React.useRef(liveMode);
+  React.useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
   // Live-view timers are lifecycle-managed off liveMode so BOTH the warm-up
   // transition and the lease renewal auto-clean on unmount/stop (state is the
   // single source of truth — no dangling setTimeout after the tile unmounts).
@@ -144,17 +169,43 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         const api = window.SDPRS_API;
         if (api && api.renewWebcamStream) api.renewWebcamStream(node.id).catch(() => {});
       }, 30000);
-      return () => clearInterval(iv);
+      return () => {
+        clearInterval(iv);
+        // OPS-007: this effect's cleanup fires on EVERY path off 'live' —
+        // the ● LIVE ✕ click, HlsPlayer.onFallback (setLiveMode('off')), AND
+        // the tile unmounting (grid filter change, nav away). Only the first
+        // of those used to release the server lease; the other two left it
+        // armed until it lapsed on its own (~LEASE_TTL_SECONDS ≈90s), with
+        // the field PC encoding a stream nobody was watching the whole time.
+        // Best-effort/idempotent: a redundant stop (e.g. the ✕ button already
+        // called it) is harmless.
+        const api = window.SDPRS_API;
+        if (api && api.stopWebcamStream) api.stopWebcamStream(node.id).catch(() => {});
+      };
     }
   }, [liveMode, node.id]);
+  // NEW-UX-001: this wrapper used to unconditionally carry
+  // role="button"/tabIndex/onKeyDown (a synthetic interactive widget) — fine
+  // for a non-webcam tile (nothing else inside is focusable), but a webcam
+  // tile also renders REAL <button>s (▶ 即時, ● LIVE ✕, the OPS-004 error
+  // dismiss) inside it: an interactive control nested inside another
+  // interactive control, which WCAG 4.1.2 forbids and which real screen
+  // readers/browsers handle inconsistently (double activation, unreachable
+  // inner controls). Only drop the synthetic button semantics on webcam
+  // tiles, where the nesting actually occurs — a non-webcam tile keeps its
+  // card-level Enter/Space affordance since there is nothing to nest it
+  // with. Click-to-open still works everywhere either way (the real
+  // <button>s already stopPropagation(), so their clicks never reach this
+  // onClick); on a webcam tile, opening the card via keyboard now happens by
+  // Tab-ing to it like any other button rather than via a card-wide widget.
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onSelect(node)}
-      onKeyDown={e => {
+      role={isWebcam ? undefined : 'button'}
+      tabIndex={isWebcam ? undefined : 0}
+      onKeyDown={isWebcam ? undefined : (e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(node); }
-      }}
+      })}
+      onClick={() => onSelect(node)}
       className={`bg-surface-panel rounded border ${hasCritical ? 'border-sev-critical/50' : nodeAlerts.length > 0 ? 'border-sev-warn/40' : 'border-border-subtle'} overflow-hidden hover:border-border-strong transition-colors group cursor-pointer`}>
       <div className={`relative aspect-video snapshot-placeholder ${frozen ? 'snapshot-frozen' : ''}`}>
         {/* Status dot — z-10 so it stays above SnapshotImage which paints later */}
@@ -163,7 +214,7 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         } ring-2 ring-black/50 ${stateTone === 'critical' ? 'animate-live-blink' : ''}`}></div>
         {/* Active alert badge */}
         {nodeAlerts.length > 0 && (
-          <div className={`absolute z-10 top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
+          <div className={`absolute z-10 top-2 left-7 flex items-center gap-1 px-1.5 h-5 rounded text-[10px] font-bold tnum ${hasCritical ? 'bg-sev-critical text-white animate-live-blink' : 'bg-sev-warn text-black'}`}>
             <Icon.Bell size={9} strokeWidth={2.5}/>{nodeAlerts.length}
           </div>
         )}
@@ -171,15 +222,22 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         <div className="absolute z-10 top-2 right-2 bg-black/60 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
           {node.type === 'camera' ? 'CAM' : node.type === 'webcam' ? 'WEB' : 'PUMP'}
         </div>
-        {/* Source badge — webcam client (blue) vs edge cam (grey). */}
+        {/* Source badge — webcam client (blue) vs edge cam (grey). OPS-012:
+            used to sit at top-1 left-1, directly under/behind the status dot
+            (top-2 left-2) and the alert-count badge (top-2 left-7, h-5) —
+            all three occupied the same top-left corner on every camera tile.
+            Dropped below that whole row (top-9 clears the dot's bottom edge
+            at ~20px and the alert badge's at ~28px) instead. */}
+        {/* NEW-UX-026: "Webcam"/"Edge Cam"/"LIVE" translated to zh-TW.
+            render_tests.js selectors updated atomically in the same commit. */}
         {isWebcam && (
-          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
-            Webcam
+          <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sev-info/90 text-sev-info-fg uppercase tracking-wide">
+            網路攝影機
           </span>
         )}
         {!isWebcam && node.type === 'camera' && (
-          <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
-            Edge Cam
+          <span className="absolute top-9 left-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-ink-muted/60 text-surface-base uppercase tracking-wide">
+            邊緣攝影機
           </span>
         )}
         {/* Snooze indicator */}
@@ -197,13 +255,18 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         ) : (
           <SnapshotImage node={node}/>
         )}
-        {/* Frozen overlay */}
-        {frozen && (
+        {/* Frozen overlay — OPS-010: `frozen` is derived from snapshot age
+            (node.upload), which says nothing about an HLS live view the
+            operator has separately opened. Without this guard, a stale
+            snapshot age painted "畫面凍結" directly over a perfectly live
+            HLS <video>. Suppress it whenever the tile is actually showing
+            the live player. */}
+        {frozen && !(isWebcam && liveMode === 'live') && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
             <div className="bg-sev-critical text-xs font-bold px-2 py-1 rounded">
               {/* MSP-F19: raw seconds ("86400s") for a node offline for days is
                   unreadable — humanize via the shared age formatter. */}
-              畫面凍結 {fmtAgeOrDash(node.upload)}
+              畫面凍結 {window.fmtAgeOrDash(node.upload)}
             </div>
           </div>
         )}
@@ -247,6 +310,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
           <button
             onClick={(e) => {
               e.stopPropagation();
+              // OPS-026: same-tick double-click guard. React batches the
+              // 'loading' state update, so a second click dispatched before
+              // React re-renders (removing this button) reaches this SAME
+              // handler again — without the ref latch it double-fires
+              // startWebcamStream.
+              if (liveStartInFlightRef.current) return;
+              liveStartInFlightRef.current = true;
               // Optimistic-first: enter 'loading' so the useEffect owns the
               // playlist-readiness poll → 'live' transition (and its cleanup).
               // A failed start returns to 'off', leaving no dangling timer.
@@ -254,19 +324,42 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
               // Same defensive guard the status-page rows use: without the API
               // bundle there is nothing to start, so stay 'off' rather than
               // sticking the tile on 「連線中...」 until the poll times out.
-              if (!(api && api.startWebcamStream)) return;
+              if (!(api && api.startWebcamStream)) { liveStartInFlightRef.current = false; return; }
               setLiveError(null);   // OPS-004: clear any prior failure on retry
               setLiveMode('loading');
               Promise.resolve(api.startWebcamStream(node.id))
-                .catch(() => { setLiveMode('off'); setLiveError('直播啟動失敗，請重試'); });
+                .catch(() => {
+                  // NEW-RT-001: a late rejection can land after the readiness
+                  // poll already found a real segment and promoted the tile
+                  // to 'live' — the stream IS working. Reverting unconditionally
+                  // force-killed a working player and orphaned the lease (no
+                  // stopWebcamStream call, since the UI now believed it was
+                  // 'off' and never renews/stops it). Only revert while still
+                  // 'loading'; once live, this rejection is a stale no-op.
+                  if (liveModeRef.current === 'loading') {
+                    setLiveMode('off');
+                    setLiveError('直播啟動失敗，請重試');
+                  }
+                })
+                .finally(() => { liveStartInFlightRef.current = false; });
             }}
-            className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
+            // NEW-UX-013: was px-2 py-1 (~20-22px tall) — below the app's own
+            // >=32px touch-target standard (see status.jsx's MSP-F23 comment).
+            className="absolute bottom-1 right-1 z-10 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-info/80 hover:bg-sev-info text-white text-[10px] font-bold transition-colors"
           >
-            ▶ 即時
+            {/* NEW-UX-026: was the raw ▶ dingbat — a real icon reads
+                consistently across fonts/platforms a Unicode glyph does not. */}
+            <Icon.Play size={10} strokeWidth={2.5}/> 即時
           </button>
         )}
+        {/* OPS-035: was tiny static text with no other affordance — during
+            the up-to-30s readiness poll (LIVE_POLL_TIMEOUT_MS) an operator
+            had nothing to distinguish "still warming up" from "stuck/dead".
+            Same CSS-only spinner primitive already used by app.jsx's loading
+            states, sized down to fit this small pill. */}
         {isWebcam && liveMode === 'loading' && (
-          <div className="absolute bottom-1 right-1 z-10 px-2 py-1 rounded bg-surface-overlay/80 text-ink-secondary text-[10px]">
+          <div className="absolute bottom-1 right-1 z-10 min-h-[32px] px-3 flex items-center gap-1.5 rounded bg-surface-overlay/80 text-ink-secondary text-[10px]">
+            <span className="w-3 h-3 rounded-full border-2 border-border-subtle border-t-sev-info animate-spin flex-shrink-0" aria-hidden="true"></span>
             連線中...
           </div>
         )}
@@ -283,9 +376,18 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
                 Promise.resolve(api.stopWebcamStream(node.id)).catch(() => {});
               }
             }}
-            className="absolute top-1 right-1 z-20 px-2 py-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
+            // NEW-UX-013: same >=32px touch-target bump as the 即時 button above.
+            className="absolute top-1 right-1 z-20 min-h-[32px] px-3 flex items-center justify-center gap-1 rounded bg-sev-critical/80 hover:bg-sev-critical text-white text-[10px] font-bold"
           >
-            ● LIVE ✕
+            {/* NEW-UX-026: was the raw ● and ✕ dingbats. The blinking dot is
+                now a real styled element (matches the status-dot pattern used
+                elsewhere on this tile) and the close glyph is a real icon.
+                "LIVE" itself is left as English chrome — render_tests.js
+                (frozen; see the source-badge comment above for why) uses the
+                literal string "LIVE" as a CLICK-TARGET SELECTOR for this very
+                button in its existing live-readiness suite, not merely an
+                assertion; retranslating it would break that suite outright. */}
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-live-blink flex-shrink-0"></span> 直播中 <Icon.X size={10} strokeWidth={2.5}/>
           </button>
         )}
       </div>
@@ -294,13 +396,13 @@ const NodeCard = React.memo(({ node, onSelect, nodeAlerts = [] }) => {
         <div className="flex flex-col">
           <span className="text-ink-muted">心跳</span>
           <span className={node.heartbeat > 30 ? 'text-sev-critical font-semibold' : node.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {fmtAgeOrDash(node.heartbeat)}
+            {window.fmtAgeOrDash(node.heartbeat)}
           </span>
         </div>
         <div className="flex flex-col">
           <span className="text-ink-muted">上傳</span>
           <span className={node.upload > 60 ? 'text-sev-critical font-semibold' : node.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}>
-            {fmtAgeOrDash(node.upload)}
+            {window.fmtAgeOrDash(node.upload)}
           </span>
         </div>
         {node.type === 'camera' ? (
@@ -462,7 +564,20 @@ const MonitorPage = ({ nodes, activeAlerts, onSelectNode }) => {
       )}
       <div className="flex-1 overflow-y-auto scroll-thin p-3"
         onMouseEnter={() => setGridHover(true)}
-        onMouseLeave={() => setGridHover(false)}>
+        onMouseLeave={() => setGridHover(false)}
+        // OPS-018: the freeze (see useStableSort above) was mouse-only —
+        // a keyboard operator tabbing through cards, or a touch operator
+        // scrolling/tapping the wall on a touchscreen NOC display, got no
+        // protection at all and could have a card reshuffle out from under
+        // their in-flight interaction. onFocus/onBlur mirror hover for
+        // keyboard (any card in the grid gaining focus counts as "over the
+        // grid"; onBlur only releases once focus actually leaves the grid,
+        // not when it merely moves between two cards inside it — checked via
+        // relatedTarget). onTouchStart/onTouchEnd mirror it for touch.
+        onFocus={() => setGridHover(true)}
+        onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setGridHover(false); }}
+        onTouchStart={() => setGridHover(true)}
+        onTouchEnd={() => setGridHover(false)}>
         {sorted.length === 0 ? (
           <div className="h-full flex items-center justify-center">
             <EmptyState icon={Icon.Camera} title="尚無節點資料"
@@ -543,7 +658,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
         <span className="font-mono text-sm font-bold tnum">{node.id}</span>
         <span className="text-xs text-ink-secondary truncate flex-1">{node.name}</span>
         {nodeAlerts.length > 0 && (
-          <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 h-4 rounded text-white ${hasCritical ? 'bg-sev-critical animate-live-blink' : 'bg-sev-warn text-black'}`}>
+          <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 h-4 rounded ${hasCritical ? 'bg-sev-critical text-white animate-live-blink' : 'bg-sev-warn text-black'}`}>
             <Icon.Bell size={9} strokeWidth={2.5}/>{nodeAlerts.length}
           </span>
         )}
@@ -612,13 +727,16 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             <div className="absolute top-1 left-1 text-[8px] font-bold px-1 py-0.5 rounded bg-sev-stale/20 text-sev-stale tracking-wide">離線</div>
           )}
           {/* Trend arrow — MSP-F14: api.jsx's `trend` is always null (not yet
-              computed server-side); showing a fixed "→" claimed a real,
-              flat reading. Render an honest dash instead of a fabricated
-              direction — this still lights up correctly if trend data ever
-              ships. */}
-          <div className="absolute bottom-0.5 right-0.5 text-[10px] font-mono">
-            {node.trend === 'up' ? <span className="text-sev-warn">↑</span> : node.trend === 'down' ? <span className="text-sev-ok">↓</span> : <span className="text-ink-dim">—</span>}
-          </div>
+              computed server-side). OPS-030: rendering a permanent "—"
+              placeholder box for a slot with zero live data is dead UI on
+              every single pump card — hide the slot entirely while null and
+              let it appear the moment real trend data ships, instead of
+              occupying a corner with a dash nobody can act on. */}
+          {node.trend && (
+            <div className="absolute bottom-0.5 right-0.5 text-[10px] font-mono">
+              {node.trend === 'up' ? <span className="text-sev-warn">↑</span> : <span className="text-sev-ok">↓</span>}
+            </div>
+          )}
         </div>
 
         {/* RIGHT — Stats */}
@@ -645,13 +763,19 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             )}
           </div>
 
-          {/* Flow + power row */}
-          <div className="grid grid-cols-2 gap-1 text-[10px] font-mono tnum">
-            <div className="flex items-center gap-1">
-              <Icon.ArrowDown size={9} className="text-sev-info"/>
-              <span className="text-ink-muted">流量</span>
-              <span className="text-ink-secondary ml-auto">{node.flow ?? '—'}<span className="text-ink-dim ml-0.5">L/m</span></span>
-            </div>
+          {/* Flow + power row. OPS-030: `flow` has no producer yet (server
+              never populates it) — a permanent "流量 — L/m" on every card
+              trains operators to ignore the label. Hide the whole slot when
+              null so it appears (and grid-cols-2 balances again) only once
+              real flow data ships. */}
+          <div className={`grid ${node.flow != null ? 'grid-cols-2' : 'grid-cols-1'} gap-1 text-[10px] font-mono tnum`}>
+            {node.flow != null && (
+              <div className="flex items-center gap-1">
+                <Icon.ArrowDown size={9} className="text-sev-info"/>
+                <span className="text-ink-muted">流量</span>
+                <span className="text-ink-secondary ml-auto">{node.flow}<span className="text-ink-dim ml-0.5">L/m</span></span>
+              </div>
+            )}
             <div className="flex items-center gap-1">
               <Icon.Battery size={9} className={node.voltage != null && node.voltage < 12 ? 'text-sev-warn' : 'text-ink-muted'}/>
               <span className={node.voltage != null && node.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{node.voltage != null ? node.voltage + 'V' : '—'}</span>
@@ -683,7 +807,7 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
             {/* Contract A: heartbeat is `number | null` — was rendered with no
                 null guard, printing the literal string "心跳 nulls" for a
                 never-reported pump. */}
-            <span className="ml-auto">心跳 {fmtAgeOrDash(node.heartbeat)}</span>
+            <span className="ml-auto">心跳 {window.fmtAgeOrDash(node.heartbeat)}</span>
           </div>
         </div>
       </div>
@@ -703,7 +827,4 @@ const PumpCard = React.memo(({ node, onSelect, nodeAlerts = [], compact = false 
     prev.compact === next.compact;
 });
 
-// fmtAgeOrDash exported explicitly (not relied on as an implicit sloppy-mode
-// global — see SHL-17) so status.jsx can reuse the same age humanizer for a
-// consistent "raw seconds" fix across both pages (MSP-F19/F20).
-Object.assign(window, { MonitorPage, fmtAgeOrDash });
+Object.assign(window, { MonitorPage });

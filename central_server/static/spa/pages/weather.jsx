@@ -52,6 +52,7 @@ const WindArrow = ({ degree, size = 16 }) => {
       className="inline-block text-ink-secondary"
       style={{ transform: `rotate(${rot}deg)`, transition: 'transform 400ms ease' }}
       aria-label={`風向 ${degree}度（吹向 ${rot} 度）`}
+      role="img"
     >
       <path d="M10 2 L15 15 L10 12 L5 15 Z" fill="currentColor" stroke="currentColor" strokeLinejoin="round"/>
     </svg>
@@ -121,8 +122,17 @@ const WeatherSettings = ({ onSaved, showToast }) => {
   // error message and the Save-disabled state share one source of truth.
   const latEntered = config.site_lat != null && config.site_lat !== '';
   const lonEntered = config.site_lon != null && config.site_lon !== '';
+  // WXA-005: range check — min/max HTML attrs don't block typed values, so
+  // lat 999 or lon 999 would save without validation. Check both paired-ness
+  // AND range (-90..90 / -180..180).
+  const latOutOfRange = latEntered && (Number(config.site_lat) < -90 || Number(config.site_lat) > 90);
+  const lonOutOfRange = lonEntered && (Number(config.site_lon) < -180 || Number(config.site_lon) > 180);
   const latLonError = latEntered !== lonEntered
     ? '緯度和經度必須同時設定或同時留空'
+    : latOutOfRange
+    ? '緯度必須在 -90 到 90 之間'
+    : lonOutOfRange
+    ? '經度必須在 -180 到 180 之間'
     : null;
   // WHA-M3 fix (2026-07-20): Save is now blocked while the config GET is
   // known to have failed — defaults showing on screen must not be saveable
@@ -318,8 +328,8 @@ const WeatherSettings = ({ onSaved, showToast }) => {
                     placeholder="22.19 (澳門)"
                     value={config.site_lat != null ? config.site_lat : ''}
                     onChange={e => setConfig({...config, site_lat: e.target.value})}
-                    className={inputCls + (latLonError && lonEntered && !latEntered ? ' border-sev-warn/60' : '')}
-                    aria-invalid={latLonError && lonEntered && !latEntered}
+                    className={inputCls + ((latLonError && latEntered) ? ' border-sev-warn/60' : '')}
+                    aria-invalid={latLonError && latEntered}
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -331,8 +341,8 @@ const WeatherSettings = ({ onSaved, showToast }) => {
                     placeholder="113.55 (澳門)"
                     value={config.site_lon != null ? config.site_lon : ''}
                     onChange={e => setConfig({...config, site_lon: e.target.value})}
-                    className={inputCls + (latLonError && latEntered && !lonEntered ? ' border-sev-warn/60' : '')}
-                    aria-invalid={latLonError && latEntered && !lonEntered}
+                    className={inputCls + ((latLonError && lonEntered) ? ' border-sev-warn/60' : '')}
+                    aria-invalid={latLonError && lonEntered}
                   />
                 </label>
               </div>
@@ -421,8 +431,12 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
   // Manual-refresh button state (audit T2). Local to WeatherPage so the
   // spinner is scoped to this page — refetches all weather + related data.
   const [refreshing, setRefreshing] = useState_w(false);
+  // WXA-002: synchronous ref-latch to prevent double-click firing duplicate
+  // upstream API fan-outs. `refreshing` state can lag a React tick.
+  const refreshInFlightRef = React.useRef(false);
   const handleManualRefresh = async () => {
-    if (refreshing) return;
+    if (refreshInFlightRef.current || refreshing) return;
+    refreshInFlightRef.current = true;
     setRefreshing(true);
     try {
       // Force server-side re-tick so cached data is fresh, then let
@@ -444,6 +458,7 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
         showToast && showToast('天氣資料已重新載入', 'info');
       }
     } finally {
+      refreshInFlightRef.current = false;
       setRefreshing(false);
     }
   };
@@ -479,6 +494,11 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
   const windValues = fc.map(f => f.wind).filter(v => Number.isFinite(v));
   const maxWind = windValues.length ? Math.max(1, ...windValues) : 1;
   const maxRain = rainValues.length ? Math.max(1, ...rainValues) : 1;
+  // WXA-003: real-max for peak badge display — independent of the axis floor
+  // (1) used for bar heights. When every forecast hour is genuinely 0, the
+  // badge must show "0", not "1".
+  const realMaxWind = windValues.length ? Math.max(...windValues) : 0;
+  const realMaxRain = rainValues.length ? Math.max(...rainValues) : 0;
   // WHA-L2 fix (2026-07-20): maxRain/maxWind fold in a `1` axis-scaling floor
   // to avoid divide-by-zero when every hour is genuinely 0. The peak badges
   // below used to reuse that same floor as a "no data" sentinel
@@ -547,7 +567,12 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
                       dropped silently in the typhoon-active branch, which is
                       the highest-stakes moment for an operator to know the
                       typhoon track/distance reading might be old. */}
-                  距離 {w.typhoon.distance}km · 方位 {w.typhoon.direction} {w.typhoon.bearing}° · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}
+                  {/* WXA-007: guard distance/bearing against null — previously
+                      rendered "距離 km · 方位 °" when fields were absent. */}
+                  {w.typhoon.distance != null && <>距離 {w.typhoon.distance}km</>}
+                  {w.typhoon.distance != null && w.typhoon.direction != null && <> · </>}
+                  {w.typhoon.direction != null && <>方位 {w.typhoon.direction} {w.typhoon.bearing != null && <>{w.typhoon.bearing}°</>}</>}
+                  <> · 來源 {w.source}{w.stale ? ' · 資料較舊' : ''}</>
                 </div>
               </>
             ) : (
@@ -610,34 +635,36 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.CloudRain size={10}/> 雨量</div>
-            {/* WHA-M6 fix (2026-07-20, known-unfixable-as-scoped): the
-                backend's CurrentWeather only ever exposes rainfall_24h_mm —
-                no 10-min or 1-hour live rainfall field exists (rain.now/hour
-                are hardcoded null in api.jsx, see API contract notes), so
-                this hero used to permanently show "—" for a metric that can
-                never populate. Promoted the field that DOES populate (24h
-                cumulative) into the hero position instead of fabricating or
-                forever displaying a dead placeholder; the live-rate line
-                below now honestly states no source exists rather than
-                silently showing blank "mm/h" forever. */}
+            {/* Rain tile — 2026-08-06 rainfall reconciliation (supersedes the
+                old WHA-M6 note): the backend now exposes TWO honest fields.
+                The hero shows rain.day — a GENUINE 24h daily total (SMG Type-5
+                / Open-Meteo daily=precipitation_sum), no longer the mislabeled
+                hourly value it used to hold. The live-rate line below binds
+                rain.now — the instantaneous mm/h (SMG Type-3 / Open-Meteo
+                current precip / HKO past-hour). Each field carries its own
+                source; MultiSourceChip labels them, collapsing to one row when
+                both come from the same provider. "無即時雨量資料來源" is now the
+                genuine rain.now==null fallback, not a permanent state. */}
             <div className="mt-1 flex items-baseline gap-1 whitespace-nowrap">
               <span className="text-4xl font-mono font-bold tnum text-ink-primary">
                 {rain.day != null ? rain.day : '—'}
               </span>
               <span className="text-ink-muted text-sm">mm/24h</span>
             </div>
-            {/* rainColorClass's thresholds (30 / 10) are rainstorm-signal
-                INTENSITY bands in mm/h, so they belong on this live-rate line
-                — not on the 24h cumulative above, where 30mm is unremarkable
-                and would paint a calm day critical-red. Promoting the 24h
-                total into the hero orphaned this helper entirely, leaving the
-                rain tile the only uncoloured hero next to a tempColorClass'd
-                temperature. Muted (not the helper's null branch) when there is
-                no source, so "no data" never reads as a severity. */}
+            {/* rainColorClass's 30/10 thresholds are rainstorm-signal INTENSITY
+                bands in mm/h, so they color the live-rate line below (which now
+                populates from rainfall_rate_mmh) — NOT the 24h cumulative hero,
+                where 30mm is unremarkable and would paint a calm day red. The
+                hero stays neutral (text-ink-primary); the rate line is muted
+                only in its rain.now==null fallback so "no data" never reads as
+                a severity. */}
             <div className={`text-xs mt-1 font-mono tnum whitespace-nowrap ${rain.now != null ? rainColorClass(rain.now) : 'text-ink-muted'}`}>
               {rain.now != null ? `即時 ${rain.now} mm/h` : '無即時雨量資料來源'}
             </div>
-            <SourceChip label={sources.rainfall_24h_mm}/>
+            <MultiSourceChip items={[
+              { label: '24h', sourceLabel: sources.rainfall_24h_mm },
+              { label: '即時', sourceLabel: sources.rainfall_rate_mmh },
+            ]}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Zap size={10}/> 雷擊</div>
@@ -656,9 +683,10 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
                 </div>
               );
             })()}
-            {/* No source label — lightning has no backend source yet
-                (rendered as null in api.jsx mapWeather). Reserved for a
-                future Blitzortung / HKO thunderstorm-warning integration. */}
+            {/* WXA-004: Blitzortung source, shown like every sibling tile.
+                SourceChip renders null on a falsy label, so this stays hidden
+                until the backend supplies sources.lightning. */}
+            <SourceChip label={sources.lightning}/>
           </div>
           <div className="bg-surface-panel border border-border-subtle rounded p-4">
             <div className="text-[10px] uppercase tracking-wider text-ink-muted flex items-center gap-1"><Icon.Thermometer size={10}/> 環境</div>
@@ -708,8 +736,8 @@ const WeatherPage = ({ showToast, onRefresh } = {}) => {
               hunting the chart. Reuses maxRain/maxWind already computed. */}
           {fc.length > 0 && (
             <div className="flex items-center gap-3 text-[10px] text-ink-muted font-mono tnum">
-              <span>峰值雨量 <span className="text-sev-info">{hasRainData ? maxRain : '—'} mm/h</span></span>
-              <span>峰值風速 <span className="text-sev-warn">{hasWindData ? maxWind : '—'} km/h</span></span>
+              <span>峰值雨量 <span className="text-sev-info">{hasRainData ? realMaxRain : '—'} mm/h</span></span>
+              <span>峰值風速 <span className="text-sev-warn">{hasWindData ? realMaxWind : '—'} km/h</span></span>
             </div>
           )}
         </div>

@@ -178,3 +178,133 @@ class TestForceTrigger:
         engine.force_trigger(current_time=BASE + 1.0)
         assert engine._last_visual_trigger_time is None
         assert engine._last_audio_trigger_time is None
+
+
+class TestEventProvenance:
+    """事件來源標記（trigger_source）。"""
+
+    def test_fusion_event_has_trigger_source(self, engine):
+        """相關配對產生的事件其 trigger_source 應為 'fusion'。"""
+        event = engine.evaluate(_visual(), _audio(), current_time=BASE)
+        assert event is not None
+        assert event.trigger_source == "fusion"
+
+
+class TestDwellRunTracking:
+    """視覺持續觸發區間（dwell run）追蹤。"""
+
+    def test_triggered_starts_run_and_start_is_stable(self, engine):
+        """triggered=True 開始區間；後續 triggered 幀不移動起點。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE + 1.0)
+        assert engine._visual_run_start == BASE  # 起點保持不變
+
+    def test_triggered_false_clears_run(self, engine):
+        """triggered=False 中斷區間 → 起點重置為 None。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(_visual(triggered=False), None, current_time=BASE + 0.5)
+        assert engine._visual_run_start is None
+
+    def test_none_visual_leaves_run_unchanged(self, engine):
+        """visual_result=None（節流幀）不改變區間。"""
+        engine.evaluate(_visual(triggered=True), None, current_time=BASE)
+        assert engine._visual_run_start == BASE
+        engine.evaluate(None, None, current_time=BASE + 0.5)
+        assert engine._visual_run_start == BASE
+
+
+# 純視覺回退測試用配置與門檻
+SOLO_TRIGGER_CONFIG = {
+    "correlation_window_seconds": 2,
+    "cooldown_seconds": 30,
+    "visual_only_fallback": True,
+}
+# 提高後的信心門檻 = edge_density_threshold(1.5) × multiplier(1.5) = 2.25
+SOLO_THRESHOLD = 2.25
+
+
+@pytest.fixture
+def solo_engine():
+    """音訊無串流 + 回退啟用 + 提高門檻的引擎。"""
+    return TriggerEngine(
+        SOLO_TRIGGER_CONFIG,
+        node_id="test_node",
+        audio_available=False,
+        solo_confidence_threshold=SOLO_THRESHOLD,
+    )
+
+
+class TestVisualOnlyFallback:
+    """單感測器（純視覺）回退。"""
+
+    def test_and_unchanged_when_audio_available(self):
+        """audio_available=True：即使視覺持續高信心也絕不單獨觸發。"""
+        eng = TriggerEngine(
+            SOLO_TRIGGER_CONFIG, node_id="test_node",
+            audio_available=True, solo_confidence_threshold=SOLO_THRESHOLD,
+        )
+        assert eng.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        assert eng.evaluate(_visual(confidence=10.0), None, current_time=BASE + 5.0) is None
+
+    def test_flag_off_no_solo(self):
+        """visual_only_fallback 未設（=off）：不單獨觸發。"""
+        eng = TriggerEngine(
+            {"correlation_window_seconds": 2, "cooldown_seconds": 30},
+            node_id="test_node",
+            audio_available=False, solo_confidence_threshold=SOLO_THRESHOLD,
+        )
+        assert eng.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        assert eng.evaluate(_visual(confidence=10.0), None, current_time=BASE + 5.0) is None
+
+    def test_dwell_gate_before_window(self, solo_engine):
+        """持續時間未達 correlation_window（<2s）→ 不觸發。"""
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 1.0) is None
+
+    def test_confidence_gate_below_bar(self, solo_engine):
+        """持續達 dwell 但本幀信心低於提高後門檻（2.0 < 2.25）→ 不觸發。"""
+        assert solo_engine.evaluate(_visual(confidence=2.0), None, current_time=BASE) is None
+        assert solo_engine.evaluate(_visual(confidence=2.0), None, current_time=BASE + 2.0) is None
+        assert solo_engine.evaluate(_visual(confidence=2.0), None, current_time=BASE + 2.5) is None
+
+    def test_solo_fire_after_dwell_and_bar(self, solo_engine):
+        """持續達 dwell 且信心 >= 門檻 → 產生 visual_only 事件。"""
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        event = solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 2.0)
+        assert event is not None
+        assert event.trigger_source == "visual_only"
+        assert event.is_simulation is False
+        assert event.node_id == "test_node"
+
+    def test_none_gap_does_not_break_dwell(self, solo_engine):
+        """區間中的 None（節流幀）不重置 dwell → 仍於窗口末端觸發。"""
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        assert solo_engine.evaluate(None, None, current_time=BASE + 1.0) is None
+        event = solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 2.0)
+        assert event is not None
+        assert event.trigger_source == "visual_only"
+
+    def test_triggered_false_breaks_dwell(self, solo_engine):
+        """triggered=False 中斷 dwell，需重新持續滿窗口才觸發。"""
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        assert solo_engine.evaluate(_visual(triggered=False), None, current_time=BASE + 1.0) is None
+        # 於 BASE+1.5 重新開始；BASE+2.0 尚未滿窗口（0.5s）
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 1.5) is None
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 2.0) is None
+        # 自 BASE+1.5 起滿窗口 → 於 BASE+3.5 觸發
+        event = solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 3.5)
+        assert event is not None
+        assert event.trigger_source == "visual_only"
+
+    def test_solo_cooldown_suppresses_second(self, solo_engine):
+        """觸發後 30 秒冷卻期內的第二次合格 solo 被抑制。"""
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE) is None
+        first = solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 2.0)
+        assert first is not None
+        # 觸發後區間已重置；於 BASE+3.0 重新開始一段 run
+        assert solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 3.0) is None
+        # BASE+5.0 dwell 已滿（2s）但仍在冷卻期（距上次事件 3s）→ 抑制
+        second = solo_engine.evaluate(_visual(confidence=10.0), None, current_time=BASE + 5.0)
+        assert second is None

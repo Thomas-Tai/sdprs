@@ -18,7 +18,7 @@ from typing import Optional, Union
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
-from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id
+from ..auth import verify_api_key, verify_api_key_or_session, get_current_user, verify_node_id, verify_node_binding
 from ..database import (
     insert_event,
     get_event,
@@ -173,6 +173,7 @@ async def create_alert(
     # Enforce the edge node_id allowlist on the client-supplied node_id.
     # No-op (allow all) when ALLOWED_NODE_IDS is empty -> backward compatible.
     verify_node_id(alert.node_id)
+    verify_node_binding(request, alert.node_id)
 
     # DATA-006: idempotency. An edge node on flaky WiFi retries a queued upload
     # after a dropped ACK, replaying the identical (node_id, timestamp) — the
@@ -299,7 +300,14 @@ async def upload_video(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Alert {alert_id} not found"
         )
-    
+
+    # Enforce per-node key binding: a key bound to a specific node cannot
+    # upload video into another node's alert. No-op when edge_auth_node is
+    # None (shared key or session auth). Checked AFTER the 404 (a
+    # nonexistent alert must still 404, not leak a 403) but BEFORE the
+    # storage/streaming work below.
+    verify_node_binding(request, event["node_id"])
+
     if event["status"] != "PENDING_VIDEO":
         logger.warning(f"Alert {alert_id} has status {event['status']}, expected PENDING_VIDEO")
         raise HTTPException(

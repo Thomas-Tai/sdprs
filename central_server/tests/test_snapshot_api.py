@@ -51,48 +51,32 @@ FAKE_JPEG = (
 
 @pytest.fixture
 def test_db():
-    """Create a temporary test database."""
-    import sqlite3
-    import threading
-    
-    # Create temporary database file
+    """Create a temporary test database via the production init_db() path.
+
+    Track 1 (2026-08-05): verify_api_key now checks a per-node key first via
+    database.get_edge_node_by_key(), which goes through get_db_cursor() ->
+    get_db() and needs the module-global `_db_lock` (set up inside
+    _init_sqlite()) plus a `nodes` table with the api_key_hash column. The
+    previous hand-rolled sqlite3.connect() here only created an `events`
+    table and never set `_db_lock`, so any route behind
+    Depends(verify_api_key) started failing with "'NoneType' object does
+    not support the context manager protocol" / "no such table: nodes".
+    init_db() is the same production path test_alerts_api.py already uses,
+    for the same reason (see its test_db docstring)."""
+    import central_server.database as db_module
+
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    
-    # Initialize database
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    
-    # Create tables
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            node_id            TEXT NOT NULL,
-            timestamp          DATETIME NOT NULL,
-            status             TEXT NOT NULL DEFAULT 'PENDING_VIDEO',
-            mp4_path           TEXT,
-            visual_confidence  REAL,
-            audio_db_peak      REAL,
-            audio_freq_peak_hz REAL,
-            resolved_by        TEXT,
-            resolved_at        DATETIME,
-            notes              TEXT,
-            created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    
-    conn.commit()
-    
+
+    conn = db_module.init_db(db_path)
+
     yield conn
-    
+
     # Cleanup
-    conn.close()
+    db_module.close_db()
     try:
         os.unlink(db_path)
-    except:
+    except OSError:
         pass
 
 
@@ -478,6 +462,72 @@ class TestClearSnapshot:
             headers=api_headers
         )
         
+        assert response.status_code == 204
+
+
+class TestClearSnapshotNodeBinding:
+    """Security fix (2026-08-06): DELETE /edge/{node_id}/snapshot accepts
+    per-node edge API keys (Depends(verify_api_key)) but, before this fix,
+    never called verify_node_binding -- so a key provisioned for node X
+    could clear node Y's snapshot. Covers the three binding outcomes:
+    cross-node -> 403, own-node -> not 403, shared/unbound key -> not 403.
+    """
+
+    def test_cross_node_key_forbidden(self, client, api_headers):
+        """A per-node key bound to a DIFFERENT node than the path node_id
+        must be rejected with 403 (this is the RED assertion pre-fix)."""
+        import central_server.database as db_module
+
+        node_id = "glass_node_01"
+        client.post(
+            f"/api/edge/{node_id}/snapshot",
+            content=FAKE_JPEG,
+            headers={**api_headers, "Content-Type": "image/jpeg"}
+        )
+
+        # Per-node key provisioned for a DIFFERENT node.
+        out = db_module.provision_edge_node_key("glass_node_99")
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code == 403
+
+    def test_own_node_key_allowed(self, client, api_headers):
+        """A per-node key bound to the SAME node_id as the path must proceed
+        (not be rejected as a binding mismatch)."""
+        import central_server.database as db_module
+
+        node_id = "glass_node_01"
+        client.post(
+            f"/api/edge/{node_id}/snapshot",
+            content=FAKE_JPEG,
+            headers={**api_headers, "Content-Type": "image/jpeg"}
+        )
+
+        # Per-node key provisioned for the SAME node.
+        out = db_module.provision_edge_node_key(node_id)
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers={"X-API-Key": out["api_key"]}
+        )
+
+        assert response.status_code != 403
+        assert response.status_code == 204
+
+    def test_shared_key_allowed_any_node(self, client, api_headers):
+        """The shared EDGE_API_KEY leaves edge_auth_node None (grace-period /
+        unbound) -- verify_node_binding must remain a no-op for it, or every
+        node still on the shared key would regress and lose the ability to
+        clear its own snapshot."""
+        node_id = "glass_node_01"
+        response = client.delete(
+            f"/api/edge/{node_id}/snapshot",
+            headers=api_headers  # shared key -> edge_auth_node is None
+        )
+
+        assert response.status_code != 403
         assert response.status_code == 204
 
 

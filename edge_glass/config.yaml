@@ -64,8 +64,12 @@ audio:
 
 # Trigger engine settings
 trigger:
-  correlation_window_seconds: 2       # Correlation window for visual+audio fusion
-  cooldown_seconds: 30                # Cooldown period between events
+  correlation_window_seconds: 2       # Correlation window for visual+audio fusion; also the visual-only dwell duration
+  cooldown_seconds: 30                # Cooldown period between events (shared by fusion + visual-only events)
+  visual_only_fallback: false         # Opt-in per node. When audio has NO stream (audio.enabled=false / init failure /
+                                      # no device), allow the camera to trigger alone. Off = today's AND-only behavior.
+  visual_only_confidence_multiplier: 1.5  # Solo confidence bar = visual.edge_density_threshold × this. Tune on a real
+                                          # audio-disabled node before enabling the fallback.
 
 # Thermal management settings
 thermal:

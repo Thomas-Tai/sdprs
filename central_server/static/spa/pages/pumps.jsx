@@ -155,18 +155,10 @@ const PumpManualControls = ({ pumpId, pumpState, dryRunProtect, sensorConflict, 
     // Already in the commanded state (e.g. OFF re-sent while already off) —
     // there is nothing to wait for; don't hold the UI "in flight" for 25s.
     const alreadyThere = pumpState === expected;
-    try {
-      await api.pumpCommand(pumpId, action, durationS);
-      if (!mountedRef.current) return;
-      if (alreadyThere) {
-        setPhase(null);
-        setBusyLabel(null);
-        setLastOutcome({ text: `已送出：${pumpId} 已符合狀態（${fmtNowClock_pump()}）`, tone: 'ok' });
-        showToast && showToast(`${pumpId} 已在該狀態，指令已送出確認`, 'ok');
-        return;
-      }
-      setPhase('awaiting');
-      showToast && showToast(`已送出至 ${pumpId}：${action === 'ON' ? `運轉 ${durationS} 秒` : '停機'}，等待裝置回報…`, 'info');
+    // OPS-008: arm the awaitRef BEFORE the HTTP call so a fast WS confirmation
+    // (device publishes new pumpState before the HTTP response lands) is
+    // caught by the useEffect watcher, not lost to a race with the timer.
+    if (!alreadyThere) {
       const timer = setTimeout(() => {
         if (!mountedRef.current) return;
         awaitRef.current = null;
@@ -179,8 +171,29 @@ const PumpManualControls = ({ pumpId, pumpState, dryRunProtect, sensorConflict, 
         showToast && showToast(`逾時：未收到 ${pumpId} 裝置回報，狀態未知${hint}`, 'warn');
       }, PUMP_CONFIRM_TIMEOUT_MS);
       awaitRef.current = { expected, timer };
+    }
+    try {
+      await api.pumpCommand(pumpId, action, durationS);
+      if (!mountedRef.current) return;
+      if (alreadyThere) {
+        setPhase(null);
+        setBusyLabel(null);
+        setLastOutcome({ text: `已送出：${pumpId} 已符合狀態（${fmtNowClock_pump()}）`, tone: 'ok' });
+        showToast && showToast(`${pumpId} 已在該狀態，指令已送出確認`, 'ok');
+        return;
+      }
+      setPhase('awaiting');
+      showToast && showToast(`已送出至 ${pumpId}：${action === 'ON' ? `運轉 ${durationS} 秒` : '停機'}，等待裝置回報…`, 'info');
+      // awaitRef was already armed above — if pumpState matched during the
+      // HTTP round-trip, the useEffect watcher already cleared it.
+      if (!awaitRef.current) {
+        // Device confirmed during the HTTP call — already resolved by useEffect.
+        return;
+      }
     } catch (e) {
       if (!mountedRef.current) return;
+      // Clear the pre-armed awaitRef on error
+      if (awaitRef.current) { clearTimeout(awaitRef.current.timer); awaitRef.current = null; }
       setPhase(null);
       setBusyLabel(null);
       reportSendError(e);
@@ -256,7 +269,9 @@ const PumpManualControls = ({ pumpId, pumpState, dryRunProtect, sensorConflict, 
           reported). */}
       {lastPumpCommand && (
         <div className="mb-2 text-[10px] leading-snug text-ink-dim">
-          上次指令：{lastPumpCommand.action || '不明'} · 由 {lastPumpCommand.by || '不明'} · {lastPumpCommand.at ? fmtClockTime_pump(lastPumpCommand.at) : '時間不明'}
+          {/* OPS-029: show date alongside HH:MM:SS so cross-midnight commands
+              aren't ambiguous in handover review. */}
+          上次指令：{lastPumpCommand.action || '不明'} · 由 {lastPumpCommand.by || '不明'} · {lastPumpCommand.at ? (lastPumpCommand.at.getMonth() + 1) + '/' + lastPumpCommand.at.getDate() + ' ' + fmtClockTime_pump(lastPumpCommand.at) : '時間不明'}
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">
@@ -361,10 +376,8 @@ const PumpsPage = ({ nodes = [], onSelectNode, showToast }) => {
           const pumpRunLabel = isOffline ? '狀態未知（離線）' : pumpRunUnknown ? '狀態未知' : pumpRunOn ? '運轉中' : '已停機';
           return (
             <div key={p.id}
-              role="button"
-              tabIndex={0}
               onClick={() => onSelectNode && onSelectNode(p)}
-              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode && onSelectNode(p); } }}
+              className={`bg-surface-panel border rounded p-4 cursor-pointer hover:border-border-strong transition-colors ${isOffline ? 'border-sev-stale/40 opacity-70' : isNoTelemetry ? 'border-sev-warn/40' : isCritical ? 'border-sev-critical/40' : isWarn ? 'border-sev-warn/40' : 'border-border-subtle'}`}>
               // MSP-F22 fix: raw Tailwind slate-600 isn't one of this app's
               // theme-aware tokens — invisible against a light-theme panel.
               // border-border-strong is the token used for this exact
@@ -487,18 +500,24 @@ const PumpsPage = ({ nodes = [], onSelectNode, showToast }) => {
                 </div>
                 <div>
                   <div className="text-[10px] text-ink-muted">電壓</div>
-                  <div className={p.voltage != null && p.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{p.voltage != null ? p.voltage + 'V' : '—'}</div>
+                  <div className={p.voltage != null && p.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{p.voltage != null ? p.voltage.toFixed(1) + 'V' : '—'}</div>
                 </div>
                 <div>
                   <div className="text-[10px] text-ink-muted">電源</div>
-                  <div className={p.power === 'mains' ? 'text-sev-ok' : p.power === 'ups' ? 'text-sev-warn' : 'text-sev-critical'}>
-                    {p.power === 'mains' ? '市電' : p.power === 'ups' ? 'UPS' : '電池'}
+                  {/* OPS-023: when power is null/unknown (device never reported
+                      power_source), show an honest dash — never a confident
+                      "電池" badge for a pump we have no telemetry from. */}
+                  <div className={p.power === 'mains' ? 'text-sev-ok' : p.power === 'ups' ? 'text-sev-warn' : p.power === 'battery' ? 'text-sev-critical' : 'text-ink-muted'}>
+                    {p.power === 'mains' ? '市電' : p.power === 'ups' ? 'UPS' : p.power === 'battery' ? '電池' : '—'}
                   </div>
                 </div>
               </div>
               {/* Manual override controls — stopPropagation so clicking a
                   button doesn't also trigger the card's onSelectNode. */}
-              <div onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+              {/* OPS-025: only stopPropagation Enter/Space (which would trigger
+                  the card's row-select handler). Let Escape/⌘K/etc bubble to
+                  their global handlers. */}
+              <div onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}>
                 <PumpManualControls
                   pumpId={p.id}
                   pumpState={p.pumpState}

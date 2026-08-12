@@ -60,12 +60,29 @@ class ErrorBoundary extends React.Component {
             <div className="text-xs font-mono text-ink-muted break-all">
               {String(this.state.error?.message || this.state.error)}
             </div>
-            <button
-              onClick={() => this.setState({ error: null })}
-              className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
-            >
-              重試
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              <button
+                onClick={() => this.setState({ error: null })}
+                className="px-4 py-2 rounded bg-sev-info text-white text-sm font-bold hover:bg-sev-info/80"
+              >
+                重試
+              </button>
+              {/* SHELL-022: a page that crashes on every render (bad data,
+                  not a transient glitch) turned 重試 into an infinite loop
+                  with no way out short of devtools/reload. onEscape (wired
+                  by renderPage()'s `wrap` below) gives the operator a way OFF
+                  the crashed page entirely — omitted where it wouldn't make
+                  sense (e.g. the wall-mode ErrorBoundary, which already has
+                  its own always-visible exit button outside the boundary). */}
+              {typeof this.props.onEscape === 'function' && (
+                <button
+                  onClick={() => { this.setState({ error: null }); this.props.onEscape(); }}
+                  className="px-4 py-2 rounded border border-border-strong text-ink-secondary text-sm font-bold hover:text-ink-primary"
+                >
+                  返回其他頁面
+                </button>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -162,9 +179,14 @@ function App({ initialError = null }) {
   // Alerts. sessionStorage is tab-scoped and survives reloads but not tab
   // close, which is the right lifetime for "where was I" — try/catch covers
   // sessionStorage-disabled contexts (e.g. some locked-down kiosk browsers).
+  // SHELL-001: every source here is untrusted (a base64 URL blob, a
+  // sessionStorage string, a stale bookmark) — sanitizePage funnels all of
+  // them through the one authoritative valid-page set (renderPage()'s switch)
+  // so a bad value falls back to 'alerts' instead of renderPage() returning
+  // `null` for a blank content area under an otherwise-normal-looking shell.
   const [page, setPageRaw] = useStateA(() => {
-    if (RESTORED_STATE?.page) return RESTORED_STATE.page;
-    try { return sessionStorage.getItem('sdprs.page') ?? 'alerts'; }
+    if (RESTORED_STATE?.page) return window.sanitizePage(RESTORED_STATE.page);
+    try { return window.sanitizePage(sessionStorage.getItem('sdprs.page') ?? 'alerts'); }
     catch (_) { return 'alerts'; }
   });
   const [pageHistory, setPageHistory] = useStateA([]); // for Alt+← back
@@ -193,10 +215,15 @@ function App({ initialError = null }) {
     try { savedSelectedIdRef.current = sessionStorage.getItem('sdprs.selectedId'); }
     catch (_) { savedSelectedIdRef.current = null; /* sessionStorage unavailable */ }
   }
-  const [selectedId, setSelectedId] = useStateA(() => {
-    if (RESTORED_STATE?.selectedId != null) return RESTORED_STATE.selectedId;
-    return null;
-  });
+  // SHELL-007: RESTORED_STATE.selectedId used to be adopted here directly,
+  // completely unvalidated — unlike the sessionStorage-saved id right above,
+  // which is deliberately deferred to the boot effect specifically so it CAN
+  // be checked against a live alert once data.jsx's window.ALERTS placeholder
+  // is replaced by real data. A stale id (resolved/aged out between the H-1
+  // redirect and the next load), a corrupted blob, or a hand-edited URL was
+  // therefore trusted as-is. Both untrusted sources now defer to the same
+  // resolveSelectedId validation in the boot effect below; this starts null.
+  const [selectedId, setSelectedId] = useStateA(null);
   // LiveClock ref — LiveClockProvider registers its reset function here so
   // runRefresh and onPing can reset the drift counter without App owning the state.
   const resetClockRef = useRefA(() => {});
@@ -289,6 +316,10 @@ function App({ initialError = null }) {
   // has some (but not all) loaders reject. Drives the warning banner below the
   // status strip so the operator knows which feeds are stale or unavailable.
   const [dataWarnings, setDataWarnings] = useStateA([]);
+  // FLOW-005: track dismissed warning keys so the 20s poll doesn't re-show
+  // the same banner the operator just closed. Only NEW failures (feeds that
+  // broke since dismissal) re-trigger the banner.
+  const dismissedWarningsRef = useRefA(new Set());
   const [audioReplayIn, setAudioReplayIn] = useStateA(30);
 
   // Refs used by callbacks below (declared here so JSX/hooks can reference
@@ -341,8 +372,11 @@ function App({ initialError = null }) {
 
   // StrictMode-safe setPage: no side effects inside the state updater.
   // History push happens in a follow-up effect that reads prev via ref.
+  // SHELL-001: sanitize here too — CommandPalette/NavRail/keyboard nav all
+  // route through this one function, so this is the choke point for any
+  // caller-supplied page id, not just the three mount-time sources above.
   const setPage = useCallbackA((p) => {
-    setPageRaw(p);
+    setPageRaw(window.sanitizePage(p));
   }, []);
 
   // Mirror pageHistory into a ref so goBack can read the current value
@@ -429,9 +463,23 @@ function App({ initialError = null }) {
     const onPopState = (event) => {
       const nextPage = event.state && event.state.page;
       if (!nextPage) return;
-      if (nextPage === prevPageRef.current) return;
+      // SHELL-001: this bypasses setPage (goes straight to setPageRaw so the
+      // URL-push effect's skip guard below stays correctly sequenced), so it
+      // needs its own sanitize call — a hand-edited/forged history.state.page
+      // must not reach renderPage() unvalidated.
+      const safePage = window.sanitizePage(nextPage);
+      if (safePage === prevPageRef.current) return;
       skipNextUrlPushRef.current = true;
-      setPageRaw(nextPage);
+      // SHELL-006: without this, a BROWSER Back/Forward navigation also fell
+      // through to the pageHistory push effect below (it isn't guarded by
+      // anything else — only goBack() sets this ref), silently pushing onto
+      // the app-internal Alt+← stack too. The operator's next Alt+← then
+      // "undid" a navigation they made with the browser's own Back button,
+      // not one they made in-app — two independent back-stacks bleeding into
+      // each other. Browser history already tracks this transition; the
+      // Alt+← stack should only record in-app navigations (setPage/goBack).
+      skipNextHistoryPushRef.current = true;
+      setPageRaw(safePage);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -574,7 +622,16 @@ function App({ initialError = null }) {
         // array is not evidence that everything succeeded — treat it as a
         // total failure rather than clearing the stale-data banner. See the
         // catch below and the api.jsx handoff noted there.
-        setDataWarnings(Array.isArray(r?.failures) ? r.failures : _LOADER_KEYS.slice());
+        // FLOW-005: filter out warnings the operator already dismissed —
+        // only NEW failures (not in the dismissed set) re-show the banner.
+        // If a previously-dismissed feed recovers and breaks again, the
+        // dismissal is cleared (see the dismiss handler's effect below).
+        const rawWarnings = Array.isArray(r?.failures) ? r.failures : _LOADER_KEYS.slice();
+        const fresh = rawWarnings.filter(k => !dismissedWarningsRef.current.has(k));
+        // Clear dismissal tracking for feeds that recovered (no longer failing)
+        // so a future re-break will re-show the banner.
+        dismissedWarningsRef.current.forEach(k => { if (!rawWarnings.includes(k)) dismissedWarningsRef.current.delete(k); });
+        setDataWarnings(fresh);
       } catch (e) {
         // SHL-12: a wholesale refresh failure is precisely when the operator
         // most needs the "displaying cached data" banner — silently logging
@@ -724,9 +781,15 @@ function App({ initialError = null }) {
     const mark = () => { lastActivityRef.current = Date.now(); };
     window.addEventListener('pointerdown', mark, { passive: true });
     window.addEventListener('keydown', mark, { passive: true });
+    // FLOW-006: scroll-only interaction (e.g. reading a long alerts history
+    // without clicking or typing) must also count as activity — an operator
+    // who spends 16 minutes scrolling through records is actively using the
+    // console and should not be logged out.
+    window.addEventListener('scroll', mark, { passive: true, capture: true });
     return () => {
       window.removeEventListener('pointerdown', mark);
       window.removeEventListener('keydown', mark);
+      window.removeEventListener('scroll', mark, true);
     };
   }, []);
 
@@ -770,6 +833,42 @@ function App({ initialError = null }) {
     }, PROBE_EVERY_MS);
     return () => clearInterval(id);
   }, [sessionExpired, showToast, refresh]);
+
+  // FLOW-002: pageshow/bfcache — if the operator uses Back after logging out
+  // (or after the session expired), the browser may restore a fully-stale page
+  // from bfcache with timers intact and no network round-trip. The page looks
+  // live but is showing data from before logout. Detect the bfcache restore
+  // and force a hard reload so the server can redirect to login.
+  useEffectA(() => {
+    const onPageShow = (e) => {
+      if (!e.persisted) return; // normal navigation, not bfcache
+      // Session was already dead when this page was frozen — reload to get
+      // redirected to login by the server.
+      if (window.__SDPRS_SESSION_EXPIRED || document.cookie.indexOf('session_id') === -1) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
+
+  // FLOW-003: cross-tab sync for mute/theme via the storage event.
+  // When another tab changes the theme or mute state, the localStorage
+  // 'storage' event fires in THIS tab (not the originating one).
+  // Read the updated tweaks and apply them so the operator doesn't have
+  // one tab in dark/alarm mode while another is in light/muted.
+  useEffectA(() => {
+    const onStorage = (e) => {
+      if (e.key !== 'sdprs.tweaks' || !e.newValue) return;
+      try {
+        const next = JSON.parse(e.newValue);
+        if (next.theme && next.theme !== tweaks.theme) setTweak('theme', next.theme);
+        if (next.muted !== undefined && next.muted !== tweaks.muted) setTweak('muted', next.muted);
+      } catch (_) { /* malformed JSON — ignore */ }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [tweaks.theme, tweaks.muted, setTweak]);
 
   // Offline / online detection — toast the operator when connectivity changes
   // and trigger a refresh when the connection comes back so stale data is
@@ -848,7 +947,13 @@ function App({ initialError = null }) {
       const rankA = rank[a.sev] ?? 99;
       const rankB = rank[b.sev] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
-      return a.ageSec - b.ageSec; // smaller ageSec = newer
+      // SHELL-027: was a bare `a.ageSec - b.ageSec` — since DATA-011, ageSec
+      // is `null` (unknown timestamp), not 0, for a bad timestamp. Subtraction
+      // coerces null to 0, so an unknown-age alert sorted as the FRESHEST
+      // candidate for N / auto-advance, the opposite of "unknown, don't
+      // assume urgency". compareAgeSec (data.jsx) sorts unknown ages last,
+      // same guarded-fallback idiom as the severity rank two lines up.
+      return window.compareAgeSec(a.ageSec, b.ageSec);
     });
     return sorted[0].id;
   }, []);
@@ -970,8 +1075,10 @@ function App({ initialError = null }) {
 
   const onSnooze = useCallbackA(async (id, mins) => {
     const a = alerts.find(x => x.id === id);
-    if (!a) return;
-    if (alertBusyRef.current) return;
+    // ALR-002: throw on guard paths instead of silent return — SnoozeMenu's
+    // catch keeps the menu open so the operator sees nothing was sent.
+    if (!a) throw new Error('ALR-002: alert not found');
+    if (alertBusyRef.current) throw new Error('ALR-002: busy');
     alertBusyRef.current = true;
     setAlertBusy(true);
     try {
@@ -995,9 +1102,43 @@ function App({ initialError = null }) {
     }
   }, [showToast, alerts, refresh]);
 
+  // ALR-010: mirror onSnooze — unsnooze a currently-muted node via the
+  // backend's unsnoozeNode endpoint, then refresh.
+  const onUnsnooze = useCallbackA(async (id) => {
+    const a = alerts.find(x => x.id === id);
+    if (!a) throw new Error('ALR-010: alert not found');
+    if (alertBusyRef.current) throw new Error('ALR-010: busy');
+    alertBusyRef.current = true;
+    setAlertBusy(true);
+    try {
+      try {
+        await window.SDPRS_API.unsnoozeNode(a.node);
+      } catch (e) {
+        showToast('解除靜音失敗: ' + actionErrorText(e), 'warn');
+        throw e;
+      }
+      setMuteState(prev => ({ ...prev, nodes: prev.nodes.filter(n => n !== a.node) }));
+      showToast(`${a.node} 已解除靜音`, 'info');
+      await refresh();
+    } finally {
+      alertBusyRef.current = false;
+      setAlertBusy(false);
+    }
+  }, [showToast, alerts, refresh]);
+
+  // SHELL-008: this used to fire markSeen (a POST to the backend) on EVERY
+  // selectedId change unconditionally — arrow-key browsing back over alerts
+  // already viewed earlier this session re-sent the same "seen" write every
+  // single time. Skip when the currently-selected alert is already marked
+  // seen client-side; `alerts` has to be a dep to read that flag fresh, but
+  // the early-return below makes every no-op re-run (e.g. the 20s refresh
+  // replacing `alerts` with a new array reference) cheap.
   useEffectA(() => {
-    if (selectedId) markSeen(selectedId);
-  }, [selectedId, markSeen]);
+    if (!selectedId) return;
+    const sel = alerts.find(a => a.id === selectedId);
+    if (sel && sel.seen) return;
+    markSeen(selectedId);
+  }, [selectedId, alerts, markSeen]);
 
   // Landing on the Alerts page counts as "operator saw the new-alert banner";
   // clear the counter so the pill doesn't linger forever after they navigated in.
@@ -1037,6 +1178,10 @@ function App({ initialError = null }) {
     if (bootRanRef.current) return;
     bootRanRef.current = true;
     let cancelled = false;
+    // NEW-RT-007 (DEFERRED): under React StrictMode's dev-only double-invoke,
+    // the first cleanup sets cancelled=true while bootRanRef stays true, so
+    // bootstrap would never complete. Inert today — no <React.StrictMode> is
+    // wired. If StrictMode is ever adopted, rework this guard.
     (async () => {
       try {
         await window.SDPRS_API.loadInitial();
@@ -1045,30 +1190,28 @@ function App({ initialError = null }) {
         setNodes(window.NODES ?? []);
         setNodeHistory(window.NODE_HISTORY ?? {});
         // Resolve the selection now that there are alerts to resolve against:
-        // an explicit cross-login RESTORED_STATE id wins (already seeded), then
-        // the sessionStorage id captured during first render, then the head of
-        // the queue. Functional update so a selection the operator made while
+        // an explicit cross-login RESTORED_STATE id wins if it names a LIVE
+        // alert, then the sessionStorage id captured during first render if
+        // IT names one, then the head of the queue (SHELL-007:
+        // resolveSelectedId — neither untrusted source is adopted blind
+        // anymore). Functional update so a selection the operator made while
         // the load was in flight is never yanked out from under them.
         setSelectedId(prev => {
           if (prev != null) return prev;
-          const saved = savedSelectedIdRef.current;
-          if (saved != null) {
-            const match = (window.ALERTS ?? []).find(a => String(a.id) === saved);
-            if (match) return match.id;
-          }
-          return window.ALERTS?.[0]?.id ?? null;
+          return window.resolveSelectedId(RESTORED_STATE?.selectedId, savedSelectedIdRef.current, window.ALERTS);
         });
         // B8: auto-open the shift banner when there's meaningful summary data.
         if (window.SHIFT_SUMMARY && window.SHIFT_SUMMARY.alertsHandled > 0) {
           setShiftBannerOpen(true);
         }
         // Partial-failure surface — loadInitial records which loaders rejected
-        // on window.__SDPRS_LOAD_FAILURES.
-        const failures = window.__SDPRS_LOAD_FAILURES;
-        if (failures && failures.length > 0) {
-          setDataWarnings(failures);
-          const labels = failures.map(k => _FAILURE_LABELS[k] || k).join('、');
-          showToast('部分資料載入失敗: ' + labels, 'warn');
+        // on window.__SDPRS_LOAD_FAILURES. SHELL-004: shared with the
+        // bootstrap-error retry path below via describeLoadFailures so the
+        // two can't drift out of sync again.
+        const loadDesc = window.describeLoadFailures(window.__SDPRS_LOAD_FAILURES, _FAILURE_LABELS);
+        if (loadDesc) {
+          setDataWarnings(loadDesc.warnings);
+          showToast(loadDesc.toastMessage, 'warn');
         }
       } catch (e) {
         // Total failure — show the in-app retry UI rather than a bare shell
@@ -1209,10 +1352,22 @@ function App({ initialError = null }) {
         // future search-input additions on other pages.
         const el = document.getElementById('global-search')
           || document.querySelector('input[type="text"][placeholder*="搜尋"]');
-        el?.focus();
+        // SHELL-010: no search input exists off the Alerts page, so `el` is
+        // null there and this used to be a silent no-op — the operator
+        // presses "/" on Monitor/Status/etc. and nothing visibly happens,
+        // with no way to tell "not on this page" apart from "shortcut is
+        // broken". Tell them explicitly instead.
+        if (!el) { showToast('搜尋僅限警報頁使用', 'info'); return; }
+        el.focus();
         return;
       }
-      if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(true); return; }
+      // SHELL-011: this used to always OPEN, never close — inconsistent with
+      // Cmd/Ctrl+K above (B2: "idempotent toggle — a second Cmd+K closes the
+      // palette"). An operator who already has the drawer open and presses M
+      // again (muscle memory from the palette pattern, or just not noticing
+      // it's already up) got no way to close it via the same key; Escape or
+      // the drawer's own close button were the only ways out.
+      if (e.key === 'm' || e.key === 'M') { setMuteDrawerOpen(v => !v); return; }
       if (e.key === 't' || e.key === 'T') { setTweak('theme', tweaks.theme === 'dark' ? 'light' : 'dark'); return; }
       if (e.shiftKey && (e.key === 'D' || e.key === 'd')) { setTweak('density', tweaks.density === 'compact' ? 'comfortable' : 'compact'); return; }
 
@@ -1256,6 +1411,13 @@ function App({ initialError = null }) {
             return cur.replace(/\s+$/, '') + '\n' + t;
           });
           showToast(`已套用模板: ${t}`, 'info');
+        } else {
+          // SHELL-009: a deployment with fewer than 6 configured templates
+          // (window.RESOLVE_TEMPLATES trimmed down) left keys past the end
+          // silently swallowed — same class of dead keystroke as the "7" case
+          // right below, which already toasts feedback. Match it here instead
+          // of leaving 4/5/6 unexplained on a shorter template list.
+          showToast('無此模板', 'info');
         }
         return;
       }
@@ -1433,6 +1595,17 @@ function App({ initialError = null }) {
     const onKey = (e) => {
       if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Escape') {
+        // SHELL-017: the session-expiry modal is rendered UNCONDITIONALLY
+        // (outside the wallMode branch) and is documented as "non-dismissible
+        // ... no Escape handler by design" (see its JSX below) — the main
+        // shortcut handler's own Escape branch already honours that
+        // (`if (sessionExpired) return;`). This SEPARATE wall-mode listener
+        // didn't, so Escape could still exit wall mode — swapping the
+        // background from WallView to the normal shell — while the blocking
+        // modal was up, which is exactly the escape hatch it's meant to deny.
+        // Ref (not state) so this effect doesn't need sessionExpired in its
+        // deps, matching the codebase's own F4 idiom elsewhere in this file.
+        if (sessionExpiredRef.current) return;
         e.preventDefault();
         onExitWallMode();
       }
@@ -1477,9 +1650,12 @@ function App({ initialError = null }) {
         </div>
       );
     }
-    const wrap = (el) => <ErrorBoundary key={page}>{el}</ErrorBoundary>;
+    // SHELL-022: onEscape gives the crashed-page fallback a way to navigate
+    // OFF the current page (see ErrorBoundary above) — pick whichever of
+    // Alerts/Status isn't the page that just crashed, so it's never a no-op.
+    const wrap = (el) => <ErrorBoundary key={page} onEscape={() => setPage(page === 'alerts' ? 'status' : 'alerts')}>{el}</ErrorBoundary>;
     switch (page) {
-      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
+      case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onUnsnooze={onUnsnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
       case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
       case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
       case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);
@@ -1510,6 +1686,17 @@ function App({ initialError = null }) {
         setNodes(window.NODES ?? []);
         setNodeHistory(window.NODE_HISTORY ?? {});
         setSelectedId(window.ALERTS?.[0]?.id ?? null);
+        // SHELL-004: this used to stop here — a retry that recovered
+        // most-but-not-all loaders cleared bootstrapError and rendered the
+        // full app with no indication anything was still missing, which reads
+        // as a complete recovery when it may not be one. Mirror the boot
+        // effect's own partial-failure surface (same describeLoadFailures
+        // helper) so a partial retry still shows the warning banner + toast.
+        const loadDesc = window.describeLoadFailures(window.__SDPRS_LOAD_FAILURES, _FAILURE_LABELS);
+        if (loadDesc) {
+          setDataWarnings(loadDesc.warnings);
+          showToast(loadDesc.toastMessage, 'warn');
+        }
       } catch (e) {
         console.error('[SDPRS] retry loadInitial failed:', e);
         setBootstrapError(e || err);
@@ -1517,8 +1704,16 @@ function App({ initialError = null }) {
         setBooting(false);
       }
     };
+    // SHELL-019: this (and every other full-bleed root below — the wall-mode
+    // wrapper, its booting placeholder, the main shell root, and WallView's
+    // own root) used to be `h-screen w-screen`, i.e. a hardcoded 100vh/100vw —
+    // exactly the unit #root's own CMP-F18 fix moved away from (100vh excludes
+    // mobile browser chrome; 100vw includes the desktop scrollbar gutter).
+    // Every one of these mounts directly (or one level deep) under #root,
+    // which is already sized in 100dvh/100%, so `h-full w-full` is both
+    // correct and consistent — no need to redeclare a competing viewport unit.
     bootstrapErrorUI = (
-      <div className="h-screen w-screen flex items-center justify-center bg-surface-base text-ink-primary p-6">
+      <div className="h-full w-full flex items-center justify-center bg-surface-base text-ink-primary p-6">
         <div className="max-w-md text-center space-y-4">
           <div className="text-2xl font-bold text-sev-critical">無法載入初始資料</div>
           <div className="text-sm text-ink-secondary">
@@ -1538,9 +1733,15 @@ function App({ initialError = null }) {
     );
   }
 
+  // NEW-UX-008: NewAlertBanner and ShiftBanner are independently-conditioned
+  // `fixed` banners that used to overlap the full-width dataWarnings bar
+  // below (top-12) whenever both were showing. When the bar is present, both
+  // floating banners drop from their normal offsets to top-24, clearing it.
+  const bannersStacked = dataWarnings.length > 0;
+
   return (<LiveClockProvider registerReset={registerClockReset}>
   {bootstrapError ? bootstrapErrorUI : tweaks.wallMode ? (
-    <div className="relative h-screen w-screen bg-black">
+    <div className="relative h-full w-full bg-black">
       {/* SHL-17: WallView was the one view rendered OUTSIDE an ErrorBoundary,
           so a render-time throw in it (a malformed node, a missing
           SnapshotImage) blanked the whole 4K display to a white screen with
@@ -1552,12 +1753,13 @@ function App({ initialError = null }) {
           // Same honesty rule as renderPage(): a wall showing zero unacked
           // alerts and an empty node grid is an all-clear the console has not
           // earned yet — and this one is being read across a room.
-          <div className="h-screen w-screen flex flex-col items-center justify-center gap-4 bg-black text-ink-muted" role="status">
+          <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-black text-ink-muted" role="status">
             <span className="w-12 h-12 rounded-full border-4 border-border-subtle border-t-sev-info animate-spin" aria-hidden="true"></span>
             <div className="text-xl tracking-widest">SDPRS · 正在載入即時資料…</div>
           </div>
         ) : (
-          <WallView alerts={alerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
+          // NEW-UX-016: pass activeAlerts (excludes resolved), not raw alerts.
+          <WallView alerts={activeAlerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
         )}
       </ErrorBoundary>
       {/* SHL-2: the exit. Deliberately rendered OUTSIDE the ErrorBoundary
@@ -1576,7 +1778,7 @@ function App({ initialError = null }) {
       </button>
     </div>
   ) : (
-    <div className="h-screen w-screen overflow-hidden text-ink-primary">
+    <div className="h-full w-full overflow-hidden text-ink-primary">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:bg-sev-info focus:text-white focus:px-4 focus:py-2 focus:rounded">
         跳至主要內容
       </a>
@@ -1611,17 +1813,51 @@ function App({ initialError = null }) {
           <span>
             {dataWarnings.map(k => _FAILURE_LABELS[k] || k).join('、')} 無法載入 — 顯示快取資料
           </span>
-          <button onClick={() => setDataWarnings([])} className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
+          {/* SHELL-012: this glyph-only button had no accessible name — a
+              screen-reader user heard nothing but "button". */}
+          <button onClick={() => {
+            // FLOW-005: remember which warnings were dismissed so the next poll
+            // doesn't re-show the same banner. Clear the set if the feed
+            // recovers and breaks again later.
+            dataWarnings.forEach(k => dismissedWarningsRef.current.add(k));
+            setDataWarnings([]);
+          }} aria-label="關閉此警示" className="ml-auto text-ink-muted hover:text-ink-primary">×</button>
         </div>
       )}
-      <main id="main-content" className="ml-0 md:ml-56 mt-12 mb-10 h-[calc(100vh-88px)] overflow-hidden">
+      {/* SHELL-003: #root (styles.css, CMP-F18) migrated to 100dvh so the
+          mobile-chrome-safe *visible* viewport is what everything sizes
+          against — but this calc() still subtracted from the old 100vh, which
+          on a phone/tablet used as a walkaround console overshoots the real
+          viewport by the browser-chrome height. The bottom 50-90px of the
+          content area (and anything docked there) was then below the fold and
+          unreachable. 100dvh here keeps it in sync with #root's own unit. */}
+      {/* SHELL-013: the skip link above targets #main-content via a bare
+          href="#..." fragment jump — that scrolls the element into view but
+          does NOT move keyboard focus onto a non-interactive <main> (no
+          native tab stop), so a keyboard user who activates the skip link
+          lands nowhere and the very next Tab starts back at the top of the
+          page, defeating the skip link's purpose. tabIndex={-1} makes it
+          focusable programmatically (not part of the normal Tab order)
+          without changing anything about mouse/pointer interaction. */}
+      {/* SHELL-026: `<main>`'s top offset below was a constant `mt-12` (=
+          StatusStrip's h-12), regardless of whether the warning banner above
+          is showing. The banner is `fixed` (not part of normal document
+          flow) at `top-12`, so whenever dataWarnings is non-empty it sat
+          permanently on top of the first ~28px of page content instead of
+          pushing it down — a standing overlay for as long as any loader stays
+          degraded, not just a transient notice. Growing main's offset (and
+          shrinking its calculated height by the same amount) while the
+          banner is up makes room for it instead of covering content with it.
+          ~32px is the banner's own rendered height (py-1.5 + text-xs/icon). */}
+      <main id="main-content" tabIndex={-1} className={"ml-0 md:ml-56 mb-10 overflow-hidden " + (dataWarnings.length > 0 ? "mt-20 h-[calc(100dvh-120px)]" : "mt-12 h-[calc(100dvh-88px)]")}>
         {renderPage()}
       </main>
       <window.Footer data={window.ALERT_RATE ?? []} handover={window.HANDOVER?.pinned ?? null}/>
 
-      {/* Floating new-alert banner */}
-      {page === 'alerts' && newAlertBannerCount > 0 && (
-        <window.NewAlertBanner count={newAlertBannerCount} onClick={() => {
+      {/* FLOW-004: new-alert banner now shows on ALL pages, not just Alerts.
+          Operators on the Monitor wall were missing new incoming alerts. */}
+      {newAlertBannerCount > 0 && (
+        <window.NewAlertBanner count={newAlertBannerCount} stacked={bannersStacked} onClick={() => {
           setNewAlertBannerCount(0);
           const firstUnseen = alerts.find(a => !a.seen);
           if (firstUnseen) setSelectedId(firstUnseen.id);
@@ -1629,7 +1865,7 @@ function App({ initialError = null }) {
       )}
 
       {/* Shift onboarding banner */}
-      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
+      {shiftBannerOpen && <window.ShiftBanner shiftSummary={window.SHIFT_SUMMARY} stacked={bannersStacked} onDismiss={() => setShiftBannerOpen(false)} onViewHandover={() => { setShiftBannerOpen(false); setPage('handover'); }}/>}
 
       <window.ShortcutsModal open={shortcutsOpen} onClose={onCloseShortcuts}/>
       <window.MuteDrawer open={muteDrawerOpen} onClose={onCloseMuteDrawer} muteState={muteState} setMuteState={setMuteState} nodes={nodes}/>
@@ -1657,16 +1893,26 @@ function App({ initialError = null }) {
         <window.TweakSection label="檢視模式" />
         <window.TweakToggle label="4K 牆面模式" value={tweaks.wallMode} onChange={(v) => setTweak('wallMode', v)}/>
         <window.TweakSection label="跳轉頁面" />
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:4}}>
+        {/* SHELL-002: these buttons used to hardcode light-theme-only inline
+            colors (`#1e40af` active / `#29261b` inactive on a near-black
+            `rgba(0,0,0,.04)` fill) — in the default DARK theme that's near-
+            black text on a near-black background, ~1.2:1 contrast (fails WCAG
+            1.4.3). Switching to the shared surface/ink/sev-info tokens (same
+            idiom NavRail's density toggle uses just above in components.jsx)
+            makes this react to the theme instead of assuming one. */}
+        <div className="grid grid-cols-3 gap-1">
           {(window.NAV_ITEMS ?? []).map(item => (
-            <button key={item.id} onClick={() => setPage(item.id)}
-              style={{
-                fontSize:11,padding:'5px 4px',borderRadius:6,
-                border:'1px solid '+(page===item.id?'rgba(59,130,246,.5)':'rgba(0,0,0,.12)'),
-                background:page===item.id?'rgba(59,130,246,.15)':'rgba(0,0,0,.04)',
-                color:page===item.id?'#1e40af':'#29261b',
-                cursor:'pointer',
-              }}>
+            /* SHELL-014: these are toggle-style buttons (one "pressed" per
+               group, like the density toggle right above them in NavRail,
+               which already carries aria-pressed) but had no pressed state
+               exposed to assistive tech at all. */
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setPage(item.id)}
+              aria-pressed={page === item.id}
+              className={`text-[11px] px-1 py-1.5 rounded-md border transition-colors ${page === item.id ? 'border-sev-info/50 bg-surface-overlay text-ink-primary' : 'border-border-subtle bg-surface-base text-ink-secondary hover:text-ink-primary'}`}
+            >
               {item.label}
             </button>
           ))}
@@ -1686,13 +1932,18 @@ function App({ initialError = null }) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="session-expiry-title"
+      aria-describedby="session-expiry-desc"
       className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
     >
       <div className="bg-surface-elevated border border-border-strong rounded-lg p-6 max-w-sm w-full shadow-2xl">
         <h2 id="session-expiry-title" className="text-lg font-semibold text-ink-primary mb-2">
           連線階段已逾時
         </h2>
-        <p className="text-sm text-ink-secondary mb-4">
+        {/* SHELL-015: aria-labelledby alone only announces the title — a
+            screen-reader user got no description of WHY the dialog is up or
+            what pressing the one button does. aria-describedby wires this
+            paragraph in as the dialog's accessible description. */}
+        <p id="session-expiry-desc" className="text-sm text-ink-secondary mb-4">
           您的登入階段已過期，請重新登入以繼續操作。目前顯示的資料可能已過時。
         </p>
         {/* `bg-brand-primary` used to be this button's background — a token
@@ -1783,27 +2034,36 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
   const handoverPin = window.HANDOVER?.pinned ?? null;
   const alertRate = window.ALERT_RATE ?? [];
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black text-ink-primary flex flex-col">
-      {/* Top status strip — bigger */}
-      <div className="h-16 bg-surface-panel border-b-2 border-border-strong flex items-center px-6 gap-4 flex-shrink-0">
-        <div className="flex items-center gap-3">
+    <div className="h-full w-full overflow-hidden bg-black text-ink-primary flex flex-col">
+      {/* Top status strip — bigger.
+          SHELL-021: this row assumes it always has 4K-worth of horizontal
+          room. Below that (a smaller NOC monitor, or this same view resized/
+          projected at a lower resolution) the unguarded flex children could
+          shrink into overlapping/illegible text, and WallView's root is
+          `overflow-hidden` — so anything that didn't fit was invisibly
+          clipped, not scrollable. flex-shrink-0 + whitespace-nowrap on each
+          cluster keeps them intact; overflow-x-auto on the row means a
+          genuinely-too-narrow display gets a scrollbar instead of silently
+          losing the clock/weather off the right edge. */}
+      <div className="h-16 bg-surface-panel border-b-2 border-border-strong flex items-center px-6 gap-4 flex-shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-3 flex-shrink-0">
           <div className={`w-10 h-10 rounded ${unackCount > 0 ? 'bg-sev-critical/15 text-sev-critical' : 'bg-sev-ok/15 text-sev-ok'} flex items-center justify-center`}>
             <Icon.ShieldAlert size={22} strokeWidth={2}/>
           </div>
-          <div>
+          <div className="whitespace-nowrap">
             <div className="text-xl font-bold tracking-wider">SDPRS</div>
-            <div className="text-[10px] font-mono text-ink-muted -mt-0.5">NOC WALL · v2.4</div>
+            <div className="text-[10px] font-mono text-ink-muted -mt-0.5">監控牆 · v2.4</div>
           </div>
         </div>
-        <div className="w-px h-10 bg-border-subtle"></div>
-        <WallLivePill/>
+        <div className="w-px h-10 bg-border-subtle flex-shrink-0"></div>
+        <span className="flex-shrink-0"><WallLivePill/></span>
         {unackCount > 0 && (
-          <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink">
+          <div className="h-8 px-3 rounded bg-sev-critical text-white text-sm font-bold inline-flex items-center gap-2 tnum animate-live-blink flex-shrink-0 whitespace-nowrap">
             <Icon.Bell size={16}/> 未認領 {unackCount}
           </div>
         )}
         <div className="flex-1"></div>
-        <div className="flex items-center gap-4 text-base">
+        <div className="flex items-center gap-4 text-base flex-shrink-0 whitespace-nowrap">
           {weather.typhoon && (
             <>
               <span className="flex items-center gap-2 text-sev-warn font-bold"><Icon.Typhoon size={20}/> 颱風 {weather.typhoon.name} · {weather.typhoon.level}</span>
@@ -1823,8 +2083,8 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
           <span className="text-ink-dim">|</span>
           <span className="font-mono tnum text-sev-info">{weather.rain?.day ?? '—'} mm/24h</span>
         </div>
-        <div className="w-px h-10 bg-border-subtle"></div>
-        <WallClock/>
+        <div className="w-px h-10 bg-border-subtle flex-shrink-0"></div>
+        <span className="flex-shrink-0"><WallClock/></span>
       </div>
 
       {(dataWarnings ?? []).length > 0 && (
@@ -1871,7 +2131,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
             <div className="flex justify-center pt-2 flex-shrink-0">
               <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-panel/80 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
                 <span className="w-1.5 h-1.5 rounded-full bg-ink-muted/60"></span>
-                +{sorted.length - 9} more
+                +{sorted.length - 9} 更多
               </span>
             </div>
           )}
@@ -1902,7 +2162,7 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
               <div className="px-3 py-2 flex justify-center">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-border-subtle text-xs font-mono text-ink-muted tracking-wide">
                   <span className="w-1.5 h-1.5 rounded-full bg-sev-critical/60 animate-live-blink"></span>
-                  +{alerts.length - 12} more alerts
+                  +{alerts.length - 12} 更多警報
                 </span>
               </div>
             )}
@@ -1956,7 +2216,19 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
         <span className="text-ink-muted font-mono tnum">警報率 · 15min × 16</span>
         <div className="flex-1"></div>
         {handoverPin && (
-          <span className="text-ink-muted">上一班: <span className="text-ink-secondary font-mono tnum">{handoverPin.by} @ {handoverPin.at}</span> "<span className="text-ink-secondary">{handoverPin.text}</span>"</span>
+          // SHELL-020: `handoverPin.text` is a free-form operator note with no
+          // length cap — inside this h-8 footer row it used to have no
+          // truncation/overflow handling at all, so a long note could push
+          // past the footer's fixed height (wrapping to a second line) or
+          // off the edge of a 4K wall with nothing to indicate it was cut
+          // off. min-w-0 on the flex item lets it actually shrink below its
+          // content width (the flex default blocks that), and `truncate` is
+          // scoped to just the note text so the "由誰 @ 何時" prefix always
+          // stays fully visible.
+          <span className="text-ink-muted flex items-center gap-1 min-w-0 overflow-hidden">
+            <span className="flex-shrink-0 whitespace-nowrap">上一班: <span className="text-ink-secondary font-mono tnum">{handoverPin.by} @ {handoverPin.at}</span></span>
+            <span className="truncate min-w-0 text-ink-secondary">"{handoverPin.text}"</span>
+          </span>
         )}
       </div>
     </div>

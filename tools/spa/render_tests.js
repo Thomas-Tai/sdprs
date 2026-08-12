@@ -305,21 +305,32 @@ ${PRELUDE}
     if (openBackdrop) { click(openBackdrop); await settle(); }
 
     // --- revoke: cancelling the confirm must NOT call the API ---
-    window.confirm = (msg) => { confirmMsgs.push(msg); return false; };
+    // OPS-016 / NEW-UX-004: revoke now uses an in-app confirm modal (same as
+    // delete), not native window.confirm. Clicking the revoke button opens
+    // the modal; clicking 取消 closes it without calling the API.
     let revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     A('revoke button renders for the webcam-type row', !!revokeBtn);
     const revokeBtnCount = Array.from(container.querySelectorAll('button')).filter(b => b.title === '撤銷並重新產生 API Key').length;
     A('exactly one revoke button exists (the camera row does not get one)', revokeBtnCount === 1, revokeBtnCount);
     click(revokeBtn);
     await settle();
-    A('the confirm dialog names revocation and immediate expiry', !!confirmMsgs[0] && confirmMsgs[0].indexOf('撤銷') !== -1 && confirmMsgs[0].indexOf('失效') !== -1, JSON.stringify(confirmMsgs));
+    let revokeDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    A('the revoke confirm modal opens (role="dialog")', !!revokeDialog);
+    A('the confirm dialog names revocation and immediate expiry', !!revokeDialog && revokeDialog.textContent.indexOf('撤銷') !== -1 && revokeDialog.textContent.indexOf('失效') !== -1, revokeDialog && revokeDialog.textContent.slice(0, 100));
+    const cancelRevokeBtn = revokeDialog && Array.from(revokeDialog.querySelectorAll('button')).find(b => b.textContent.trim() === '取消');
+    if (cancelRevokeBtn) click(cancelRevokeBtn);
+    await settle();
     A('cancelling the confirm does not call revokeWebcamKey', calls.revoke.length === 0, JSON.stringify(calls.revoke));
 
     // --- revoke: confirmed, success shows a PERSISTENT modal, not the 3s toast ---
-    window.confirm = () => true;
     revokeResult = { api_key: 'sk-webcam-ROTATED-NEW-KEY' };
     revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     click(revokeBtn);
+    await settle();
+    revokeDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const confirmRevokeBtn = revokeDialog && Array.from(revokeDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    A('OPS-016 the confirm button renders in the revoke dialog', !!confirmRevokeBtn);
+    if (confirmRevokeBtn) click(confirmRevokeBtn);
     await settle();
     // THE SHIPPED BUG, pinned: revoke-key is a CLIENT endpoint. Sending the
     // camera's own node_id (webcam_ab12cd34) 404s every single time, which is
@@ -347,12 +358,15 @@ ${PRELUDE}
     A('revoke modal is gone after close', container.textContent.indexOf('sk-webcam-ROTATED-NEW-KEY') === -1);
 
     // --- revoke failure: toast, no key echoed ---
-    window.confirm = () => true;
     revokeShouldFail = true;
     revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     click(revokeBtn);
     await settle();
-    A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗：節點不存在') !== -1);
+    const failDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const failConfirmBtn = failDialog && Array.from(failDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    if (failConfirmBtn) click(failConfirmBtn);
+    await settle();
+    A('revoke failure surfaces the backend error message via toast', container.textContent.indexOf('撤銷失敗') !== -1, container.textContent.slice(0, 500));
 
     // --- no clientId (older backend / unmapped row): never guess an id ---
     // Sending node.id "because it looks like a client id" is precisely how the
@@ -618,7 +632,7 @@ ${PRELUDE}
     render();
     click(findBtn('即時'));
     await settle();
-    A('a playlist listing a .ts segment flips the tile to live', !!findBtn('LIVE'));
+    A('a playlist listing a .ts segment flips the tile to live', !!findBtn('直播中'));
     A('going live mounts the HLS <video> player', !!container.querySelector('video'));
     A('the 連線中 placeholder is gone once live', container.textContent.indexOf('連線中') === -1);
 
@@ -629,7 +643,7 @@ ${PRELUDE}
     A('the lease-renew tick calls renewWebcamStream(nodeId)', renewCalls[0] === 'webcam_ab12', JSON.stringify(renewCalls));
 
     // --- stop returns to snapshot mode ---
-    click(findBtn('LIVE'));
+    click(findBtn('直播中'));
     await settle();
     A('stopping calls stopWebcamStream and unmounts the player', stopCalls[0] === 'webcam_ab12' && !container.querySelector('video'), JSON.stringify(stopCalls));
 
@@ -736,16 +750,16 @@ ${PRELUDE}
 
     // --- webcam node ---
     render(Object.assign({}, base, { id: 'webcam_ab12', name: '櫃台電腦', type: 'webcam' }));
-    A('webcam tile renders the Webcam badge', container.textContent.indexOf('Webcam') !== -1);
+    A('webcam tile renders the 網路攝影機 badge', container.textContent.indexOf('網路攝影機') !== -1);
     const liveBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf('即時') !== -1);
     A('webcam tile renders the ▶ 即時 live button', !!liveBtn);
-    A('webcam tile does NOT render the Edge Cam badge', container.textContent.indexOf('Edge Cam') === -1);
+    A('webcam tile does NOT render the 邊緣攝影機 badge', container.textContent.indexOf('邊緣攝影機') === -1);
 
     // --- edge cam (glass -> mapped type 'camera') ---
     ReactDOM.flushSync(() => root.render(null));
     render(Object.assign({}, base, { id: 'CAM-1', name: '西灣橋', type: 'camera', temp: 30, visualHealth: 'ok', audioHealth: 'ok' }));
-    A('edge cam renders the Edge Cam badge', container.textContent.indexOf('Edge Cam') !== -1);
-    A('edge cam does NOT render the Webcam badge', container.textContent.indexOf('Webcam') === -1);
+    A('edge cam renders the 邊緣攝影機 badge', container.textContent.indexOf('邊緣攝影機') !== -1);
+    A('edge cam does NOT render the 網路攝影機 badge', container.textContent.indexOf('網路攝影機') === -1);
     A('edge cam (non-webcam) has NO live button', Array.from(container.querySelectorAll('button')).every(b => b.textContent.indexOf('即時') === -1));
   } catch (e) {
     results.push({ name: 'monitor webcam-tile suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
@@ -1243,11 +1257,14 @@ ${PRELUDE}
     click(byText('button', '關閉')); await settle();
     A('OPS-001 explicit 關閉 still dismisses the created-key modal', container.textContent.indexOf('sk-webcam-OPS001-CREATE-KEY') === -1);
 
-    // revoke modal: same shown-once contract
-    window.confirm = () => true;
+    // revoke modal: same shown-once contract (OPS-016: in-app modal, not confirm())
     const revokeBtn = Array.from(container.querySelectorAll('button')).find(b => b.title === '撤銷並重新產生 API Key');
     A('OPS-001 revoke affordance present', !!revokeBtn);
     click(revokeBtn); await settle();
+    const revokeConfirmDialog = container.querySelector('[role="dialog"][aria-label="撤銷 API Key"]');
+    const revokeConfirmBtn = revokeConfirmDialog && Array.from(revokeConfirmDialog.querySelectorAll('button')).find(b => b.textContent.indexOf('確定撤銷') !== -1);
+    if (revokeConfirmBtn) click(revokeConfirmBtn);
+    await settle();
     A('OPS-001 rotated key is shown before the backdrop click', container.textContent.indexOf('sk-webcam-OPS001-REVOKE-KEY') !== -1);
     backdrop = container.querySelector('.fixed.inset-0');
     click(backdrop); await settle();
@@ -1441,7 +1458,7 @@ ${PRELUDE}
     await settle();
     A('OPS-002 串流健康 shows the real bitrate from getStreamHealth', container.textContent.indexOf('2.5Mbps') !== -1);
     A('OPS-002 串流健康 is NOT the always-0 node.bitrate', container.textContent.indexOf('0.0Mbps') === -1);
-    A('OPS-002 串流健康 shows drops from getStreamHealth', container.textContent.indexOf('3 drops') !== -1);
+    A('OPS-002 串流健康 shows drops from getStreamHealth', container.textContent.indexOf('3 丟包') !== -1);
 
     // Unknown health (bridge up, no scraped sample yet / edge silent) → neutral —,
     // never a red 0.0 that reads as "every camera broken".
@@ -1470,8 +1487,8 @@ ${PRELUDE}
     // --- WAL-H5: liveClockLabel ---
     var lcl = window.liveClockLabel;
     A('WAL-H5 liveClockLabel is exported', typeof lcl === 'function');
-    A('WAL-H5 liveClockLabel(3) === Live · 3s', lcl(3) === 'Live \\u00b7 3s', lcl(3));
-    A('WAL-H5 liveClockLabel(9) still Live (boundary <10)', lcl(9).indexOf('Live') === 0, lcl(9));
+    A('WAL-H5 liveClockLabel(3) uses zh-TW 即時', lcl(3) === '即時 · 3s', lcl(3));
+    A('WAL-H5 liveClockLabel(9) still 即時 (boundary <10)', lcl(9).indexOf('即時') === 0, lcl(9));
     A('WAL-H5 liveClockLabel(10) degrades to reconnecting', lcl(10).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(10));
     A('WAL-H5 liveClockLabel(15) contains reconnecting', lcl(15).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(15));
     A('WAL-H5 liveClockLabel(29) still reconnecting (boundary <30)', lcl(29).indexOf('\\u91cd\\u65b0\\u9023\\u7dda\\u4e2d') !== -1, lcl(29));
@@ -1603,6 +1620,44 @@ const SUITES = [
   { name: 'COMP-001 radio keyboard     tweaks-panel.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'tweaks-panel.jsx', test: TEST_TWEAKS_RADIO },
   { name: 'API surface                 api.jsx (renewWebcamStream)', deps: [], target: 'api.jsx', test: TEST_API },
 ];
+
+// ---- modular extra suites (parallel-authored; one file per owner) ----------
+// The dashboard-audit remediation lane is TDD'd across many parallel worktree
+// agents. To keep this monolithic file free of merge collisions, each owner
+// drops its suites into its OWN file under render_extra/ instead of editing the
+// SUITES array above. Each render_extra/<owner>.js does:
+//
+//     module.exports = [ { name, deps, target, body }, ... ];
+//
+// where `body` is test-logic SOURCE (a string; a normal template literal in
+// that file is fine — backticks are safe there, unlike the inline TEST_ strings
+// in this file). The body runs with the same helpers the inline PRELUDE exposes
+// (A, settle, tick, click, container, root, byText, setInput, React, ReactDOM)
+// plus the target file's internals. The loader wraps every body in the standard
+// async + PRELUDE + try/catch shell, exactly like the inline suites, so an
+// uncaught throw is reported as a failing assertion rather than crashing the run.
+(function loadExtraSuites() {
+  const dir = path.join(__dirname, 'render_extra');
+  let files;
+  try { files = fs.readdirSync(dir); }
+  catch (e) { return; } // dir absent → no extra suites, nothing to do
+  for (const f of files.filter(n => n.endsWith('.js')).sort()) {
+    let mod;
+    try { mod = require(path.join(dir, f)); }
+    catch (e) { console.error('render_extra/' + f + ' failed to load: ' + (e && e.stack || e)); process.exit(1); }
+    const suites = Array.isArray(mod) ? mod : (typeof mod === 'function' ? mod() : []);
+    for (const s of suites) {
+      const label = s.name || f;
+      const shell =
+        'window.__TEST_PROMISE = (async () => {\n' + PRELUDE + '\ntry {\n' +
+        s.body + '\n} catch (e) {\n' +
+        '  results.push({ name: ' + JSON.stringify(label + ' threw') +
+        ", pass: false, detail: (e && e.stack) ? e.stack.split('\\n').slice(0,3).join(' | ') : String(e) });\n" +
+        '}\nwindow.__TEST_RESULT = results;\n})();\n';
+      SUITES.push({ name: label, deps: s.deps || [], target: s.target, test: shell });
+    }
+  }
+})();
 
 (async () => {
   let pass = 0, fail = 0;

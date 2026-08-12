@@ -30,6 +30,29 @@ function copyToClipboard(text) {
   return Promise.resolve(fallbackCopyText(text));
 }
 
+// One-time API-key reveal field — the ⚠ warning line plus the copy-able
+// <code> + 複製 button shared verbatim by all three "shown once" reveal modals
+// (webcam create, webcam revoke, per-node edge key). Only the warning text and
+// the key value differ per context, so both are props; the copy behavior
+// (async Clipboard with plain-http fallback, then a success/failure toast) is
+// identical everywhere. `onToast` keeps this presentational — it forwards the
+// same { tone, msg } shape StatusPage's setToast expects.
+const OneTimeKeyField = ({ apiKey, warning, onToast }) => (
+  <>
+    <p className="text-xs text-sev-warn font-bold mb-2">{warning}</p>
+    <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
+      <code className="text-xs text-ink-primary break-all select-all flex-1">{apiKey}</code>
+      <button
+        onClick={() => copyToClipboard(apiKey).then(ok =>
+          onToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
+        className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
+      >
+        複製
+      </button>
+    </div>
+  </>
+);
+
 // Per-row snooze control. Local `busy` state guards against double-fire on
 // slow VPN; onKeyDown must stopPropagation so Enter/Space on the focused
 // button doesn't also bubble to the surrounding row's keyboard handler
@@ -48,9 +71,14 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
   // call is still in flight).
   const mountedRef = React.useRef(true);
   React.useEffect(() => () => { mountedRef.current = false; }, []);
+  // NEW-RT-006: synchronous in-flight latch, same pattern as StreamRowButton's
+  // MSP-F7 fix — a ref is read-after-write within the same synchronous click
+  // handler, so a second click in the same tick sees it immediately regardless
+  // of when React commits the busy state update.
+  const inFlightRef = React.useRef(false);
   const isSnoozed = node.snoozeMin > 0;
   const trigger = () => {
-    if (busy) return;
+    if (inFlightRef.current || busy) return;
     // G1: don't silently no-op when the API bundle hasn't loaded / backend is
     // unreachable — route through onError so the parent's toast surfaces the
     // outage instead of the operator wondering why nothing happened.
@@ -59,6 +87,7 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
       onError && onError(new Error('暫時無法連線後端，請稍後再試'));
       return;
     }
+    inFlightRef.current = true;
     setBusy(true);
     const call = isSnoozed
       ? api.unsnoozeNode(node.id)
@@ -69,11 +98,12 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
       // reflects the new state.
       .then(() => Promise.resolve(onDone && onDone(node, isSnoozed ? 'unsnooze' : 30)))
       .catch(err => onError && onError(err))
-      .finally(() => { if (mountedRef.current) setBusy(false); });
+      .finally(() => { inFlightRef.current = false; if (mountedRef.current) setBusy(false); });
   };
   return (
     <button
       title={isSnoozed ? `取消靜音（剩餘 ${node.snoozeMin} 分鐘）` : '靜音 30 分鐘'}
+      aria-label={isSnoozed ? `取消靜音（剩餘 ${node.snoozeMin} 分鐘）` : '靜音 30 分鐘'}
       disabled={busy}
       onClick={e => { e.stopPropagation(); trigger(); }}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
@@ -108,9 +138,8 @@ const SnoozeRowButton = ({ node, onDone, onError }) => {
 // API-gated: if SDPRS_API.startStream / stopStream / getStreamHealth are
 // missing (waiting on api.jsx follow-up), render disabled with
 // "串流控制 (等待 API)".
-const StreamRowButton = ({ node, onDone, onError }) => {
+const StreamRowButton = ({ node, health: healthProp, onRefreshHealth, onDone, onError }) => {
   const [busy, setBusy] = React.useState(false);
-  const [health, setHealth] = React.useState(null); // getStreamHealth() result, or null while unknown/loading
   // MSP-F26: same unmount guard as SnoozeRowButton.
   const mountedRef = React.useRef(true);
   React.useEffect(() => () => { mountedRef.current = false; }, []);
@@ -120,14 +149,19 @@ const StreamRowButton = ({ node, onDone, onError }) => {
   // React actually commits the `busy` state update.
   const inFlightRef = React.useRef(false);
   const api = window.SDPRS_API || {};
-  const hasApi = typeof api.startStream === 'function' && typeof api.stopStream === 'function' && typeof api.getStreamHealth === 'function';
+  const hasApi = typeof api.startStream === 'function' && typeof api.stopStream === 'function';
+  // OPS-013 backward compat: when health is NOT passed from the parent's shared
+  // cache (e.g. existing tests), fall back to the per-row getStreamHealth fetch.
+  const [healthState, setHealthState] = React.useState(null);
   const refreshHealth = React.useCallback(() => {
-    if (!hasApi) return Promise.resolve();
+    if (healthProp !== undefined) return Promise.resolve(); // parent manages health
+    if (typeof api.getStreamHealth !== 'function') return Promise.resolve();
     return Promise.resolve(api.getStreamHealth(node.id))
-      .then(h => { if (mountedRef.current) setHealth(h || null); })
-      .catch(() => {}); // best-effort probe — fall back to "unknown", never throw into a caller that didn't ask for this
-  }, [node.id, hasApi]);
+      .then(h => { if (mountedRef.current) setHealthState(h || null); })
+      .catch(() => {});
+  }, [node.id, healthProp]);
   React.useEffect(() => { refreshHealth(); }, [refreshHealth]);
+  const health = healthProp !== undefined ? healthProp : healthState;
   const hasLiveEntry = !!(health && (health.bitrateMbps != null || health.viewers != null || health.drops != null));
   const isActive = health
     ? !!(health.enabled && health.reachable && hasLiveEntry)
@@ -141,7 +175,11 @@ const StreamRowButton = ({ node, onDone, onError }) => {
     const wasActive = isActive; // snapshot at click time — the async health refetch below must not change which command this click fires
     const call = wasActive ? api.stopStream(node.id) : api.startStream(node.id);
     Promise.resolve(call)
-      .then(() => refreshHealth())
+      .then(() => {
+          // OPS-013: refresh health from parent cache if available, else local probe
+          if (typeof onRefreshHealth === 'function') onRefreshHealth();
+          else refreshHealth();
+        })
       // MSP-F7: previously cleared `busy` as soon as the HTTP call resolved,
       // before the parent's refresh had a chance to update the cached
       // bitrate this button's `isActive` is derived from — a second click in
@@ -157,6 +195,7 @@ const StreamRowButton = ({ node, onDone, onError }) => {
   return (
     <button
       title={hasApi ? label : '串流控制 (等待 API)'}
+      aria-label={hasApi ? label : '串流控制 (等待 API)'}
       disabled={busy || !hasApi}
       onClick={e => { e.stopPropagation(); trigger(); }}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
@@ -172,26 +211,99 @@ const StreamRowButton = ({ node, onDone, onError }) => {
 // StreamRowButton's `isActive` already uses (see its MSP-F7 note). Read that
 // here; when it's unknown (no API, not yet scraped, or no live mediamtx entry)
 // show a neutral 「—」, never a fabricated red 0.0 that reads as "camera broken".
-const StreamHealthCell = ({ node }) => {
-  const [health, setHealth] = React.useState(null);
+// OPS-013: when health is passed as a prop (from StatusPage's shared cache),
+// use it directly. When called standalone (e.g. tests), fall back to the
+// per-row getStreamHealth fetch for backward compatibility.
+const StreamHealthCell = ({ node, health: healthProp }) => {
+  const [healthState, setHealthState] = React.useState(null);
   const mountedRef = React.useRef(true);
   React.useEffect(() => () => { mountedRef.current = false; }, []);
-  const api = window.SDPRS_API || {};
-  const hasApi = typeof api.getStreamHealth === 'function';
   React.useEffect(() => {
-    if (!hasApi) return;
+    if (healthProp !== undefined) return; // parent provides health — skip own fetch
+    const api = window.SDPRS_API || {};
+    if (typeof api.getStreamHealth !== 'function') return;
     Promise.resolve(api.getStreamHealth(node.id))
-      .then(h => { if (mountedRef.current) setHealth(h || null); })
-      .catch(() => {}); // best-effort probe — fall back to "unknown", never throw
-  }, [node.id, hasApi]);
+      .then(h => { if (mountedRef.current) setHealthState(h || null); })
+      .catch(() => {});
+  }, [node.id, healthProp]);
+  const health = healthProp !== undefined ? healthProp : healthState;
   const mbps = health && health.bitrateMbps != null ? health.bitrateMbps : null;
   const drops = health && health.drops != null ? health.drops : null;
   if (mbps == null) return <span className="text-ink-muted">—</span>;
   const tone = mbps < 0.5 ? 'text-sev-critical' : mbps < 1 ? 'text-sev-warn' : 'text-sev-ok';
   return (
     <span className={tone}>
-      {mbps.toFixed(1)}Mbps{drops != null && <span className="text-ink-muted"> · {drops} drops</span>}
+      {mbps.toFixed(1)}Mbps{drops != null && <span className="text-ink-muted"> · {drops} 丟包</span>}
     </span>
+  );
+};
+
+// Track 1 per-node edge API keys: row-level provision/rotate/clear controls.
+// Gated on node.hasKey (camelCase; api.jsx's mapNode reads it from
+// `n.has_key ?? null`), NOT on node.type — mapNode collapses every backend
+// node_type other than 'pump'/'webcam' (including 'glass') into the SPA's
+// 'camera', so there is no literal type string to key off. hasKey === null
+// means the concept doesn't apply (webcam rows use their own existing
+// createWebcamClient/revokeWebcamKey controls above) and this renders nothing.
+//
+// Mirrors SnoozeRowButton/StreamRowButton: an isolated component with its own
+// busy/in-flight guard so a slow request only latches this row, not the whole
+// table. Provision and rotate are the same call (provisionNodeKey is a
+// provision-or-rotate 201) — the label is the only difference. The raw key is
+// never held in this component's state; it is handed straight up to the
+// page's onRevealed callback, which opens the one-time reveal modal (the
+// component that actually owns "shown once" discipline).
+const NodeKeyRowButtons = ({ node, onRevealed, onRequestClear, onError }) => {
+  const [busy, setBusy] = React.useState(false);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => () => { mountedRef.current = false; }, []);
+  const inFlightRef = React.useRef(false);
+  if (node.hasKey == null) return null; // webcam rows: concept doesn't apply
+  const provisionOrRotate = () => {
+    if (inFlightRef.current || busy) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.provisionNodeKey)) {
+      onError && onError(new Error('暫時無法連線後端，請稍後再試'));
+      return;
+    }
+    inFlightRef.current = true;
+    setBusy(true);
+    Promise.resolve(api.provisionNodeKey(node.id))
+      .then(data => {
+        if (!mountedRef.current) return;
+        onRevealed(node, (data || {}).api_key);
+      })
+      .catch(err => onError && onError(err))
+      .finally(() => { inFlightRef.current = false; if (mountedRef.current) setBusy(false); });
+  };
+  const label = node.hasKey ? '重設金鑰' : '設定金鑰';
+  return (
+    <>
+      <button
+        title={label}
+        disabled={busy}
+        onClick={e => { e.stopPropagation(); provisionOrRotate(); }}
+        // Mirrors the webcam 🔑/刪除 buttons: without stopping the keydown
+        // here, Enter/Space on the focused button would also bubble into the
+        // row's own keyboard handling and select the node instead of (or as
+        // well as) activating this button.
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+        className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-info hover:bg-sev-info/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {busy ? '處理中...' : label}
+      </button>
+      {node.hasKey && (
+        <button
+          title="清除金鑰"
+          disabled={busy}
+          onClick={e => { e.stopPropagation(); onRequestClear(node); }}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          清除金鑰
+        </button>
+      )}
+    </>
   );
 };
 
@@ -199,6 +311,50 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump | webcam
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
   const [locationFilter, setLocationFilter] = useState_p('all');
+  // OPS-013 / OPS-014: shared stream-health cache — one /api/stream/health
+  // fetch covers ALL cameras (the endpoint returns the whole bridge state),
+  // so N rows must NOT each fire their own identical scrape. A periodic
+  // re-probe (10s) keeps StreamRowButton's isActive and StreamHealthCell's
+  // bitrate fresh without relying on per-row effects.
+  const [healthMap, setHealthMap] = useState_p({}); // { nodeId: { enabled, reachable, bitrateMbps, drops, viewers } }
+  const refreshAllHealth = React.useCallback(() => {
+    const api = window.SDPRS_API || {};
+    // OPS-013: getStreamHealthAll returns the whole bridge response in one fetch,
+    // instead of N identical /api/stream/health calls (one per camera row).
+    if (typeof api.getStreamHealthAll !== 'function') return;
+    Promise.resolve(api.getStreamHealthAll())
+      .then(r => {
+        if (!r) return;
+        const enabled = !!r.enabled;
+        const reachable = !!r.reachable;
+        const nodesObj = r.nodes || {};
+        const map = {};
+        // Populate entries for nodes the bridge knows about:
+        Object.keys(nodesObj).forEach(nid => {
+          const e = nodesObj[nid];
+          map[nid] = {
+            enabled, reachable,
+            bitrateMbps: e && e.bitrate_kbps != null ? e.bitrate_kbps / 1000 : null,
+            drops: e && e.dropped != null ? e.dropped : null,
+            viewers: e && e.viewers != null ? e.viewers : null,
+          };
+        });
+        setHealthMap(prev => {
+          const next = {};
+          // Carry forward any known nodes not in this response (mark unknown):
+          Object.keys(prev).forEach(k => {
+            if (!(k in map)) next[k] = { enabled, reachable, bitrateMbps: null, drops: null, viewers: null };
+          });
+          return { ...next, ...map };
+        });
+      })
+      .catch(() => {}); // best-effort — never throw into a page that didn't ask
+  }, []);
+  React.useEffect(() => { refreshAllHealth(); }, [refreshAllHealth]);
+  React.useEffect(() => {
+    const id = setInterval(refreshAllHealth, 10000);
+    return () => clearInterval(id);
+  }, [refreshAllHealth]);
   // Local toast (success/error feedback for snooze etc.). Auto-dismissed after 3s.
   const [toast, setToast] = useState_p(null);
   React.useEffect(() => {
@@ -235,6 +391,20 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // whose client row is gone), so every read of it falls back to clientId —
   // and clientId is still the ONLY thing ever sent to the API.
   const [deleteTarget, setDeleteTarget] = useState_p(null); // { clientId, clientName, cameras: [{id,name}] } | null
+  // OPS-016 / NEW-UX-004: revoke-key confirmation — same in-app modal pattern
+  // as deleteTarget above. Native confirm() blocks the tab, freezes WS-driven
+  // repaints behind it on a 24/7 wall display, and cannot be styled.
+  const [revokeTarget, setRevokeTarget] = useState_p(null); // { clientId, name } | null
+  const [revokeBusy, setRevokeBusy] = useState_p(false);
+  // Track 1 per-node edge API keys: a NEW parallel reveal state — deliberately
+  // NOT sharing revokedKey above, whose copy talks about updating a webcam
+  // 用戶端's client-side config (wrong voice for a glass/pump edge node).
+  // { nodeId, name, apiKey } | null.
+  const [nodeKeyRevealed, setNodeKeyRevealed] = useState_p(null);
+  // Clear-key confirmation — same in-app modal pattern as deleteTarget/
+  // revokeTarget above, not native confirm(). { nodeId, name } | null.
+  const [clearKeyTarget, setClearKeyTarget] = useState_p(null);
+  const [clearKeyBusy, setClearKeyBusy] = useState_p(false);
   // What to call the client in operator-facing copy. Never used as an id.
   const clientLabel = (t) => (t && t.clientName) || (t && t.clientId) || '';
   const [deleteBusy, setDeleteBusy] = useState_p(false);
@@ -250,6 +420,21 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // still in flight — don't setState into a dead tree.
   const mountedRef = React.useRef(true);
   React.useEffect(() => () => { mountedRef.current = false; }, []);
+  // OPS-022: Escape key closes the topmost open modal (revoke > delete > create).
+  // Mirrors the MuteDrawer/NodeSidePanel Escape pattern in components.jsx.
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      if (revokeTarget) { if (!revokeBusy) setRevokeTarget(null); return; }
+      if (clearKeyTarget) { if (!clearKeyBusy) setClearKeyTarget(null); return; }
+      if (deleteTarget) { if (!deleteBusy) setDeleteTarget(null); return; }
+      if (showAddModal) { if (!createdKey && !addBusy) setShowAddModal(false); return; }
+      if (revokedKey) { setRevokedKey(null); return; }
+      if (nodeKeyRevealed) { setNodeKeyRevealed(null); return; }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
   const confirmDeleteWebcam = () => {
     if (deleteBusy || !deleteTarget) return;
     // G1 guard (same as SnoozeRow/StreamRow): without the API bundle the
@@ -282,8 +467,60 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
         });
         return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
       })
-      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: `刪除失敗: ${err?.message || err}` }); })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '刪除失敗: ' + window.actionErrorText(err) }); })
       .finally(() => { if (mountedRef.current) setDeleteBusy(false); });
+  };
+  // OPS-016 / NEW-UX-004: in-app revoke confirmation — mirrors confirmDeleteWebcam
+  // above. Replaces the old native confirm() that blocked the tab and had no
+  // busy latch (double-fire → 404 toast) or post-success refresh.
+  const confirmRevoke = () => {
+    if (revokeBusy || !revokeTarget) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.revokeWebcamKey)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    const target = revokeTarget;
+    if (!target.clientId) {
+      setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法撤銷 Key' });
+      return;
+    }
+    setRevokeBusy(true);
+    Promise.resolve(api.revokeWebcamKey(target.clientId))
+      .then(data => {
+        if (!mountedRef.current) return;
+        setRevokeTarget(null);
+        setRevokedKey({ nodeId: target.clientId, name: target.name, apiKey: (data || {}).api_key });
+        // Note: no onRefresh here — revoke rotates the key but doesn't change
+        // the node list structure (unlike delete which removes cameras).
+      })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '撤銷失敗: ' + window.actionErrorText(err) }); })
+      .finally(() => { if (mountedRef.current) setRevokeBusy(false); });
+  };
+  // Track 1 per-node edge API keys: clear-key confirmation — mirrors
+  // confirmDeleteWebcam/confirmRevoke above. 404 (already cleared) is treated
+  // like deleteWebcamClient's 404 handling: the operator's intent (no key on
+  // this node) is already satisfied, so refresh like a success rather than
+  // erroring on a double-click or a peer's earlier clear.
+  const confirmClearKey = () => {
+    if (clearKeyBusy || !clearKeyTarget) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.clearNodeKey)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    const target = clearKeyTarget;
+    setClearKeyBusy(true);
+    Promise.resolve(api.clearNodeKey(target.nodeId))
+      .catch(err => { if (err && err.status === 404) return; throw err; })
+      .then(() => {
+        if (!mountedRef.current) return;
+        setClearKeyTarget(null);
+        setToast({ tone: 'success', msg: `${target.name || target.nodeId} 的 API Key 已清除` });
+        return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
+      })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '清除失敗: ' + window.actionErrorText(err) }); })
+      .finally(() => { if (mountedRef.current) setClearKeyBusy(false); });
   };
   // Unique locations from the current node list — filter values are derived
   // so a new deployment doesn't need a config change.
@@ -324,7 +561,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           button. Overlay it instead (matches app.jsx's global toast pattern)
           so it never shifts layout. */}
       {toast && (
-        <div className="fixed top-16 right-4 z-40 animate-in" role="status" aria-live="polite">
+        <div className="fixed top-16 right-4 z-[60] animate-in" role="status" aria-live="polite">
           <div className={`px-3 py-2 rounded-lg border shadow-2xl text-xs bg-surface-overlay ${
             toast.tone === 'success' ? 'border-sev-ok/50 text-sev-ok'
               : toast.tone === 'error' ? 'border-sev-critical/50 text-sev-critical'
@@ -416,13 +653,8 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               const uploadIssue = n.heartbeat != null && n.heartbeat < 60 && n.upload != null && n.upload > 600;
               return (
                 <tr key={n.id}
-                  role="button"
-                  tabIndex={0}
-                  className="border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer focus:outline focus:outline-1 focus:outline-sev-info"
-                  onClick={() => onSelectNode && onSelectNode(n)}
-                  onKeyDown={e => {
-                    if (onSelectNode && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelectNode(n); }
-                  }}>
+                  className="border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer"
+                  onClick={() => onSelectNode && onSelectNode(n)}>
                   <td className="px-3 py-2 font-mono font-semibold">
                     {n.id}
                     {/* MSP-F13: snooze state was invisible from the table
@@ -452,7 +684,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                   <td className="px-3 py-2 text-ink-secondary">{n.location}</td>
                   <td className="px-3 py-2">
                     <span className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded border text-[10px] font-medium bg-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}/15 text-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'} border-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}/30`}>
-                      <span className={`w-1.5 h-1.5 rounded-full bg-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}`}></span>
+                      <span className={`w-1.5 h-1.5 rounded-full bg-sev-${tone === 'critical' ? 'critical' : tone === 'warn' ? 'warn' : 'ok'}`} aria-hidden="true"></span>
                       {/* MSP-F12: badge color already downgraded to amber for
                           pumpLevelMissing, but the text still read n.status
                           directly — an amber badge captioned "正常" is a lie.
@@ -467,17 +699,17 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                       age formatter monitor.jsx exports, so a node stale for
                       days reads "1d 2h" instead of a raw seconds count. */}
                   <td className={`px-3 py-2 text-right font-mono ${n.heartbeat == null ? 'text-ink-muted' : n.heartbeat > 30 ? 'text-sev-critical font-semibold' : n.heartbeat > 10 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
-                    {window.fmtAgeOrDash ? window.fmtAgeOrDash(n.heartbeat) : (n.heartbeat != null ? (n.heartbeat > 60 ? Math.floor(n.heartbeat/60)+'m' : n.heartbeat+'s') : '—')}
+                    {window.fmtAgeOrDash(n.heartbeat)}
                   </td>
                   {/* Contract A: `upload` is null for a camera with no
                       snapshot ever. This column previously had NO null guard
                       at all and rendered the literal string "nulls". */}
                   <td className={`px-3 py-2 text-right font-mono ${uploadIssue ? 'text-sev-critical font-semibold' : n.upload == null ? 'text-ink-muted' : n.upload > 60 ? 'text-sev-critical font-semibold' : n.upload > 10 ? 'text-sev-warn' : 'text-ink-secondary'}`}>
-                    {window.fmtAgeOrDash ? window.fmtAgeOrDash(n.upload) : (n.upload != null ? (n.upload > 60 ? Math.floor(n.upload/60)+'m' : n.upload+'s') : '—')}
+                    {window.fmtAgeOrDash(n.upload)}
                     {uploadIssue && <span className="ml-1 text-[10px] bg-sev-critical/20 text-sev-critical px-1 rounded">上傳異常</span>}
                   </td>
                   <td className="px-3 py-2 font-mono">
-                    {n.type === 'camera' ? <StreamHealthCell node={n}/> : <span className="text-ink-muted">—</span>}
+                    {n.type === 'camera' ? <StreamHealthCell node={n} {...(healthMap[n.id] ? { health: healthMap[n.id] } : {})}/> : <span className="text-ink-muted">—</span>}
                   </td>
                   <td className="px-3 py-2 text-right font-mono">
                     {n.type === 'camera' ? (
@@ -501,7 +733,9 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                             time. Honest dash instead of a fabricated
                             direction (still lights up if trend data ships). */}
                         {n.trend === 'up' ? <Icon.ArrowUp size={10} className="text-sev-warn"/> : n.trend === 'down' ? <Icon.ArrowDown size={10} className="text-sev-ok"/> : <span className="text-ink-dim">—</span>}
-                        <span className={n.level > 85 ? 'text-sev-critical font-semibold' : n.level > 70 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.level}%</span>
+                        {/* OPS-024: title shows reading age so operators know how
+                            stale the water-level percentage is. */}
+                        <span title={n.heartbeat != null ? '水位讀取於 ' + window.fmtAgeOrDash(n.heartbeat) + ' 前' : undefined} className={n.level > 85 ? 'text-sev-critical font-semibold' : n.level > 70 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.level}%</span>
                         <span className="text-ink-muted ml-1">· {n.cycles}×</span>
                       </span>
                     )}
@@ -510,7 +744,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     {n.type === 'pump' ? (
                       <span className="inline-flex items-center gap-1 font-mono">
                         <Icon.Battery size={12} className={n.voltage != null && n.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}/>
-                        <span className={n.voltage != null && n.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.voltage != null ? n.voltage + 'V' : '—'}</span>
+                        <span className={n.voltage != null && n.voltage < 12 ? 'text-sev-warn' : 'text-ink-secondary'}>{n.voltage != null ? n.voltage.toFixed(1) + 'V' : '—'}</span>
                         <span className={`text-[10px] px-1 rounded ml-1 ${n.power==='mains'?'bg-sev-ok/15 text-sev-ok':n.power==='ups'?'bg-sev-warn/15 text-sev-warn':'bg-sev-critical/15 text-sev-critical'}`}>{n.power==='mains'?'市電':n.power==='ups'?'UPS':'電池'}</span>
                       </span>
                     ) : isWebcam ? (
@@ -525,6 +759,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                       {n.type === 'camera' && (
                         <StreamRowButton
                           node={n}
+                          {...(healthMap[n.id] ? { health: healthMap[n.id], onRefreshHealth: refreshAllHealth } : {})}
                           onDone={(node, action) => {
                             setToast({ tone: 'success', msg: `${node.name || node.id} ${action === 'stop' ? '串流已停止' : '串流已啟動'}` });
                             // MSP-F7: the button's own getStreamHealth() refetch
@@ -535,7 +770,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                             // have settled.
                             return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                           }}
-                          onError={err => setToast({ tone: 'error', msg: `串流指令失敗: ${err?.message || err}` })}/>
+                          onError={err => setToast({ tone: 'error', msg: '串流指令失敗: ' + window.actionErrorText(err) })}/>
                       )}
                       <SnoozeRowButton
                         node={n}
@@ -548,41 +783,34 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                           });
                           return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
                         }}
-                        onError={err => setToast({ tone: 'error', msg: `靜音失敗: ${err?.message || err}` })}/>
+                        onError={err => setToast({ tone: 'error', msg: '靜音失敗: ' + window.actionErrorText(err) })}/>
+                      {/* Track 1 per-node edge API keys: gated on n.hasKey
+                          (null for webcam rows, which keep only their
+                          existing 🔑/刪除 controls below), never on n.type. */}
+                      <NodeKeyRowButtons
+                        node={n}
+                        onRevealed={(node, apiKey) => setNodeKeyRevealed({ nodeId: node.id, name: node.name, apiKey })}
+                        onRequestClear={(node) => setClearKeyTarget({ nodeId: node.id, name: node.name })}
+                        onError={err => setToast({ tone: 'error', msg: '設定金鑰失敗: ' + window.actionErrorText(err) })}/>
                       {n.type === 'webcam' && (
                         <button
                           title={n.clientId
                             ? '撤銷並重新產生 API Key'
                             : '此列缺少所屬用戶端識別碼，無法撤銷 Key'}
+                          aria-label={n.clientId
+                            ? '撤銷並重新產生 API Key'
+                            : '此列缺少所屬用戶端識別碼，無法撤銷 Key'}
                           disabled={!n.clientId}
                           onClick={(e) => {
                             e.stopPropagation();
-                            // G1 guard: check the API is actually there BEFORE
-                            // prompting — never ask the operator to confirm a
-                            // destructive action we cannot perform.
-                            const api = window.SDPRS_API;
-                            if (!(api && api.revokeWebcamKey)) {
-                              setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
-                              return;
-                            }
-                            // THE SHIPPED BUG: this used to send n.id — the
-                            // CAMERA's id — to an endpoint that only ever knew
-                            // client ids, so the 撤銷 Key button 404'd 100% of
-                            // the time. The key is the CLIENT's, so rotate it
-                            // by the CLIENT's id.
+                            // OPS-016 / NEW-UX-004: opens the in-app confirm modal
+                            // below; nothing is sent until 「確定撤銷」 is pressed.
+                            // G1 guard + clientId check are in confirmRevoke.
                             if (!n.clientId) {
                               setToast({ tone: 'error', msg: '此列缺少用戶端識別碼，無法撤銷 Key' });
                               return;
                             }
-                            if (!confirm('確定要撤銷此 Key？舊 Key 將立即失效。')) return;
-                            Promise.resolve(api.revokeWebcamKey(n.clientId))
-                              .then(data => {
-                                // Fresh key is shown once via a persistent modal,
-                                // not the auto-dismissing toast — see revokedKey
-                                // state comment above.
-                                setRevokedKey({ nodeId: n.clientId, name: n.name, apiKey: (data || {}).api_key });
-                              })
-                              .catch(err => setToast({ tone: 'error', msg: err.message || '撤銷失敗' }));
+                            setRevokeTarget({ clientId: n.clientId, name: n.name });
                           }}
                           // OPS-005: the row (role="button") preventDefault()s
                           // Enter/Space to select the node; without stopping the
@@ -634,7 +862,9 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
         </table>
       </div>
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { if (!createdKey) setShowAddModal(false); }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="新增 Webcam Client"
+          onClick={() => { if (!createdKey && !addBusy) setShowAddModal(false); }}>
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">新增 Webcam Client</h3>
             {!createdKey ? (
@@ -660,7 +890,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     setAddBusy(true);
                     Promise.resolve(api.createWebcamClient(newClientName.trim()))
                       .then(data => setCreatedKey(data))
-                      .catch(err => setToast({ msg: err.message || '建立失敗', tone: 'error' }))
+                      .catch(err => setToast({ msg: '建立失敗: ' + window.actionErrorText(err), tone: 'error' }))
                       .finally(() => { if (mountedRef.current) setAddBusy(false); });
                   }}
                   className="w-full py-2 rounded-lg bg-sev-info text-white text-sm font-bold disabled:opacity-50"
@@ -670,17 +900,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               </>
             ) : (
               <>
-                <p className="text-xs text-sev-warn font-bold mb-2">⚠ API Key 僅顯示一次，請立即複製</p>
-                <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
-                  <code className="text-xs text-ink-primary break-all select-all flex-1">{createdKey.api_key}</code>
-                  <button
-                    onClick={() => copyToClipboard(createdKey.api_key).then(ok =>
-                      setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
-                    className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
-                  >
-                    複製
-                  </button>
-                </div>
+                <OneTimeKeyField apiKey={createdKey.api_key} warning="⚠ API Key 僅顯示一次，請立即複製" onToast={setToast} />
                 <p className="text-xs text-ink-muted mb-3">Node ID: {createdKey.node_id}</p>
                 <button
                   onClick={() => { setShowAddModal(false); onRefresh && onRefresh(); }}
@@ -698,20 +918,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
           operator has time to actually copy the fresh key before it's gone
           for good. */}
       {revokedKey && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="API Key 已重新產生">
           <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-sm font-bold text-ink-primary mb-3">API Key 已重新產生</h3>
-            <p className="text-xs text-sev-warn font-bold mb-2">⚠ 新 Key 僅顯示一次，請立即複製，並更新 {revokedKey.name || revokedKey.nodeId} 的用戶端設定</p>
-            <div className="bg-surface-base border border-border-subtle rounded-lg p-3 mb-3 flex items-center gap-2">
-              <code className="text-xs text-ink-primary break-all select-all flex-1">{revokedKey.apiKey}</code>
-              <button
-                onClick={() => copyToClipboard(revokedKey.apiKey).then(ok =>
-                  setToast({ tone: ok ? 'success' : 'error', msg: ok ? 'API Key 已複製' : '複製失敗，請手動選取' }))}
-                className="shrink-0 px-2 py-1 rounded bg-sev-info text-white text-xs font-bold"
-              >
-                複製
-              </button>
-            </div>
+            <OneTimeKeyField apiKey={revokedKey.apiKey} warning={`⚠ 新 Key 僅顯示一次，請立即複製，並更新 ${revokedKey.name || revokedKey.nodeId} 的用戶端設定`} onToast={setToast} />
             <p className="text-xs text-ink-muted mb-3">Node ID: {revokedKey.nodeId}</p>
             <button
               onClick={() => setRevokedKey(null)}
@@ -765,6 +976,92 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
               >
                 {deleteBusy ? '刪除中...' : '確定刪除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* OPS-016 / NEW-UX-004: revoke-key confirmation modal — mirrors the
+          delete modal above. In-app, non-blocking, with busy latch and
+          post-success refresh. */}
+      {revokeTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="撤銷 API Key"
+          onClick={() => { if (!revokeBusy) setRevokeTarget(null); }}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">撤銷 API Key</h3>
+            <p className="text-xs text-ink-secondary mb-2">
+              確定要撤銷 <span className="text-ink-primary font-bold">{revokeTarget.name || revokeTarget.clientId}</span> 的 API Key？
+            </p>
+            <p className="text-xs text-sev-warn font-bold mb-4">⚠ 舊 Key 將立即失效，使用此 Key 的用戶端會立即失去連線。</p>
+            <div className="flex gap-2">
+              <button
+                disabled={revokeBusy}
+                onClick={() => setRevokeTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={revokeBusy}
+                onClick={confirmRevoke}
+                className="flex-1 py-2 rounded-lg bg-sev-warn text-white text-sm font-bold disabled:opacity-50"
+              >
+                {revokeBusy ? '撤銷中...' : '確定撤銷'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Track 1 per-node edge API keys: one-time reveal after provision/
+          rotate. A NEW modal (not revokedKey above, whose copy is written for
+          a webcam client's local config, not a glass/pump edge node) but the
+          same "shown once, copy-able, stays up until explicitly dismissed"
+          contract as the create/revoke panels above. Closing acknowledges the
+          reveal and refreshes the node list so hasKey flips to true. */}
+      {nodeKeyRevealed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="節點 API Key">
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">節點 API Key</h3>
+            <OneTimeKeyField apiKey={nodeKeyRevealed.apiKey} warning="⚠ 此金鑰只顯示一次，請立即複製" onToast={setToast} />
+            <p className="text-xs text-ink-muted mb-3">節點: {nodeKeyRevealed.name || nodeKeyRevealed.nodeId}</p>
+            <button
+              onClick={() => { setNodeKeyRevealed(null); onRefresh && onRefresh(); }}
+              className="w-full py-2 rounded-lg bg-sev-ok text-white text-sm font-bold"
+            >
+              關閉
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Track 1 per-node edge API keys: clear-key confirmation — mirrors the
+          delete/revoke modals above. In-app, non-blocking, busy latch,
+          post-success refresh so hasKey flips back to false. */}
+      {clearKeyTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="清除 API Key"
+          onClick={() => { if (!clearKeyBusy) setClearKeyTarget(null); }}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">清除 API Key</h3>
+            <p className="text-xs text-ink-secondary mb-2">
+              確定要清除 <span className="text-ink-primary font-bold">{clearKeyTarget.name || clearKeyTarget.nodeId}</span> 的 API Key？
+            </p>
+            <p className="text-xs text-sev-warn font-bold mb-4">⚠ 此節點將立即無法使用該金鑰連線，需重新設定金鑰才能恢復。</p>
+            <div className="flex gap-2">
+              <button
+                disabled={clearKeyBusy}
+                onClick={() => setClearKeyTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={clearKeyBusy}
+                onClick={confirmClearKey}
+                className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
+              >
+                {clearKeyBusy ? '清除中...' : '確定清除'}
               </button>
             </div>
           </div>

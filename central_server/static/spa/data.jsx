@@ -7,6 +7,11 @@
 
 // ---- Static operator config (not backed by an API) ----------------------
 
+// FIX-024: single source of truth for the build label displayed in the
+// NavRail footer. Not auto-generated — update manually on each release
+// so the operator can identify which build is running on the wall display.
+window.__SDPRS_BUILD = 'build 2026.08.02';
+
 const RESOLVE_TEMPLATES = [
   '誤報 — 環境因素',
   '已派員處理',
@@ -118,6 +123,7 @@ window.OPERATORS_ONLINE = [];
 // ---- Helpers ------------------------------------------------------------
 
 const fmtAge = (sec) => {
+  if (sec == null) return '—';
   sec = Math.max(0, Math.round(sec || 0));
   if (sec < 60) return sec + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
@@ -130,7 +136,19 @@ const fmtAge = (sec) => {
   const h = Math.floor((sec % 86400) / 3600);
   return d + 'd ' + h + 'h';
 };
+// OPS-037: was defined/exported only from pages/monitor.jsx, with status.jsx
+// reaching across files for it via a runtime `window.fmtAgeOrDash ? ... : ...`
+// guard (see status.jsx's heartbeat/upload cells) — a fragile dependency on
+// monitor.jsx happening to load first, silently falling back to a cruder
+// inline formatter (no day/hour humanization) whenever it didn't (e.g. any
+// test harness or future page that doesn't load monitor.jsx). It is a pure
+// function with zero monitor.jsx-specific state, so it belongs in the shared
+// helpers file every page already depends on. `sec == null` (never-reported
+// node, MSP-F19/F8) renders '—' instead of fabricating "0s" via fmtAge's
+// `sec || 0`.
+const fmtAgeOrDash = (sec) => (sec == null ? '—' : fmtAge(sec));
 const ageColor = (sec) => {
+  if (sec == null) return 'text-ink-muted';
   if (sec < 300) return 'text-ink-secondary';
   if (sec < 900) return 'text-sev-warn';
   if (sec < 1800) return 'text-orange-400';
@@ -207,6 +225,32 @@ function formatDurationShort(seconds) {
   return `${Math.round(s / 86400)}天`;
 }
 
+// UX-001: shared, date-aware wall-clock formatter. Every timestamp on this
+// dashboard used to render as bare HH:MM:SS (fmtClock), so an event logged at
+// 23:58 and one at 00:03 the NEXT day were indistinguishable in a handover
+// review that spans midnight. fmtTs shows the date ONLY when the instant is
+// not today, so the common (today) case stays terse while cross-midnight /
+// multi-day timelines become unambiguous. Null-safe by contract: null,
+// undefined, and unparseable inputs all render '—' (never "null" / "NaN" /
+// "Invalid Date"). Accepts a Date OR epoch-ms (api.jsx's parseTsMs output) —
+// deliberately NOT a raw wire string, which needs api.jsx's parseTs 'Z'
+// repair first (THE ONE RULE); hand fmtTs an already-parsed instant.
+function fmtTs(value) {
+  if (value == null) return '—';
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  const hms = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+  if (sameDay) return hms;
+  const md = p(d.getMonth() + 1) + '-' + p(d.getDate());
+  if (d.getFullYear() === now.getFullYear()) return md + ' ' + hms;
+  return d.getFullYear() + '-' + md + ' ' + hms;
+}
+
 // FLOW-001: the dashboard used a single toast slot, so a burst of messages
 // overwrote an action-critical failure toast ('認領失敗'/'解決失敗', tone 'warn')
 // in under a second — the operator walked away believing an ack landed when it
@@ -243,7 +287,7 @@ async function probeSessionOnce(extendSession) {
 // WAL-H5: wall pill + StatusStrip share one label so the wall degrades its
 // text during an outage (not just its color).
 function liveClockLabel(liveSec) {
-  if (liveSec < 10) return 'Live \u00b7 ' + liveSec + 's';
+  if (liveSec < 10) return '\u5373\u6642 \u00b7 ' + liveSec + 's';
   if (liveSec < 30) return '\u91cd\u65b0\u9023\u7dda\u4e2d\u2026 ' + liveSec + 's';
   return '\u9023\u7dda\u4e2d\u65b7 ' + liveSec + 's';
 }
@@ -261,6 +305,60 @@ function effectiveTheme(theme, wallMode) {
   return wallMode ? 'dark' : theme;
 }
 
+// SHELL-001: the single authoritative set of pages app.jsx's renderPage()
+// switch actually handles. `page` state can be seeded from RESTORED_STATE (a
+// base64 blob decoded from a URL query param on the cross-login roundtrip),
+// sessionStorage (tab-scoped, survives reloads), or a browser popstate event —
+// all three are untrusted strings a stale bookmark, a corrupted blob, or a
+// hand-edited URL could hand back as garbage. An unvalidated bad value used to
+// fall through renderPage()'s `default: return null`, leaving the whole
+// content area blank with the nav/status strip still showing (looked like a
+// crash, wasn't one). sanitizePage is the single choke point every entry point
+// funnels through; VALID_PAGES is published too so a caller can enumerate it.
+const VALID_PAGES = ['alerts', 'monitor', 'status', 'pumps', 'weather', 'handover', 'audit'];
+function sanitizePage(p) {
+  return VALID_PAGES.indexOf(p) !== -1 ? p : 'alerts';
+}
+
+// SHELL-004: app.jsx's boot effect surfaces a partial-load warning banner +
+// toast whenever loadInitial() reports SOME (but not all) loaders rejected
+// via window.__SDPRS_LOAD_FAILURES. The bootstrap-error retry path re-runs
+// loadInitial() but never re-checked that flag — a retry that recovered
+// most-but-not-all loaders rendered as a full, silent success. Both call
+// sites now funnel through this one pure decision so they can't drift again;
+// `labels` is app.jsx's _FAILURE_LABELS map, passed in rather than duplicated
+// here (data.jsx has no reason to know the zh-TW copy for each loader key).
+function describeLoadFailures(failures, labels) {
+  if (!Array.isArray(failures) || failures.length === 0) return null;
+  const labelMap = labels || {};
+  const names = failures.map(k => labelMap[k] || k).join('、');
+  return { warnings: failures.slice(), toastMessage: '部分資料載入失敗: ' + names };
+}
+
+// SHELL-007: app.jsx used to adopt RESTORED_STATE.selectedId (decoded from a
+// base64 URL param on the H-1 cross-login roundtrip) directly into initial
+// state with no check that it names an alert actually in the queue — unlike
+// the sessionStorage-saved id, which WAS already validated against the
+// loaded alerts before being adopted. A stale id (resolved/aged out between
+// the redirect and the next load), a corrupted blob, or a hand-edited URL
+// therefore selected nothing real, with nothing to fall back to. Both
+// untrusted sources now go through this one validation: restoredId wins if
+// it names a live alert, else savedId if IT names one, else the head of the
+// queue. String()-compared since ids cross a URL/sessionStorage boundary and
+// may arrive as strings even when the underlying alert id is numeric.
+function resolveSelectedId(restoredId, savedId, alerts) {
+  const list = Array.isArray(alerts) ? alerts : [];
+  if (restoredId != null) {
+    const match = list.find(a => String(a.id) === String(restoredId));
+    if (match) return match.id;
+  }
+  if (savedId != null) {
+    const match = list.find(a => String(a.id) === String(savedId));
+    if (match) return match.id;
+  }
+  return list.length > 0 ? list[0].id : null;
+}
+
 // WAL-M9: count only unacked (pending) alerts for the wall ticker header.
 function activeAlertCount(alerts) {
   return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
@@ -270,6 +368,25 @@ function activeAlertCount(alerts) {
 // 12-row slice. Primary: state (pending before acknowledged). Secondary:
 // severity (critical > warn > info). Tertiary: recency (lower ageSec first).
 // Returns a NEW array; does not mutate the input.
+// SHELL-027: shared, NaN/null-safe ageSec comparator. Since DATA-011, ageSec
+// is `null` (not 0) for an alert whose timestamp failed to parse — meaning
+// "unknown", not "just now". A bare `a.ageSec - b.ageSec` coerces null to 0
+// via subtraction, sorting an unknown age as the FRESHEST thing in the queue;
+// `(a.ageSec || 0)` (orderWallAlerts' old form) has the same hole AND also
+// conflates "unknown" with a legitimate ageSec===0 (a genuinely brand-new
+// alert). Treat a non-finite/missing age as "oldest" (Infinity) so it sorts
+// to the end — the conservative direction for something we don't actually
+// know the urgency of — never poisoning the comparison with NaN the way the
+// rest of this file already guards severity-rank fallbacks against.
+function compareAgeSec(a, b) {
+  var av = (typeof a === 'number' && isFinite(a)) ? a : Infinity;
+  var bv = (typeof b === 'number' && isFinite(b)) ? b : Infinity;
+  // Infinity - Infinity is NaN — guard the both-unknown case explicitly so
+  // two unknown-age alerts tie instead of poisoning the sort.
+  if (av === Infinity && bv === Infinity) return 0;
+  return av - bv;
+}
+
 function orderWallAlerts(alerts) {
   var sevRank = { critical: 0, warn: 1, info: 2 };
   return (alerts || []).slice().sort(function (a, b) {
@@ -279,20 +396,40 @@ function orderWallAlerts(alerts) {
     var ra = sevRank[a.sev] != null ? sevRank[a.sev] : 99;
     var rb = sevRank[b.sev] != null ? sevRank[b.sev] : 99;
     if (ra !== rb) return ra - rb;
-    return (a.ageSec || 0) - (b.ageSec || 0);
+    return compareAgeSec(a.ageSec, b.ageSec);
   });
+}
+
+// OPS-015: shared error-text normalizer so every page's toast handler can
+// route backend errors through zh-TW labels instead of raw English err.message.
+// Previously defined only inside app.jsx's closure — unreachable from pages
+// like status.jsx that also need it. Pure function, no app.jsx state.
+function actionErrorText(e) {
+  if (!e) return '未知錯誤';
+  if (e.timeout || e.status === 0) return '連線逾時 — 指令可能已送出，請重新整理後確認狀態';
+  if (e.status === 401) return '登入階段已逾時，請重新登入';
+  if (e.status === 403) return '權限不足，無法執行此操作';
+  if (e.status === 409) return e.detail ? String(e.detail) : '此警報已被其他操作員處理';
+  if (e.detail) return Array.isArray(e.detail) ? e.detail.join('; ') : String(e.detail);
+  // Prefer the error's own message over a generic HTTP-status label — apiFetch
+  // stamps useful context into .message (e.g. "HTTP 403 on /api/audit"), while
+  // "伺服器錯誤 (HTTP 500)" tells the operator nothing they can act on.
+  if (e.message) return String(e.message);
+  if (e.status) return '伺服器錯誤 (HTTP ' + e.status + ')';
+  return String(e);
 }
 
 Object.assign(window, {
   RESOLVE_TEMPLATES, RUNBOOKS, STALE_ACK_THRESHOLD,
-  fmtAge, ageColor, sevMeta, alertTypeMap,
-  stateMeta, detectorHealthMeta,
+  fmtAge, fmtAgeOrDash, ageColor, sevMeta, alertTypeMap,
+  stateMeta, detectorHealthMeta, actionErrorText,
 });
 
 window.alertTypeLabel = alertTypeLabel;
 window.nodeStatusTone = nodeStatusTone;
 window.Z_LAYER = Z_LAYER;
 window.formatDurationShort = formatDurationShort;
+window.fmtTs = fmtTs;
 window.nextToasts = nextToasts;
 window.probeSessionOnce = probeSessionOnce;
 window.liveClockLabel = liveClockLabel;
@@ -300,3 +437,8 @@ window.wallTileFrozen = wallTileFrozen;
 window.effectiveTheme = effectiveTheme;
 window.activeAlertCount = activeAlertCount;
 window.orderWallAlerts = orderWallAlerts;
+window.compareAgeSec = compareAgeSec;
+window.VALID_PAGES = VALID_PAGES;
+window.sanitizePage = sanitizePage;
+window.describeLoadFailures = describeLoadFailures;
+window.resolveSelectedId = resolveSelectedId;

@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as FastAPIResponse
 
-from ..auth import verify_api_key, verify_api_key_or_session, verify_node_id
+from ..auth import verify_api_key, verify_api_key_or_session, verify_node_id, verify_node_binding
 from ..timeutil import utcnow
 
 # Configure logging
@@ -188,6 +188,12 @@ async def receive_snapshot(
     # the body / storing). No-op when ALLOWED_NODE_IDS is empty -> backward compatible.
     verify_node_id(node_id)
 
+    # Enforce per-node key binding: a key bound to a specific node cannot act
+    # under a different node_id. No-op when edge_auth_node is None (shared key
+    # or session auth). Must happen before reading body to reject cross-node
+    # claims before buffering potentially large (up to 5 MB) JPEG data.
+    verify_node_binding(request, node_id)
+
     # Read the raw JPEG bytes from request body
     jpeg_bytes = await request.body()
     
@@ -321,9 +327,19 @@ async def clear_snapshot(
 ):
     """
     Clear the snapshot for a node.
-    
+
     - **node_id**: The edge node identifier
     """
+    # Enforce per-node key binding: a key bound to a specific node cannot
+    # clear a different node's snapshot. No-op when edge_auth_node is None
+    # (shared key or session auth). Binding-only (mirrors the ingest
+    # preamble's verify_node_binding call, not its verify_node_id call --
+    # this handler never builds a filesystem path from node_id, so the
+    # allowlist/path-traversal defense verify_node_id exists for doesn't
+    # apply here; adding it would be new, out-of-scope allowlist behavior
+    # rather than the binding-gap fix this endpoint needs).
+    verify_node_binding(request, node_id)
+
     snapshots: Dict[str, Dict[str, Any]] = request.app.state.latest_snapshots
     
     if node_id in snapshots:
