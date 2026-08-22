@@ -193,6 +193,28 @@ function App({ initialError = null }) {
   const [alerts, setAlerts] = useStateA(window.ALERTS ?? []);
   // load-bearing: setNodes() forces re-render so window.NODES reads pick up new data. DO NOT remove.
   const [nodes, setNodes] = useStateA(window.NODES ?? []);
+  // Per-display node hide (declutter). Seeded from localStorage once; every
+  // mutation persists through the try/catch-guarded data.jsx helper. Held as a
+  // Set for O(1) membership in the shared filterVisibleNodes.
+  const [hiddenIds, setHiddenIds] = useStateA(() => new Set(window.loadHiddenNodes()));
+  const onHideNode = useCallbackA((id) => {
+    setHiddenIds(prev => {
+      const next = new Set(prev); next.add(id);
+      window.saveHiddenNodes(Array.from(next));
+      return next;
+    });
+  }, []);
+  const onUnhideNode = useCallbackA((id) => {
+    setHiddenIds(prev => {
+      const next = new Set(prev); next.delete(id);
+      window.saveHiddenNodes(Array.from(next));
+      return next;
+    });
+  }, []);
+  // Hidden nodes drop out of the wall + monitor grid (presentational only — the
+  // status page keeps the FULL list as the management surface, and fleet totals
+  // are unaffected).
+  const visibleNodes = window.filterVisibleNodes(nodes, hiddenIds);
   // C-8: NodeSidePanel history was previously read directly from
   // window.NODE_HISTORY, which is non-reactive — the panel showed stale
   // events until re-opened. Hoist history into React state so refresh() /
@@ -1656,8 +1678,8 @@ function App({ initialError = null }) {
     const wrap = (el) => <ErrorBoundary key={page} onEscape={() => setPage(page === 'alerts' ? 'status' : 'alerts')}>{el}</ErrorBoundary>;
     switch (page) {
       case 'alerts': return wrap(<window.AlertsPage density={tweaks.density} selectedId={selectedId} setSelectedId={setSelectedId} alerts={alerts} onAck={onAck} onResolve={onResolve} onSnooze={onSnooze} onUnsnooze={onUnsnooze} onRefresh={refresh} onVisibleChange={onVisibleAlertsChange} ackedIds={ackedIds} resolveNote={resolveNote} setResolveNote={setResolveNote} busy={alertBusy} nodes={nodes} nodeHistory={nodeHistory}/>);
-      case 'monitor': return wrap(<window.MonitorPage nodes={nodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
-      case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh}/>);
+      case 'monitor': return wrap(<window.MonitorPage nodes={visibleNodes} activeAlerts={activeAlerts} onSelectNode={onSelectNode}/>);
+      case 'status': return wrap(<window.StatusPage nodes={nodes} onSelectNode={onSelectNode} onRefresh={refresh} hiddenIds={hiddenIds} onHideNode={onHideNode} onUnhideNode={onUnhideNode}/>);
       case 'pumps': return wrap(<window.PumpsPage nodes={nodes} onSelectNode={onSelectNode} showToast={showToast}/>);
       case 'weather': return wrap(<window.WeatherPage showToast={showToast} onRefresh={refresh}/>);
       case 'handover': return wrap(<window.HandoverPage/>);
@@ -1759,7 +1781,7 @@ function App({ initialError = null }) {
           </div>
         ) : (
           // NEW-UX-016: pass activeAlerts (excludes resolved), not raw alerts.
-          <WallView alerts={activeAlerts} nodes={nodes} unackCount={unackCount} dataWarnings={dataWarnings}/>
+          <WallView alerts={activeAlerts} nodes={visibleNodes} unackCount={unackCount} dataWarnings={dataWarnings} onHideNode={onHideNode}/>
         )}
       </ErrorBoundary>
       {/* SHL-2: the exit. Deliberately rendered OUTSIDE the ErrorBoundary
@@ -2024,7 +2046,7 @@ function WallClock() {
   return <div className="font-mono tnum text-base text-ink-secondary">{new Date(now).toLocaleTimeString('zh-TW', { hour12: false })}</div>;
 }
 
-function WallView({ alerts, nodes, unackCount, dataWarnings }) {
+function WallView({ alerts, nodes, unackCount, dataWarnings, onHideNode }) {
   const sorted = [...(nodes ?? [])].sort((a, b) => {
     const rank = { offline: 0, critical: 1, warn: 2, online: 3 };
     // Unknown/new status codes shouldn't NaN-sort themselves to random positions.
@@ -2100,9 +2122,20 @@ function WallView({ alerts, nodes, unackCount, dataWarnings }) {
         <div className="flex flex-col min-h-0">
           <div className="grid grid-cols-3 gap-3 min-h-0 overflow-hidden flex-1">
             {sorted.slice(0, 9).map(n => (
-              <div key={n.id} className="bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
+              <div key={n.id} className="group bg-surface-panel rounded border border-border-subtle overflow-hidden relative">
                 <div className={`relative h-full snapshot-placeholder ${window.wallTileFrozen(n) ? 'snapshot-frozen' : ''}`}>
                   <WallSnapshot node={n} iconSize={64}/>
+                  {(n.type === 'camera' || n.type === 'pump') && onHideNode && (
+                    <button
+                      type="button"
+                      title="從監控牆隱藏此節點"
+                      aria-label="從監控牆隱藏此節點"
+                      onClick={(e) => { e.stopPropagation(); onHideNode(n.id); }}
+                      className="absolute top-2 right-2 z-10 w-7 h-7 rounded flex items-center justify-center bg-black/50 text-white/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity hover:bg-black/70"
+                    >
+                      <Icon.EyeOff size={14}/>
+                    </button>
+                  )}
                   <div className={`absolute top-2 left-2 w-4 h-4 rounded-full bg-sev-${n.status === 'offline' || n.status === 'critical' ? 'critical' : n.status === 'warn' ? 'warn' : 'ok'} ring-2 ring-black/50 ${n.status === 'offline' || n.status === 'critical' ? 'animate-live-blink' : ''}`}></div>
                   {n.status === 'offline' && (
                     <div className="absolute inset-0 flex items-center justify-center bg-black/40">
