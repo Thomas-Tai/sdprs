@@ -1,0 +1,11 @@
+[Unit]
+Description=SDPRS edge glass on-demand update (dashboard "Update now")
+# On-demand only: started by edge_glass via sudo, or by an operator. NO timer,
+# NO [Install] — the nightly cadence is sdprs-edge-update.timer.
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/sdprs/edge_autoupdate.sh --manual
+SyslogIdentifier=sdprs-edge-update
+TimeoutStartSec=600

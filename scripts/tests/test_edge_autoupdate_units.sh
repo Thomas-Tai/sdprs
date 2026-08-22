@@ -24,5 +24,22 @@ has sdprs-edge-update.conf '^BRANCH="edge-release"'
 has sdprs-edge-update.conf '^QUIET_START="03:00"'
 has sdprs-edge-update.conf '^KEEP_SNAPSHOTS="3"'
 
+# --- Phase 2: manual on-demand unit ---
+has sdprs-edge-update-manual.service '^\[Service\]'
+has sdprs-edge-update-manual.service '^Type=oneshot'
+has sdprs-edge-update-manual.service '^ExecStart=/opt/sdprs/edge_autoupdate\.sh --manual'
+has sdprs-edge-update-manual.service '^User=root'
+has sdprs-edge-update-manual.service '^SyslogIdentifier=sdprs-edge-update'
+
+absent() { if ! grep -qE "$2" "$SYS/$1" 2>/dev/null; then PASS=$((PASS+1)); echo "  ok   $1 :: absent $2"; else FAIL=$((FAIL+1)); echo "  FAIL $1 :: unexpected $2"; fi; }
+absent sdprs-edge-update-manual.service '^\[Install\]'
+
+# --- Phase 2: installer wires sudoers (visudo-gated) + installs manual unit ---
+INST="$HERE/../edge_autoupdate_install.sh"
+hasf() { if grep -qE "$2" "$1" 2>/dev/null; then PASS=$((PASS+1)); echo "  ok   $(basename "$1") :: $2"; else FAIL=$((FAIL+1)); echo "  FAIL $(basename "$1") :: $2"; fi; }
+hasf "$INST" '/etc/systemd/system/sdprs-edge-update-manual\.service'
+hasf "$INST" 'install -m 0440'
+hasf "$INST" 'visudo -cf'
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

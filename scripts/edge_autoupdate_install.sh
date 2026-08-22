@@ -21,6 +21,7 @@ echo "[2/5] install updater + units"
 install -m 0755 "$TMP/scripts/edge_autoupdate.sh"                    /opt/sdprs/edge_autoupdate.sh
 install -m 0644 "$TMP/edge_glass/systemd/sdprs-edge-update.service"  /etc/systemd/system/sdprs-edge-update.service
 install -m 0644 "$TMP/edge_glass/systemd/sdprs-edge-update.timer"    /etc/systemd/system/sdprs-edge-update.timer
+install -m 0644 "$TMP/edge_glass/systemd/sdprs-edge-update-manual.service" /etc/systemd/system/sdprs-edge-update-manual.service
 if [ ! -f /etc/sdprs-edge-update.conf ]; then
   install -m 0644 "$TMP/edge_glass/systemd/sdprs-edge-update.conf"   /etc/sdprs-edge-update.conf
   echo "      wrote /etc/sdprs-edge-update.conf (default)"
@@ -37,6 +38,19 @@ if [ ! -f /opt/sdprs/.edge_deployed_sha ]; then
 else
   echo "      kept existing /opt/sdprs/.edge_deployed_sha"
 fi
+
+echo "[*] install narrow sudoers for dashboard 'Update now'"
+SYSTEMCTL_BIN="$(command -v systemctl || echo /usr/bin/systemctl)"
+SUDOERS_TMP="$(mktemp)"
+# Grant the sdprs user exactly one command: start the on-demand update unit.
+printf 'sdprs ALL=(root) NOPASSWD: %s start --no-block sdprs-edge-update-manual.service\n' "$SYSTEMCTL_BIN" > "$SUDOERS_TMP"
+if visudo -cf "$SUDOERS_TMP" >/dev/null 2>&1; then
+  install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/sdprs-edge-update
+  echo "      wrote /etc/sudoers.d/sdprs-edge-update ($SYSTEMCTL_BIN)"
+else
+  echo "!! sudoers validation FAILED — NOT installing (dashboard Update-now will be unavailable)" >&2
+fi
+rm -f "$SUDOERS_TMP"
 
 echo "[4/5] enable timer"
 systemctl daemon-reload
