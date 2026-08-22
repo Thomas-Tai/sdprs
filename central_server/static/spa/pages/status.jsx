@@ -408,6 +408,13 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
   // What to call the client in operator-facing copy. Never used as an id.
   const clientLabel = (t) => (t && t.clientName) || (t && t.clientId) || '';
   const [deleteBusy, setDeleteBusy] = useState_p(false);
+  // Edge-node delete (glass camera / pump). A SEPARATE sibling of the webcam
+  // delete flow above — different blast radius (this node + its own events/
+  // pump_readings, audit preserved) and a different, non-camera-enumerating
+  // confirm body. Reuses the generic DELETE /api/nodes/{id} endpoint via
+  // window.SDPRS_API.deleteNode.
+  const [edgeDeleteTarget, setEdgeDeleteTarget] = useState_p(null); // { id, name, type, status } | null
+  const [edgeDeleteBusy, setEdgeDeleteBusy] = useState_p(false);
   // Every camera row that belongs to the same client PC. Deleting the client
   // takes ALL of them down, so the confirm dialog has to enumerate them from
   // the FULL node list — not `filtered`, or an active type/status/location
@@ -428,13 +435,14 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
       if (revokeTarget) { if (!revokeBusy) setRevokeTarget(null); return; }
       if (clearKeyTarget) { if (!clearKeyBusy) setClearKeyTarget(null); return; }
       if (deleteTarget) { if (!deleteBusy) setDeleteTarget(null); return; }
+      if (edgeDeleteTarget) { if (!edgeDeleteBusy) setEdgeDeleteTarget(null); return; }
       if (showAddModal) { if (!createdKey && !addBusy) setShowAddModal(false); return; }
       if (revokedKey) { setRevokedKey(null); return; }
       if (nodeKeyRevealed) { setNodeKeyRevealed(null); return; }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
+  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, edgeDeleteTarget, edgeDeleteBusy, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
   const confirmDeleteWebcam = () => {
     if (deleteBusy || !deleteTarget) return;
     // G1 guard (same as SnoozeRow/StreamRow): without the API bundle the
@@ -469,6 +477,34 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
       })
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '刪除失敗: ' + window.actionErrorText(err) }); })
       .finally(() => { if (mountedRef.current) setDeleteBusy(false); });
+  };
+  // Edge-node delete — mirrors confirmDeleteWebcam's mechanics exactly:
+  // G1 API guard (toast, no latch), busy latch, 404-treated-as-already-gone
+  // (refresh like success), mountedRef guard, finally clears busy. Sends the
+  // node's OWN id (unlike the webcam flow, which addresses the owning client).
+  const confirmDeleteEdge = () => {
+    if (edgeDeleteBusy || !edgeDeleteTarget) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.deleteNode)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    const target = edgeDeleteTarget;
+    if (!target.id) {
+      setToast({ tone: 'error', msg: '此列缺少節點識別碼，無法刪除' });
+      return;
+    }
+    setEdgeDeleteBusy(true);
+    Promise.resolve(api.deleteNode(target.id))
+      .catch(err => { if (err && err.status === 404) return; throw err; })
+      .then(() => {
+        if (!mountedRef.current) return;
+        setEdgeDeleteTarget(null);
+        setToast({ tone: 'success', msg: `節點「${target.name || target.id}」已刪除` });
+        return typeof onRefresh === 'function' ? Promise.resolve(onRefresh()) : undefined;
+      })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '刪除失敗: ' + window.actionErrorText(err) }); })
+      .finally(() => { if (mountedRef.current) setEdgeDeleteBusy(false); });
   };
   // OPS-016 / NEW-UX-004: in-app revoke confirmation — mirrors confirmDeleteWebcam
   // above. Replaces the old native confirm() that blocked the tab and had no
@@ -792,6 +828,24 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                         onRevealed={(node, apiKey) => setNodeKeyRevealed({ nodeId: node.id, name: node.name, apiKey })}
                         onRequestClear={(node) => setClearKeyTarget({ nodeId: node.id, name: node.name })}
                         onError={err => setToast({ tone: 'error', msg: '設定金鑰失敗: ' + window.actionErrorText(err) })}/>
+                      {(n.type === 'camera' || n.type === 'pump') && (
+                        <button
+                          title={n.status === 'offline'
+                            ? (n.type === 'pump' ? '刪除此抽水站節點' : '刪除此攝影機節點')
+                            : '節點仍在線；若只想從畫面移除請用「隱藏」。刪除僅適用於已離線／退役節點。'}
+                          aria-label={n.status === 'offline' ? '刪除節點' : '節點在線，無法刪除；請改用隱藏'}
+                          disabled={n.status !== 'offline'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (n.status !== 'offline') return;
+                            setEdgeDeleteTarget({ id: n.id, name: n.name, type: n.type, status: n.status });
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+                          className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          刪除
+                        </button>
+                      )}
                       {n.type === 'webcam' && (
                         <button
                           title={n.clientId
@@ -1062,6 +1116,42 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
               >
                 {clearKeyBusy ? '清除中...' : '確定清除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Edge-node delete confirmation — sibling of the webcam delete modal.
+          Backdrop-dismiss disabled while in flight. */}
+      {edgeDeleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="刪除節點"
+          onClick={() => { if (!edgeDeleteBusy) setEdgeDeleteTarget(null); }}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">刪除節點</h3>
+            <p className="text-xs text-ink-secondary mb-2">
+              確定要刪除節點「
+              <span className="text-ink-primary font-bold">{edgeDeleteTarget.name || edgeDeleteTarget.id}</span>
+              」？將永久移除此節點及其歷史資料（事件、水位讀數）；稽核紀錄保留，此操作無法復原。
+            </p>
+            {edgeDeleteTarget.type === 'pump' && (
+              <p className="text-xs text-sev-warn font-bold mb-2">⚠ 這只會從主控台移除此節點；實體裝置仍會依本地控制邏輯繼續運作、不會停止。</p>
+            )}
+            <p className="text-xs text-sev-warn font-bold mb-4">⚠ 若此節點稍後重新連線，將以新節點身分重新出現。</p>
+            <div className="flex gap-2">
+              <button
+                disabled={edgeDeleteBusy}
+                onClick={() => setEdgeDeleteTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={edgeDeleteBusy}
+                onClick={confirmDeleteEdge}
+                className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
+              >
+                {edgeDeleteBusy ? '刪除中...' : '確定刪除'}
               </button>
             </div>
           </div>
