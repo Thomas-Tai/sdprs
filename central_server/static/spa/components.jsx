@@ -318,12 +318,19 @@ const SnapshotImage = ({ node, iconSize = 48 }) => {
   // failed (not just a boolean) so the next frame — a new URL — retries
   // automatically instead of pinning the tile to the fallback until remount.
   if (wantsLiveImg && node.snapshotTimestamp && failedSrc !== src) {
+    // Edge cameras are a fixed 16:9 and fill the tile cleanly, so object-cover
+    // (crop-to-fill) is right for them — no letterbox on the NOC wall. Webcams
+    // ingest whatever aspect the client sends (portrait/4:3/desktop capture),
+    // and object-cover cropped a mismatched webcam down to a strip ("bar") on
+    // the 4K 牆面模式. object-contain shows the FULL webcam frame (letterboxed
+    // against the tile's dark panel) instead of cropping it.
+    const objectFit = node.type === 'webcam' ? 'object-contain' : 'object-cover';
     return (
       <img
         src={src}
         alt={`${node.name || node.id} 即時畫面`}
         onError={() => setFailedSrc(src)}
-        className="absolute inset-0 w-full h-full object-cover"
+        className={`absolute inset-0 w-full h-full ${objectFit}`}
       />
     );
   }
