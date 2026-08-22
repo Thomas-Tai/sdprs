@@ -30,8 +30,13 @@ fi
 
 echo "[3/5] seed deployed SHA + runtime dir"
 mkdir -p /run/sdprs
-git -C "$TMP" rev-parse HEAD > /opt/sdprs/.edge_deployed_sha
-chown sdprs:sdprs /opt/sdprs/.edge_deployed_sha 2>/dev/null || true
+if [ ! -f /opt/sdprs/.edge_deployed_sha ]; then
+  git -C "$TMP" rev-parse HEAD > /opt/sdprs/.edge_deployed_sha
+  chown sdprs:sdprs /opt/sdprs/.edge_deployed_sha 2>/dev/null || true
+  echo "      seeded /opt/sdprs/.edge_deployed_sha (first bootstrap)"
+else
+  echo "      kept existing /opt/sdprs/.edge_deployed_sha"
+fi
 
 echo "[4/5] enable timer"
 systemctl daemon-reload
