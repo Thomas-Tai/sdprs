@@ -165,6 +165,7 @@ A "apply exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
 A "apply clones" "$(calls | grep -q 'git clone' && echo 1 || echo 0)" "$(calls)"
 A "apply snapshots (tar czf)" "$(calls | grep -q 'tar czf' && echo 1 || echo 0)" "$(calls)"
 A "apply rsyncs" "$(calls | grep -q 'rsync' && echo 1 || echo 0)" "$(calls)"
+A "apply rsync uses checksum flag (-aic)" "$(calls | grep -q 'rsync -aic' && echo 1 || echo 0)" "$(calls)"
 A "apply restarts service" "$(calls | grep -q 'systemctl restart' && echo 1 || echo 0)" "$(calls)"
 A "apply advances SHA to new" "$([ "$(sha)" = "new" ] && echo 1)" "$(sha)"
 cleanup

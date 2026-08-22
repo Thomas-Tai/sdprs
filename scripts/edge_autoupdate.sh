@@ -51,7 +51,7 @@ parse_args() {
     case "$a" in
       --manual)  MANUAL=1 ;;
       --dry-run) DRY=1 ;;
-      *) log "unknown arg: $a" ;;
+      *) log "unknown arg: $a — aborting"; exit 2 ;;
     esac
   done
 }
@@ -162,12 +162,12 @@ apply_update() {
   fi
 
   local out1 out2 rc1 rc2
-  out1="$("$RSYNC" -ai \
+  out1="$("$RSYNC" -aic \
     --exclude='config.zeabur.yaml' --exclude='config.yaml' --exclude='.env' --exclude='.env.*' \
     --exclude='venv/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.log' \
     --exclude='events/' --exclude='buffer/' --exclude='data/' \
     "$TMP/edge_glass/" "$DEST/")"; rc1=$?
-  out2="$("$RSYNC" -ai --exclude='__pycache__/' --exclude='*.pyc' \
+  out2="$("$RSYNC" -aic --exclude='__pycache__/' --exclude='*.pyc' \
     "$TMP/shared/" "$DEST/shared/")"; rc2=$?
 
   if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
@@ -185,6 +185,7 @@ apply_update() {
 
 health_check() {
   local polls base i active cur
+  [ "${HEALTH_INTERVAL:-0}" -lt 1 ] && HEALTH_INTERVAL=1
   polls=$(( HEALTH_TIMEOUT / HEALTH_INTERVAL )); [ "$polls" -lt 1 ] && polls=1
   base="$("$SYSTEMCTL" show -p NRestarts --value "$SVC" 2>/dev/null || echo 0)"
   for ((i=0; i<polls; i++)); do
