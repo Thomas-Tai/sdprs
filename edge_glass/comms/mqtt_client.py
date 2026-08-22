@@ -22,6 +22,7 @@
 
 import json
 import logging
+import os
 import platform
 import socket
 import threading
@@ -67,6 +68,21 @@ from shared.mqtt_topics import (
 )
 
 logger = logging.getLogger("mqtt_client")
+
+
+def _read_deployed_version(path: str):
+    """Return the deployed commit SHA from the marker file, or None.
+
+    Must never raise: a missing/unreadable marker (a node bootstrapped before
+    Phase 2, or a dev run) simply reports no version rather than breaking the
+    heartbeat.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            sha = fh.read().strip()
+        return sha or None
+    except Exception:
+        return None
 
 
 class MQTTClient:
@@ -123,6 +139,13 @@ class MQTTClient:
 
         # 啟動時間
         self._start_time = time.monotonic()
+
+        # Deployed software version (full edge-release SHA) for the dashboard.
+        # Read once at startup — it only changes on an update, which restarts
+        # this process. Path overridable for tests.
+        self._version = _read_deployed_version(
+            os.environ.get("EDGE_DEPLOYED_SHA_FILE", "/opt/sdprs/.edge_deployed_sha")
+        )
 
         # 運行標誌
         self._running = False
@@ -306,6 +329,10 @@ class MQTTClient:
             "hostname": socket.gethostname(),
             # 承載該 IP 之網卡的 MAC——讓儀表板能對照硬體清冊辨識實體機。
             "mac": self._get_mac(local_ip),
+            # Deployed edge-release SHA so the dashboard can show each Pi's
+            # version + whether an update is available (Phase 2). None until a
+            # Phase-1+ node has a marker file.
+            "version": self._version,
         }
 
         # 發布
