@@ -141,4 +141,55 @@ module.exports = [
       A('a second click while in flight sends no second DELETE', calls.length === 1, JSON.stringify(calls));
     `,
   },
+
+  // ---------------------------------------- status.jsx: edge hide / unhide
+  {
+    name: 'node-hide status.jsx: hide button, default-exclude, reveal chip, unhide',
+    target: 'pages/status.jsx',
+    deps: ['icons.jsx', 'data.jsx', 'components.jsx'],
+    body: `
+      window.SDPRS_API = { snoozeNode: () => Promise.resolve(), unsnoozeNode: () => Promise.resolve(), deleteNode: () => Promise.resolve({}) };
+      const hideCalls = [], unhideCalls = [];
+      const cam  = { id: 'CAM-1', name: '西灣橋', type: 'camera', status: 'online', heartbeat: 5, upload: 5, snoozeMin: 0, temp: 30, level: null };
+      const pump = { id: 'PUMP-1', name: '泵站A', type: 'pump', status: 'online', heartbeat: 5, snoozeMin: 0, level: 40, voltage: 12.5, power: 'mains', cycles: 1 };
+      const render = (hiddenIds) => ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+        nodes: [cam, pump], onSelectNode: () => {}, onRefresh: () => {},
+        hiddenIds, onHideNode: (id) => hideCalls.push(id), onUnhideNode: (id) => unhideCalls.push(id),
+      })));
+
+      // --- nothing hidden: both rows show a hide (eye-off) button ---
+      render(new Set());
+      await settle();
+      const hideBtns = () => Array.from(container.querySelectorAll('button')).filter(b => (b.getAttribute('aria-label') || '') === '隱藏節點');
+      A('each edge row shows a hide button', hideBtns().length === 2, hideBtns().length);
+      const camRow = Array.from(container.querySelectorAll('tr')).find(r => r.textContent.indexOf('CAM-1') !== -1);
+      click(Array.from(camRow.querySelectorAll('button')).find(b => (b.getAttribute('aria-label') || '') === '隱藏節點'));
+      await settle();
+      A('clicking hide calls onHideNode(id)', hideCalls.length === 1 && hideCalls[0] === 'CAM-1', JSON.stringify(hideCalls));
+
+      // --- CAM-1 hidden: excluded from the default list; reveal chip shows (1) ---
+      render(new Set(['CAM-1']));
+      await settle();
+      const rowText = () => Array.from(container.querySelectorAll('tbody tr')).map(r => r.textContent).join('||');
+      A('a hidden node is excluded from the default list', rowText().indexOf('CAM-1') === -1, rowText());
+      A('the pump row is still shown', rowText().indexOf('PUMP-1') !== -1);
+      const chip = byText('button', '顯示已隱藏');
+      A('a 顯示已隱藏 (N) reveal chip appears with the count', !!chip && chip.textContent.indexOf('1') !== -1, chip && chip.textContent);
+
+      // --- reveal: the hidden row comes back, dimmed, with an unhide button ---
+      click(chip); await settle();
+      A('revealing shows the hidden row', rowText().indexOf('CAM-1') !== -1, rowText());
+      const hiddenRow = Array.from(container.querySelectorAll('tbody tr')).find(r => r.textContent.indexOf('CAM-1') !== -1);
+      A('the revealed row is marked 已隱藏', !!hiddenRow && hiddenRow.textContent.indexOf('已隱藏') !== -1);
+      const unhideBtn = hiddenRow && Array.from(hiddenRow.querySelectorAll('button')).find(b => (b.getAttribute('aria-label') || '') === '取消隱藏節點');
+      A('the revealed row has an unhide button', !!unhideBtn);
+      click(unhideBtn); await settle();
+      A('clicking unhide calls onUnhideNode(id)', unhideCalls.length === 1 && unhideCalls[0] === 'CAM-1', JSON.stringify(unhideCalls));
+
+      // --- no reveal chip when nothing is hidden ---
+      render(new Set());
+      await settle();
+      A('no reveal chip when nothing is hidden', !byText('button', '顯示已隱藏'));
+    `,
+  },
 ];

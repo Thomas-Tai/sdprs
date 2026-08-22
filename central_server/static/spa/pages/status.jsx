@@ -307,10 +307,11 @@ const NodeKeyRowButtons = ({ node, onRevealed, onRequestClear, onError }) => {
   );
 };
 
-const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
+const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set(), onHideNode, onUnhideNode }) => {
   const [typeFilter, setTypeFilter] = useState_p('all');    // all | camera | pump | webcam
   const [statusFilter, setStatusFilter] = useState_p('all'); // all | online | warn | critical | offline
   const [locationFilter, setLocationFilter] = useState_p('all');
+  const [showHidden, setShowHidden] = useState_p(false); // reveal hidden edge rows
   // OPS-013 / OPS-014: shared stream-health cache — one /api/stream/health
   // fetch covers ALL cameras (the endpoint returns the whole bridge state),
   // so N rows must NOT each fire their own identical scrape. A periodic
@@ -571,6 +572,17 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
     if (locationFilter !== 'all' && n.location !== locationFilter) return false;
     return true;
   }), [typeFilter, statusFilter, locationFilter, nodes]);
+  // Hide is presentational and applies only to edge rows (camera/pump). The
+  // count is taken across the FULL node list (not `filtered`) so siblings
+  // hidden under an active type/status/location filter are still discoverable
+  // via the reveal chip. The rendered list drops hidden rows unless revealed.
+  const isEdge = (n) => n.type === 'camera' || n.type === 'pump';
+  const hiddenCount = useMemo_p(
+    () => nodes.filter(n => isEdge(n) && hiddenIds.has(n.id)).length,
+    [nodes, hiddenIds]);
+  const visibleFiltered = useMemo_p(
+    () => (showHidden ? filtered : filtered.filter(n => !hiddenIds.has(n.id))),
+    [filtered, showHidden, hiddenIds]);
   // Cycle through preset values for the chip dropdowns (real dropdown UI is
   // a bigger design decision — keep the click surface working with cycling).
   const cycleType = () => setTypeFilter(t =>
@@ -609,7 +621,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
       <div className="px-4 py-2.5 border-b border-border-subtle bg-surface-panel flex items-center gap-3 flex-shrink-0">
         <h1 className="text-sm font-semibold">節點狀態</h1>
         <span className="text-xs text-ink-muted tnum">
-          {filtered.length}{filtered.length !== nodes.length && ` / ${nodes.length}`} 個節點
+          {visibleFiltered.length}{visibleFiltered.length !== nodes.length && ` / ${nodes.length}`} 個節點
         </span>
         <div className="flex-1"></div>
         <div className="flex gap-1.5">
@@ -638,6 +650,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
             onClear={locationFilter !== 'all' ? () => setLocationFilter('all') : undefined}>
             位置: <span className="max-w-[80px] truncate inline-block align-middle">{locationLabel}</span>
           </FilterChip>
+          {hiddenCount > 0 && (
+            <FilterChip active={showHidden} onClick={() => setShowHidden(s => !s)}>
+              顯示已隱藏 ({hiddenCount})
+            </FilterChip>
+          )}
         </div>
         <button
           onClick={() => { setShowAddModal(true); setCreatedKey(null); setNewClientName(''); }}
@@ -663,7 +680,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && (
+            {visibleFiltered.length === 0 && (
               <tr>
                 <td colSpan={10} className="p-0">
                   <div className="py-8">
@@ -674,7 +691,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                 </td>
               </tr>
             )}
-            {filtered.map(n => {
+            {visibleFiltered.map(n => {
               // A pump with a live heartbeat but no water_level reading (sensor
               // down / not yet reported) should not read as green — downgrade
               // the badge tone locally so the row doesn't lie about health.
@@ -689,7 +706,7 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
               const uploadIssue = n.heartbeat != null && n.heartbeat < 60 && n.upload != null && n.upload > 600;
               return (
                 <tr key={n.id}
-                  className="border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer"
+                  className={`border-b border-border-subtle/60 hover:bg-surface-elevated/60 group cursor-pointer ${isEdge(n) && hiddenIds.has(n.id) ? 'opacity-60' : ''}`}
                   onClick={() => onSelectNode && onSelectNode(n)}>
                   <td className="px-3 py-2 font-mono font-semibold">
                     {n.id}
@@ -698,6 +715,11 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                     {n.snoozeMin > 0 && (
                       <span className="ml-1.5 inline-flex items-center gap-0.5 text-[9px] font-bold px-1 py-0.5 rounded bg-sev-warn/15 text-sev-warn align-middle">
                         <Icon.BellOff size={8} strokeWidth={2.5}/>{n.snoozeMin}m
+                      </span>
+                    )}
+                    {isEdge(n) && hiddenIds.has(n.id) && (
+                      <span className="ml-1.5 inline-flex items-center gap-0.5 text-[9px] font-bold px-1 py-0.5 rounded bg-ink-dim/15 text-ink-muted align-middle">
+                        <Icon.EyeOff size={8} strokeWidth={2.5}/>已隱藏
                       </span>
                     )}
                   </td>
@@ -844,6 +866,36 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh }) => {
                           className="h-8 px-2 rounded text-[11px] text-ink-muted hover:text-sev-critical hover:bg-sev-critical/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           刪除
+                        </button>
+                      )}
+                      {isEdge(n) && !hiddenIds.has(n.id) && (
+                        <button
+                          title="從畫面隱藏此節點"
+                          aria-label="隱藏節點"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onHideNode) onHideNode(n.id);
+                            setToast({ tone: 'info', msg: `已隱藏節點「${n.name || n.id}」` });
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+                          className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:bg-surface-overlay hover:text-ink-primary"
+                        >
+                          <Icon.EyeOff size={14}/>
+                        </button>
+                      )}
+                      {isEdge(n) && hiddenIds.has(n.id) && (
+                        <button
+                          title="取消隱藏此節點"
+                          aria-label="取消隱藏節點"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onUnhideNode) onUnhideNode(n.id);
+                            setToast({ tone: 'info', msg: '已取消隱藏' });
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+                          className="w-8 h-8 rounded flex items-center justify-center text-sev-info hover:bg-sev-info/10"
+                        >
+                          <Icon.Eye size={14}/>
                         </button>
                       )}
                       {n.type === 'webcam' && (
