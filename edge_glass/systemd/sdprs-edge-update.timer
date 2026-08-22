@@ -1,0 +1,16 @@
+# Nightly, staggered edge auto-update. RandomizedDelaySec spreads the fleet
+# across 03:00-03:30 with no cross-node coordination; Persistent catches up a
+# missed run after the node was off (the updater's own window guard prevents a
+# daytime catch-up from restarting the camera).
+[Unit]
+Description=SDPRS edge glass auto-update timer (nightly, staggered)
+Documentation=https://github.com/Thomas-Tai/sdprs
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=sdprs-edge-update.service
+
+[Install]
+WantedBy=timers.target

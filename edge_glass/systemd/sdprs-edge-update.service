@@ -1,0 +1,20 @@
+# SDPRS edge glass auto-update — oneshot, run by sdprs-edge-update.timer.
+# Installed to /etc/systemd/system/ by scripts/edge_autoupdate_install.sh.
+#
+# 啟用: sudo systemctl enable --now sdprs-edge-update.timer
+# 日誌: journalctl -u sdprs-edge-update -f
+[Unit]
+Description=SDPRS edge glass auto-update (rsync edge-release, health-check, rollback)
+Documentation=https://github.com/Thomas-Tai/sdprs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/sdprs/edge_autoupdate.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sdprs-edge-update
+# clone + rsync + health-check window (60s) can take a couple of minutes.
+TimeoutStartSec=600
