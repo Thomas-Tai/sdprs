@@ -359,6 +359,44 @@ function resolveSelectedId(restoredId, savedId, alerts) {
   return list.length > 0 ? list[0].id : null;
 }
 
+// Node hide/declutter (per-display). Hidden node ids live in localStorage
+// under sdprs.hiddenNodes as a JSON array of node_id strings — a per-display
+// convenience, deliberately NOT server-side (design spec §9). Every read and
+// write is try/catch-wrapped so a private window, a cleared/blocked store, or
+// a throwing accessor degrades to "nothing hidden" instead of taking the page
+// down. loadHiddenNodes always returns a fresh array; a corrupt / non-array /
+// non-string-element payload is treated as empty.
+const HIDDEN_NODES_KEY = 'sdprs.hiddenNodes';
+function loadHiddenNodes() {
+  try {
+    const raw = window.localStorage.getItem(HIDDEN_NODES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(id => typeof id === 'string');
+  } catch (_) {
+    return [];
+  }
+}
+function saveHiddenNodes(ids) {
+  try {
+    const arr = Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [];
+    window.localStorage.setItem(HIDDEN_NODES_KEY, JSON.stringify(arr));
+  } catch (_) {
+    /* best-effort: storage unavailable — hide is a per-display convenience */
+  }
+}
+// The ONE filter both the wall (WallView) and the monitor grid apply, so a
+// hidden node drops out of BOTH — and, for the wall, before its offline-first
+// sort/slice. `hiddenIds` is a Set for O(1) membership; a null/absent/empty
+// set means "hide nothing". Presentational only — callers keep the FULL list
+// for fleet totals.
+function filterVisibleNodes(nodes, hiddenIds) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  if (!hiddenIds || typeof hiddenIds.has !== 'function' || hiddenIds.size === 0) return list;
+  return list.filter(n => !hiddenIds.has(n.id));
+}
+
 // WAL-M9: count only unacked (pending) alerts for the wall ticker header.
 function activeAlertCount(alerts) {
   return (alerts || []).filter(function (a) { return a.state !== 'acknowledged'; }).length;
@@ -442,3 +480,6 @@ window.VALID_PAGES = VALID_PAGES;
 window.sanitizePage = sanitizePage;
 window.describeLoadFailures = describeLoadFailures;
 window.resolveSelectedId = resolveSelectedId;
+window.loadHiddenNodes = loadHiddenNodes;
+window.saveHiddenNodes = saveHiddenNodes;
+window.filterVisibleNodes = filterVisibleNodes;
