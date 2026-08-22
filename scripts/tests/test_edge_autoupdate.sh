@@ -23,7 +23,9 @@ new_sandbox() {
 echo "git $*" >> "$CALLS_LOG"
 case "$1" in
   ls-remote) printf '%s\trefs/heads/edge-release\n' "${STUB_REMOTE_SHA:-}";;
-  clone)     dest="${@: -1}"; mkdir -p "$dest/edge_glass" "$dest/shared"; echo x > "$dest/edge_glass/m";;
+  clone)
+    if [ "${STUB_CLONE_FAIL:-}" = "1" ]; then exit 1; fi
+    dest="${@: -1}"; mkdir -p "$dest/edge_glass" "$dest/shared"; echo x > "$dest/edge_glass/m";;
   rev-parse) echo "${STUB_REMOTE_SHA:-0000000}";;
 esac
 exit 0
@@ -32,6 +34,7 @@ EOF
 #!/usr/bin/env bash
 echo "rsync $*" >> "$CALLS_LOG"
 if [ -n "${STUB_RSYNC_ITEMIZE:-}" ]; then echo "$STUB_RSYNC_ITEMIZE"; fi
+if [ "${STUB_RSYNC_FAIL:-}" = "1" ]; then exit 1; fi
 exit 0
 EOF
   cat > "$SB/bin/systemctl" <<'EOF'
@@ -39,7 +42,17 @@ EOF
 echo "systemctl $*" >> "$CALLS_LOG"
 case "$1" in
   is-active) echo "${STUB_ISACTIVE:-active}";;
-  show)      echo "${STUB_NRESTARTS:-0}";;
+  show)
+    if [ "${STUB_NRESTARTS_CLIMB:-}" = "1" ]; then
+      f="${STUB_NRESTARTS_FILE:-/tmp/.stub_nr_default}"
+      n="$(cat "$f" 2>/dev/null || echo 0)"
+      n=$((n+1))
+      echo "$n" > "$f"
+      echo "$n"
+    else
+      echo "${STUB_NRESTARTS:-0}"
+    fi
+    ;;
 esac
 exit 0
 EOF
@@ -174,6 +187,80 @@ rc=$?
 A "itemize-empty exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
 A "itemize-empty records SHA new" "$([ "$(sha)" = "new" ] && echo 1)" "$(sha)"
 A "itemize-empty does NOT restart" "$(calls | grep -q 'systemctl restart' && echo 0 || echo 1)" "$(calls)"
+cleanup
+
+# 9) clone fails -> apply_update aborts, SHA unchanged, no restart, exit non-zero
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_CLONE_FAIL=1 NOW_OVERRIDE=04:00
+rc=$?
+A "clone-fail exits non-zero" "$([ $rc -ne 0 ] && echo 1)" "rc=$rc"
+A "clone-fail leaves SHA old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+A "clone-fail does not restart" "$(calls | grep -q 'systemctl restart' && echo 0 || echo 1)" "$(calls)"
+cleanup
+
+# 10) rsync fails -> restore snapshot to keep DEST consistent, SHA unchanged, no restart
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_RSYNC_FAIL=1 NOW_OVERRIDE=04:00
+rc=$?
+A "rsync-fail exits non-zero" "$([ $rc -ne 0 ] && echo 1)" "rc=$rc"
+A "rsync-fail leaves SHA old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+A "rsync-fail restores snapshot (tar xzf)" "$(calls | grep -q 'tar xzf' && echo 1 || echo 0)" "$(calls)"
+A "rsync-fail does not restart" "$(calls | grep -q 'systemctl restart' && echo 0 || echo 1)" "$(calls)"
+cleanup
+
+# 11) ls-remote fails (empty remote sha / network down) -> exit 0, no clone, SHA unchanged
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA= NOW_OVERRIDE=04:00
+rc=$?
+A "ls-remote-fail exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
+A "ls-remote-fail does not clone" "$(calls | grep -q 'git clone' && echo 0 || echo 1)" "$(calls)"
+A "ls-remote-fail leaves SHA old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+cleanup
+
+# 12) health-check fails via climbing NRestarts (crash-loop) -> rollback, SHA stays old, exit non-zero
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    STUB_NRESTARTS_CLIMB=1 STUB_NRESTARTS_FILE="$SB/nr" NOW_OVERRIDE=04:00
+rc=$?
+A "climb-rollback exits non-zero" "$([ $rc -ne 0 ] && echo 1)" "rc=$rc"
+A "climb-rollback restores snapshot (tar xzf)" "$(calls | grep -q 'tar xzf' && echo 1 || echo 0)" "$(calls)"
+A "climb-rollback leaves SHA old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+cleanup
+
+# 13) prune_snapshots keeps only the newest KEEP_SNAPSHOTS (3) after a successful apply
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+for i in 1 2 3 4; do
+  f="$SB/state/edge_glass.backup.2026010${i}-000000.tgz"
+  : > "$f"
+  touch -d "2026-01-0${i}T00:00:00" "$f"
+done
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active NOW_OVERRIDE=04:00
+remaining=$(ls "$SB/state"/edge_glass.backup.*.tgz 2>/dev/null | wc -l | tr -d ' ')
+A "prune keeps only KEEP_SNAPSHOTS(3) files" "$([ "$remaining" = "3" ] && echo 1)" \
+  "remaining=$remaining $(ls "$SB/state"/edge_glass.backup.*.tgz 2>/dev/null)"
+cleanup
+
+# 14) in_window boundary: NOW_OVERRIDE=03:00 (inclusive start) -> guard passes, reaches ls-remote
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new NOW_OVERRIDE=03:00 -- --dry-run
+rc=$?
+A "window start (03:00) exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
+A "window start (03:00) passes guard (reaches ls-remote)" "$(calls | grep -q 'git ls-remote' && echo 1 || echo 0)" "$(calls)"
+cleanup
+
+# 15) in_window boundary: NOW_OVERRIDE=05:00 (exclusive end) -> deferred, never reaches ls-remote
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new NOW_OVERRIDE=05:00
+rc=$?
+A "window end (05:00) exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
+A "window end (05:00) does not reach ls-remote" "$(calls | grep -q 'git ls-remote' && echo 0 || echo 1)" "$(calls)"
 cleanup
 
 echo

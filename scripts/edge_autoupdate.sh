@@ -115,7 +115,11 @@ main() {
     log "[dry-run] would clone+snapshot+rsync+restart to $remote"; exit 0
   fi
 
-  apply_update "$remote"   # sets CHANGED; populates SNAP/TMP
+  if ! apply_update "$remote"; then   # sets CHANGED; populates SNAP/TMP
+    log "!! update apply failed — SHA not advanced, retry next window"
+    cleanup_tmp
+    exit 1
+  fi
 
   if [ -z "$CHANGED" ]; then
     log "edge_glass bytes unchanged — recording SHA, skipping restart"
@@ -141,25 +145,42 @@ main() {
 apply_update() {
   local remote="$1" stamp
   stamp="$(date +%Y%m%d-%H%M%S)"
-  TMP="$(mktemp -d)"; rm -rf "$TMP"
-  "$GIT" clone -q --depth 1 --branch "$BRANCH" "$REPO" "$TMP"
+  TMP="$(mktemp -d)"
+  if ! "$GIT" clone -q --depth 1 --branch "$BRANCH" "$REPO" "$TMP"; then
+    log "!! git clone failed — aborting update, SHA not advanced"
+    cleanup_tmp
+    return 1
+  fi
 
   SNAP="$STATE_DIR/edge_glass.backup.$stamp.tgz"
-  "$TAR" czf "$SNAP" \
+  if ! "$TAR" czf "$SNAP" \
     --exclude='edge_glass/venv' --exclude='edge_glass/events' --exclude='edge_glass/buffer' \
-    -C "$STATE_DIR" edge_glass
+    -C "$STATE_DIR" edge_glass; then
+    log "!! snapshot (tar czf) failed — aborting update, SHA not advanced"
+    cleanup_tmp
+    return 1
+  fi
 
-  local out1 out2
+  local out1 out2 rc1 rc2
   out1="$("$RSYNC" -ai \
     --exclude='config.zeabur.yaml' --exclude='config.yaml' --exclude='.env' --exclude='.env.*' \
     --exclude='venv/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.log' \
     --exclude='events/' --exclude='buffer/' --exclude='data/' \
-    "$TMP/edge_glass/" "$DEST/")"
+    "$TMP/edge_glass/" "$DEST/")"; rc1=$?
   out2="$("$RSYNC" -ai --exclude='__pycache__/' --exclude='*.pyc' \
-    "$TMP/shared/" "$DEST/shared/")"
+    "$TMP/shared/" "$DEST/shared/")"; rc2=$?
+
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    log "!! rsync failed (rc1=$rc1 rc2=$rc2) — restoring snapshot to keep DEST consistent, SHA not advanced"
+    restore_snapshot
+    cleanup_tmp
+    return 1
+  fi
+
   "$CHOWN" -R "$OWNER" "$DEST"
 
   if [ -n "$out1$out2" ]; then CHANGED=1; else CHANGED=""; fi
+  return 0
 }
 
 health_check() {
@@ -177,10 +198,14 @@ health_check() {
   return 0
 }
 
-rollback() {
-  [ -n "$SNAP" ] && [ -f "$SNAP" ] || { log "no snapshot to roll back to ($SNAP)"; return 1; }
+restore_snapshot() {
+  [ -n "$SNAP" ] && [ -f "$SNAP" ] || { log "no snapshot to restore ($SNAP)"; return 1; }
   "$TAR" xzf "$SNAP" -C "$STATE_DIR"
   "$CHOWN" -R "$OWNER" "$DEST"
+}
+
+rollback() {
+  restore_snapshot || return 1
   "$SYSTEMCTL" restart "$SVC"
   # deliberately DO NOT touch $DEPLOYED_SHA_FILE — node retries same target.
   log "rolled back to snapshot $SNAP"
