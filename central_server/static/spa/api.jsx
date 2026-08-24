@@ -470,7 +470,7 @@
       // when the server actually said so, never by defaulting a missing
       // value.
       version: n.version || null,
-      updateAvailable: n.update_available,
+      updateAvailable: (n.update_available ?? null),
     };
   }
 

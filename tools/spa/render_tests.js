@@ -1209,7 +1209,7 @@ ${PRELUDE}
       json: () => Promise.resolve(data), text: () => Promise.resolve(''),
     });
     window.fetch = (path) => (path.indexOf('/api/nodes') === 0)
-      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99', ip: '172.16.37.42', hostname: 'sdprs-glass-01', mac: 'dc:a6:32:2e:37:7f' }])
+      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99', ip: '172.16.37.42', hostname: 'sdprs-glass-01', mac: 'dc:a6:32:2e:37:7f', version: '723456fdeadbeef', update_available: true }])
       : jsonRes([]); // every other loader: benign empty payload
     const rl = await api.refreshLive();
     const mapped = ((rl && rl.nodes) || []).find(n => n.id === 'webcam_cam99');
@@ -1220,6 +1220,22 @@ ${PRELUDE}
     A('mapNode surfaces ip', !!mapped && mapped.ip === '172.16.37.42', mapped && mapped.ip);
     A('mapNode surfaces hostname', !!mapped && mapped.hostname === 'sdprs-glass-01', mapped && mapped.hostname);
     A('mapNode surfaces mac', !!mapped && mapped.mac === 'dc:a6:32:2e:37:7f', mapped && mapped.mac);
+    // Phase 2: version + update_available ride the SAME mapNode snake->camel
+    // contract; pin them the same end-to-end way (drive the REAL mapNode) so a
+    // dropped passthrough can't slip by. version is the full-SHA string;
+    // update_available is bool|null (unknown), carried through verbatim.
+    A('mapNode surfaces version', !!mapped && mapped.version === '723456fdeadbeef', mapped && mapped.version);
+    A('mapNode surfaces update_available as updateAvailable', !!mapped && mapped.updateAvailable === true, mapped && mapped.updateAvailable);
+
+    // Phase 2 「立即更新」: like deleteWebcamClient above, status.jsx guards its
+    // button on this export — silently dropping it from the public object would
+    // degrade the button to a no-op-plus-toast, so pin its presence AND shape.
+    A('SDPRS_API.triggerUpdate is a function', !!api && typeof api.triggerUpdate === 'function', api && typeof api.triggerUpdate);
+    const updCalls = [];
+    window.fetch = (path, opts) => { updCalls.push({ path: String(path), opts: opts || {} }); return jsonRes({ status: 'queued', node_id: 'glass_node_07' }); };
+    await Promise.resolve(api.triggerUpdate('glass_node_07'));
+    const updCall = updCalls.find(c => c.path.indexOf('/api/nodes/glass_node_07/update') !== -1);
+    A('triggerUpdate POSTs to /api/nodes/{id}/update', !!updCall && String(updCall.opts.method).toUpperCase() === 'POST', JSON.stringify(updCalls));
   } catch (e) {
     results.push({ name: 'api surface suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }
