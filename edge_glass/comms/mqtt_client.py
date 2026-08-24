@@ -141,10 +141,14 @@ class MQTTClient:
         self._start_time = time.monotonic()
 
         # Deployed software version (full edge-release SHA) for the dashboard.
-        # Read once at startup — it only changes on an update, which restarts
-        # this process. Path overridable for tests.
-        self._version = _read_deployed_version(
-            os.environ.get("EDGE_DEPLOYED_SHA_FILE", "/opt/sdprs/.edge_deployed_sha")
+        # Store the marker PATH and re-read it on every heartbeat (NOT cached at
+        # startup): the OTA updater restarts this service BEFORE it advances the
+        # marker (edge_autoupdate.sh: restart -> health-check -> write SHA), so a
+        # value cached at boot would report the PRE-update SHA until the next
+        # restart. Re-reading each send makes the reported version self-correct
+        # within one heartbeat after any update. Path overridable for tests.
+        self._version_file = os.environ.get(
+            "EDGE_DEPLOYED_SHA_FILE", "/opt/sdprs/.edge_deployed_sha"
         )
 
         # 運行標誌
@@ -330,9 +334,11 @@ class MQTTClient:
             # 承載該 IP 之網卡的 MAC——讓儀表板能對照硬體清冊辨識實體機。
             "mac": self._get_mac(local_ip),
             # Deployed edge-release SHA so the dashboard can show each Pi's
-            # version + whether an update is available (Phase 2). None until a
-            # Phase-1+ node has a marker file.
-            "version": self._version,
+            # version + whether an update is available (Phase 2). Re-read each
+            # send (see __init__) so it reflects the CURRENT marker after an OTA
+            # update without needing a service restart. None until a Phase-1+
+            # node has a marker file.
+            "version": _read_deployed_version(self._version_file),
         }
 
         # 發布

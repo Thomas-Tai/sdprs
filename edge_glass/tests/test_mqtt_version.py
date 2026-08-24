@@ -47,9 +47,30 @@ def test_heartbeat_includes_version_key():
     assert "version" in payload  # key always present (value may be None)
 
 
-def test_heartbeat_reports_set_version():
+def test_heartbeat_reports_marker_version(tmp_path):
+    marker = tmp_path / "sha"
+    marker.write_text("deadbeefcafe\n")
     client = _make_client()
-    client._version = "deadbeefcafe"
+    client._version_file = str(marker)
     client._publish_heartbeat()
     payload = json.loads(client._client.last_payload)
     assert payload["version"] == "deadbeefcafe"
+
+
+def test_heartbeat_rereads_marker_each_send(tmp_path):
+    """Phase 2.1: the reported version reflects the CURRENT marker on EVERY
+    heartbeat, not a value cached at startup. The OTA updater restarts this
+    process BEFORE it advances the marker (edge_autoupdate.sh: restart -> health
+    -> write SHA), so a boot-cached value would report the pre-update SHA until
+    the next restart. Re-reading each send self-corrects within one heartbeat."""
+    marker = tmp_path / "sha"
+    marker.write_text("aaaaaaa\n")
+    client = _make_client()
+    client._version_file = str(marker)
+    client._publish_heartbeat()
+    assert json.loads(client._client.last_payload)["version"] == "aaaaaaa"
+    # Marker advances mid-process, exactly as the updater does after the restart,
+    # with NO client reconstruction — the next heartbeat must reflect it.
+    marker.write_text("bbbbbbb\n")
+    client._publish_heartbeat()
+    assert json.loads(client._client.last_payload)["version"] == "bbbbbbb"
