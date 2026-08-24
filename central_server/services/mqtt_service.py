@@ -275,6 +275,7 @@ class MQTTService:
                     "ip": data.get("ip"),
                     "hostname": data.get("hostname"),
                     "mac": data.get("mac"),
+                    "version": data.get("version"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
 
@@ -285,7 +286,8 @@ class MQTTService:
                 "buffer_health": data.get("buffer_health"),
                 "visual_health": data.get("visual_health"),
                 "audio_health": data.get("audio_health"),
-                "uptime_seconds": data.get("uptime_seconds")
+                "uptime_seconds": data.get("uptime_seconds"),
+                "version": data.get("version")
             }
 
             if self.db:
@@ -547,6 +549,18 @@ class MQTTService:
         payload = {"timestamp": utcnow().isoformat()}
         
         logger.info(f"Sending {command} command to {node_id}")
+        return self.publish(topic, payload, qos=1)
+
+    def send_update_command(self, node_id: str) -> bool:
+        """Trigger an immediate --manual update on a glass edge node.
+
+        Publishes to sdprs/edge/{node_id}/cmd/update; the edge's handle_update
+        launches sdprs-edge-update-manual.service. Fire-and-forget — the node
+        reports its new version on the next heartbeat once the update finishes.
+        """
+        topic = topic_cmd(node_id, "update")
+        payload = {"timestamp": utcnow().isoformat()}
+        logger.info(f"Sending update command to {node_id}")
         return self.publish(topic, payload, qos=1)
 
     def send_snooze_config(self, node_id: str, snooze_until: Optional[str], snooze_reason: Optional[str] = None) -> bool:
