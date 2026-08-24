@@ -137,6 +137,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to start lightning service: {e}")
         app.state.lightning_service = None
 
+    # Release-check poller (Phase 2 "update available"). Self-degrading.
+    try:
+        from .services.release_check import init_release_check_service, get_release_check_service
+        rc_svc = init_release_check_service(settings)
+        if rc_svc.enabled and getattr(app.state, "scheduler", None):
+            await rc_svc.refresh()  # prime once at startup
+            app.state.scheduler.add_job(rc_svc.refresh, "interval",
+                                        seconds=settings.UPDATE_CHECK_INTERVAL_S,
+                                        id="release_check")
+        app.state.release_check = rc_svc
+    except Exception as e:
+        logger.warning(f"Failed to start release-check poller: {e}")
+        app.state.release_check = None
+
     logger.info("SDPRS Central Server started successfully")
 
     yield

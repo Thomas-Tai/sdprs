@@ -133,6 +133,12 @@ if PYDANTIC_AVAILABLE:
         LIGHTNING_COUNT_WINDOW_MIN: int = 60        # trailing window for the "/hr" count
         LIGHTNING_STALE_AFTER_S: int = 300          # no message this long => feed stale => "—"
 
+        # Edge-release tip poller (Phase 2 "update available"). Self-degrading.
+        UPDATE_CHECK_ENABLED: bool = True
+        UPDATE_CHECK_INTERVAL_S: int = 300   # ~12 req/hr, under GitHub's 60/hr
+        UPDATE_RELEASE_REPO: str = "Thomas-Tai/sdprs"
+        UPDATE_RELEASE_BRANCH: str = "edge-release"
+
         # mediamtx Prometheus scrape (item 14) — empty = stream-health UI hidden
         MEDIAMTX_METRICS_URL: str = "http://localhost:9998/metrics"
 
