@@ -507,6 +507,27 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '刪除失敗: ' + window.actionErrorText(err) }); })
       .finally(() => { if (mountedRef.current) setEdgeDeleteBusy(false); });
   };
+  // Phase 2「立即更新」: fire an immediate --manual update on an ONLINE glass
+  // node. Recoverable (retriggerable; the node runs snapshot → health-check →
+  // auto-rollback unattended), so — unlike delete/revoke, which use the in-app
+  // modal above — this uses the native confirm(). API-guard toast (no latch),
+  // id guard, mountedRef guard. The node reports its new version organically on
+  // its next heartbeat; this call only queues the MQTT command.
+  const onUpdateNow = (target) => {
+    const api = window.SDPRS_API;
+    if (!(api && api.triggerUpdate)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
+    if (!target || !target.id) {
+      setToast({ tone: 'error', msg: '此列缺少節點識別碼，無法更新' });
+      return;
+    }
+    if (!window.confirm(`確定要立即更新節點「${target.name || target.id}」？\n節點會在背景更新（快照 → 健康檢查 → 失敗自動回滾），完成後於下次心跳回報新版本。`)) return;
+    Promise.resolve(api.triggerUpdate(target.id))
+      .then(() => { if (mountedRef.current) setToast({ tone: 'success', msg: `已要求節點「${target.name || target.id}」更新` }); })
+      .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '更新要求失敗: ' + window.actionErrorText(err) }); });
+  };
   // OPS-016 / NEW-UX-004: in-app revoke confirmation — mirrors confirmDeleteWebcam
   // above. Replaces the old native confirm() that blocked the tab and had no
   // busy latch (double-fire → 404 toast) or post-success refresh.
@@ -850,6 +871,36 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
                         onRevealed={(node, apiKey) => setNodeKeyRevealed({ nodeId: node.id, name: node.name, apiKey })}
                         onRequestClear={(node) => setClearKeyTarget({ nodeId: node.id, name: node.name })}
                         onError={err => setToast({ tone: 'error', msg: '設定金鑰失敗: ' + window.actionErrorText(err) })}/>
+                      {/* Phase 2: deployed edge-release version (short SHA) +
+                          update-available badge (glass nodes only; pump rows
+                          have no edge-release concept). 有更新/最新 render only
+                          when the server actually told us (updateAvailable
+                          true/false); null ("unknown") shows just the SHA. */}
+                      {n.type === 'camera' && (
+                        <span className="inline-flex items-center h-8 px-1 text-[11px] text-ink-muted whitespace-nowrap" title={n.version || ''}>
+                          {n.version ? n.version.slice(0, 7) : '—'}
+                          {n.updateAvailable === true && (
+                            <span className="ml-1 px-1 rounded bg-sev-warn/20 text-sev-warn">有更新</span>
+                          )}
+                          {n.updateAvailable === false && (
+                            <span className="ml-1 text-emerald-400">最新</span>
+                          )}
+                        </span>
+                      )}
+                      {/* 立即更新 only for ONLINE glass: an offline node can't
+                          receive the MQTT command (server 409s). */}
+                      {n.type === 'camera' && n.status !== 'offline' && (
+                        <button
+                          type="button"
+                          title="立即更新此節點軟體（背景執行，含健康檢查與自動回滾）"
+                          aria-label="立即更新此節點"
+                          onClick={(e) => { e.stopPropagation(); onUpdateNow(n); }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+                          className="h-8 px-2 rounded text-[11px] text-sky-300 hover:text-sky-100 hover:bg-sky-500/10 transition-colors"
+                        >
+                          立即更新
+                        </button>
+                      )}
                       {(n.type === 'camera' || n.type === 'pump') && (
                         <button
                           title={n.status === 'offline'

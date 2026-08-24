@@ -563,6 +563,59 @@ ${PRELUDE}
 })();
 `;
 
+// ------------------------- status.jsx: Phase 2 node update-now/version -----
+// Task 7: a version badge (short-SHA + 有更新/最新) and a 立即更新 button for
+// ONLINE glass (mapNode's type==='camera') rows only — an offline glass node
+// cannot receive the MQTT update command (server 409s: see
+// POST /nodes/{id}/update), and pump/webcam rows have no edge-release
+// concept at all. Update-now is recoverable (retriggerable, no destructive
+// side effect beyond a service restart the node already runs unattended on
+// its own schedule) so — UNLIKE the delete/revoke flows above, which
+// deliberately use an in-app modal — this handler uses the native
+// window.confirm(). jsdom has no confirm() implementation of its own, so it
+// must be stubbed before the click or the handler throws.
+const TEST_STATUS_UPDATE_NOW = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const calls = [];
+    window.SDPRS_API = {
+      triggerUpdate: (id) => { calls.push(id); return Promise.resolve({ status: 'queued', node_id: id }); },
+    };
+    window.confirm = () => true;
+
+    // Behind the release tip: updateAvailable true, badge should read 有更新.
+    const onlineBehind = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true };
+    // Already at the tip: updateAvailable false, badge should read 最新.
+    const onlineCurrent = { id: 'CAM-2', name: '大堂', location: '大堂', type: 'camera', status: 'online', snoozeMin: 0, version: 'def4567890abc', updateAvailable: false };
+    // Offline glass node: same type, but must get NEITHER badge nor button —
+    // it cannot receive the MQTT command while offline.
+    const offlineGlass = { id: 'CAM-3', name: '車道', location: '車道', type: 'camera', status: 'offline', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true };
+    // A pump row: no edge-release concept applies to it at all, regardless
+    // of status — must get neither affordance either.
+    const pumpNode = { id: 'PUMP-1', name: '抽水站A', location: '低窪區', type: 'pump', status: 'online', snoozeMin: 0, level: 40, pumpState: 'off', cycles: 0 };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [onlineBehind, onlineCurrent, offlineGlass, pumpNode], onSelectNode: () => {}, onRefresh: () => {},
+    })));
+    await settle();
+
+    const updateBtns = Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('立即更新') !== -1);
+    A('exactly the 2 ONLINE glass rows get a 立即更新 button (offline glass + pump excluded)', updateBtns.length === 2, updateBtns.length);
+
+    A('behind-tip row shows a 有更新 badge', container.textContent.indexOf('有更新') !== -1);
+    A('up-to-date row shows a 最新 badge', container.textContent.indexOf('最新') !== -1);
+    A('behind-tip row shows its short SHA (first 7 of the version)', container.textContent.indexOf('abc1234') !== -1);
+
+    click(updateBtns[0]);
+    await settle();
+    A('clicking 立即更新 calls triggerUpdate with that row node id', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
+  } catch (e) {
+    results.push({ name: 'status update-now suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ------------------------ monitor.jsx: live-view readiness (follow-up Task 1) --
 // The tile used to flip to 'live' on a blind setTimeout(3000): on a slow client
 // that mounts <video> against a playlist with no segment yet — a black tile
@@ -1610,6 +1663,7 @@ const SUITES = [
   { name: 'Wall filter                 monitor.jsx (webcam on wall)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_TABS },
   { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
   { name: 'Follow-up 2/3               status.jsx (webcam delete)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_DELETE },
+  { name: 'Task 7                      status.jsx (update-now / version badge)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_UPDATE_NOW },
   { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
   { name: 'OPS-004 live-start errors     monitor.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_OPS_LIVE_ERRORS },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },

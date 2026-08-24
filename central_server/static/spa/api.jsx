@@ -461,6 +461,16 @@
       // so a real `false` (no key) is preserved rather than collapsed to
       // null — Task 11 gates its provision/clear controls on this field.
       hasKey: (n.has_key ?? null),
+      // Phase 2 edge auto-update: deployed edge-release SHA (glass nodes
+      // only; server sends null for pump/webcam rows) and whether it's
+      // behind the edge-release tip. update_available is Optional on the
+      // wire — null means "unknown" (node version or release tip not yet
+      // known to the server), NOT "up to date" — passed through as-is
+      // (null/true/false) so the badge can render an honest 「最新」ONLY
+      // when the server actually said so, never by defaulting a missing
+      // value.
+      version: n.version || null,
+      updateAvailable: n.update_available,
     };
   }
 
@@ -1192,6 +1202,12 @@
     '/api/nodes/' + encodeURIComponent(nodeId) + '/pump',
     jsonBody('POST', { action, duration_s: durationS != null ? durationS : null }));
 
+  // Phase 2 "立即更新": fire-and-forget POST /nodes/{id}/update — no request
+  // body (the endpoint infers everything server-side: glass-only, must be
+  // ONLINE, 409s otherwise). The node reports its new version organically
+  // on its next heartbeat; this call only queues the MQTT update command.
+  const triggerUpdate = (nodeId) => apiFetch('/api/nodes/' + encodeURIComponent(nodeId) + '/update', { method: 'POST' });
+
   // Weather multi-source settings (Option C, 2026-07-19) — hits the
   // config API landed alongside the SPA settings pane. All 4 helpers
   // gracefully swallow 503 (weather service disabled) so the SPA can
@@ -1465,7 +1481,7 @@
   window.SDPRS_API = {
     loadInitial, refreshLive, loadWeather, markSeen,
     ackAlert, resolveAlert, bulkAckAlerts, bulkResolveAlerts,
-    snoozeNode, unsnoozeNode, pumpCommand, deleteNode, saveHandover, updateNodeLocation,
+    snoozeNode, unsnoozeNode, pumpCommand, triggerUpdate, deleteNode, saveHandover, updateNodeLocation,
     getWeatherConfig, setWeatherConfig, listSmgStations, listHkoStations, refreshWeather,
     exportAuditCsv,
     startStream, stopStream, getStreamHealth, getStreamHealthAll,
