@@ -92,6 +92,27 @@ def trigger_manual_update(runner=subprocess.run) -> bool:
         return False
 
 
+def compute_local_capture_hold(now, cooldown_until, has_pending):
+    """(held, reason). Held while an event is mid-capture: inside the cooldown
+    window OR there are undrained (async) events still to encode. Reason is a
+    stable English code the dashboard maps to zh-TW."""
+    if now <= cooldown_until or has_pending:
+        return True, "event_capture"
+    return False, None
+
+
+def make_hold_handler(mqtt_client):
+    """Build the MQTT 'hold' command handler. Server pushes {hold, reason}; the
+    edge stores it (self-expiring via SERVER_HOLD_TTL). Never raises — runs on
+    the MQTT dispatch thread."""
+    def handle_hold(payload):
+        hold = bool((payload or {}).get("hold", False))
+        reason = (payload or {}).get("reason") if hold else None
+        logger.info(f"Hold command received: hold={hold} reason={reason}")
+        mqtt_client.set_server_hold(hold, reason)
+    return handle_hold
+
+
 # 全域運行標誌
 _running = True
 
@@ -430,6 +451,7 @@ def main():
 
         mqtt_client.register_command_handler("update", handle_update)
         mqtt_client.register_command_handler("simulate_trigger", handle_simulate_trigger)
+        mqtt_client.register_command_handler("hold", make_hold_handler(mqtt_client))
 
         mqtt_client.start()
         logger.info("MQTT client started")
@@ -631,6 +653,15 @@ def main():
                     logger.warning(f"Encode submit dropped (queue full) for event ts={ev.trigger_ts:.3f}")
                 else:
                     logger.info(f"Event handed to encode worker: {len(frames)} frames, ts={ev.trigger_ts:.3f}")
+
+        # Update-hold (Phase 3): raise while an event is mid-capture so a
+        # SCHEDULED auto-update won't restart the service and truncate a
+        # recording. has_pending only applies to the async path.
+        if mqtt_client:
+            has_pending = bool(async_encode and event_tracker is not None
+                               and len(event_tracker) > 0)
+            held, reason = compute_local_capture_hold(timestamp, cooldown_until, has_pending)
+            mqtt_client.set_local_capture_hold(held, reason)
 
         # 12. 快照推送（受熱管理控制）
         if timestamp - last_snapshot_time >= thermal_monitor.snapshot_interval:
