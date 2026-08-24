@@ -31,7 +31,9 @@ SDPRS 邊緣節點主程式 (M2 版本)
 
 import argparse
 import logging
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -65,6 +67,30 @@ from utils.snapshot import SnapshotPusher
 from utils.thermal import ThermalMonitor
 
 logger = logging.getLogger(__name__)
+
+# Absolute systemctl path MUST match the path in the installer's sudoers rule
+# (scripts/edge_autoupdate_install.sh) or sudo denies the call.
+SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
+MANUAL_UPDATE_UNIT = "sdprs-edge-update-manual.service"
+
+
+def trigger_manual_update(runner=subprocess.run) -> bool:
+    """Launch the on-demand update unit. Fire-and-forget: --no-block returns
+    immediately so the 60s health-check never blocks the caller (the MQTT
+    dispatch thread). Never raises — returns False on any launch failure."""
+    argv = ["sudo", SYSTEMCTL_BIN, "start", "--no-block", MANUAL_UPDATE_UNIT]
+    try:
+        result = runner(argv, capture_output=True, text=True, timeout=15)
+        ok = getattr(result, "returncode", 1) == 0
+        if not ok:
+            logger.error("manual update launch failed rc=%s stderr=%s",
+                         getattr(result, "returncode", "?"),
+                         getattr(result, "stderr", ""))
+        return ok
+    except Exception as e:  # sudo missing, timeout, etc.
+        logger.error("manual update launch error: %s", e)
+        return False
+
 
 # 全域運行標誌
 _running = True
@@ -392,9 +418,9 @@ def main():
             )
 
         def handle_update(payload):
-            """處理 update 指令。"""
+            """Dashboard 'Update now': launch the on-demand updater."""
             logger.info(f"Update command received: {payload}")
-            # TODO: 實作自動更新邏輯
+            trigger_manual_update()
 
         def handle_simulate_trigger(payload):
             """處理 simulate_trigger 指令。"""
