@@ -31,6 +31,7 @@ SDPRS 邊緣節點主程式 (M2 版本)
 
 import argparse
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -111,6 +112,34 @@ def make_hold_handler(mqtt_client):
         logger.info(f"Hold command received: hold={hold} reason={reason}")
         mqtt_client.set_server_hold(hold, reason)
     return handle_hold
+
+
+def edge_ready_path(path=None):
+    return path or os.environ.get("EDGE_READY_FILE", "/run/sdprs/edge_ready")
+
+
+def clear_edge_ready(path=None):
+    """Delete any stale readiness file. Called at startup: /run is tmpfs and a
+    file from the PREVIOUS process survives a restart; the updater's post-restart
+    health-check must observe the NEW process assert readiness, not a leftover."""
+    p = edge_ready_path(path)
+    try:
+        os.remove(p)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning(f"could not clear edge_ready {p}: {e}")
+
+
+def mark_edge_ready(path=None):
+    """Assert the node is genuinely functional (camera reading + loop iterating +
+    MQTT up). Best-effort; never breaks the loop."""
+    p = edge_ready_path(path)
+    try:
+        with open(p, "w") as f:
+            f.write("1")
+    except OSError as e:
+        logger.warning(f"could not write edge_ready {p}: {e}")
 
 
 # 全域運行標誌
@@ -510,6 +539,9 @@ def main():
             f"Async encode ENABLED (pre={pre_roll}s post={post_roll}s) — Thread 7 EncodeWorker started"
         )
 
+    clear_edge_ready()  # startup: force the new process to re-assert readiness
+    _edge_ready_marked = False
+
     while _running:
       try:
         loop_start = time.time()
@@ -541,6 +573,13 @@ def main():
             # 攝像頭失敗後首次成功讀取：心跳回報 ok
             if mqtt_client:
                 mqtt_client.set_buffer_health("ok")
+
+        # Readiness (Phase 3): first successful read with MQTT up ⇒ genuinely
+        # functional. The updater health-check waits for this file after a
+        # restart, catching "service active but camera never opened".
+        if not _edge_ready_marked and mqtt_client:
+            mark_edge_ready()
+            _edge_ready_marked = True
 
         timestamp = time.time()
 
