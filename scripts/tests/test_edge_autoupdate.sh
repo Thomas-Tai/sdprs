@@ -147,6 +147,24 @@ run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active -- -
 A "hold(--manual) proceeds to clone" "$(calls | grep -q 'git clone' && echo 1 || echo 0)" "$(calls)"
 cleanup
 
+# 4c) STALE hold (mtime older than HOLD_MAX_AGE) -> NOT held, update proceeds
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+echo 1 > "$SB/run/update_hold"
+touch -d '2000-01-01 00:00:00' "$SB/run/update_hold"   # ancient mtime
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    HOLD_MAX_AGE=300 NOW_OVERRIDE=04:00
+A "stale-hold proceeds to clone" "$(calls | grep -q 'git clone' && echo 1 || echo 0)" "$(calls)"
+cleanup
+
+# 4d) hold file content "0" -> NOT held, update proceeds
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+echo 0 > "$SB/run/update_hold"
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active NOW_OVERRIDE=04:00
+A "hold=0 proceeds to clone" "$(calls | grep -q 'git clone' && echo 1 || echo 0)" "$(calls)"
+cleanup
+
 # 5) dry-run -> update available but no clone/rsync/restart, SHA unchanged
 new_sandbox
 echo "old" > "$SB/state/.edge_deployed_sha"

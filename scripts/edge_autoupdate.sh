@@ -31,6 +31,7 @@ CONF="${SDPRS_UPDATE_CONF:-/etc/sdprs-edge-update.conf}"
 : "${HEALTH_TIMEOUT:=60}"
 : "${HEALTH_INTERVAL:=3}"
 : "${KEEP_SNAPSHOTS:=3}"
+: "${HOLD_MAX_AGE:=300}"
 : "${OWNER:=sdprs:sdprs}"
 : "${GIT:=git}"; : "${RSYNC:=rsync}"; : "${SYSTEMCTL:=systemctl}"
 : "${TAR:=tar}"; : "${CHOWN:=chown}"; : "${SLEEP:=sleep}"
@@ -78,7 +79,15 @@ in_window() {
 }
 
 held() {
-  [ -f "$HOLD_FILE" ] && [ "$(cat "$HOLD_FILE" 2>/dev/null)" = "1" ]
+  [ -f "$HOLD_FILE" ] || return 1
+  [ "$(cat "$HOLD_FILE" 2>/dev/null)" = "1" ] || return 1
+  # Freshness: the edge rewrites this file every heartbeat, so a fresh mtime
+  # proves a live writer. A stale "1" (dead edge process) self-expires, making a
+  # genuinely dead node updatable. HOLD_MAX_AGE >> heartbeat interval.
+  local now mtime
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$HOLD_FILE" 2>/dev/null || echo 0)"
+  [ $(( now - mtime )) -le "$HOLD_MAX_AGE" ]
 }
 
 cleanup_tmp() { [ -n "$TMP" ] && rm -rf "$TMP" 2>/dev/null || true; }
