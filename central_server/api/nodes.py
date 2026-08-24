@@ -124,6 +124,11 @@ class NodeStatus(BaseModel):
     # overriding it. `at` is a naive-UTC ISO string, same as every other
     # timestamp on the wire.
     last_pump_command: Optional[Dict[str, Any]] = None
+    # Phase 2: deployed edge-release SHA (glass nodes) and whether the node is
+    # behind the edge-release tip. update_available is None ("unknown") when
+    # either the node's version or the release tip is unknown.
+    version: Optional[str] = None
+    update_available: Optional[bool] = None
 
 
 class NodeListResponse(BaseModel):
@@ -274,6 +279,13 @@ async def list_nodes(
     # Get node states from MQTT service
     node_states = mqtt_service.get_node_states()
 
+    # Phase 2: resolve the edge-release tip ONCE for the whole list — every
+    # node's update_available is derived against the same tip so a poll that
+    # straddles a tip refresh can't show some nodes ahead and others behind.
+    from ..services.release_check import get_release_check_service, compute_update_available
+    _rc = get_release_check_service()
+    _tip = _rc.tip_sha if _rc else None
+
     # Get snapshot timestamps from app state
     latest_snapshots = getattr(request.app.state, "latest_snapshots", {})
 
@@ -361,6 +373,8 @@ async def list_nodes(
             manual_override=state.get("manual_override") if node_type == "pump" else None,
             last_pump_command=_last_cmds.get(node_id),
             has_key=bool(db_row.get("api_key_hash")),
+            version=state.get("version"),
+            update_available=compute_update_available(state.get("version"), _tip),
         )
 
         result.append(node_status)
@@ -384,6 +398,10 @@ async def list_nodes(
             # the command history still applies (it is server-side).
             last_pump_command=_last_cmds.get(nid),
             has_key=bool(row.get("api_key_hash")),
+            version=(row.get("metadata") or {}).get("version"),
+            update_available=compute_update_available(
+                (row.get("metadata") or {}).get("version"), _tip
+            ),
         ))
 
     # Task 5 (Step 0a): surface registered webcam cameras as nodes. Webcam
@@ -611,12 +629,18 @@ async def get_node(
         )
     
     node_type = state.get("type", "glass")
-    
+
+    # Phase 2: same tip resolution as list_nodes — see that function's
+    # comment for why it's derived once per request rather than per node.
+    from ..services.release_check import get_release_check_service, compute_update_available
+    _rc = get_release_check_service()
+    _tip = _rc.tip_sha if _rc else None
+
     # Check if snapshot is stale
     is_stale = False
     snapshot_timestamp = None
     now = utcnow()
-    
+
     if node_type == "glass" and state.get("status") == "ONLINE":
         latest_snapshots = getattr(request.app.state, "latest_snapshots", {})
         snapshot_data = latest_snapshots.get(node_id)
@@ -686,6 +710,8 @@ async def get_node(
         manual_override=state.get("manual_override") if node_type == "pump" else None,
         last_pump_command=_last_cmd,
         has_key=bool(db_node.get("api_key_hash")),
+        version=state.get("version"),
+        update_available=compute_update_available(state.get("version"), _tip),
     )
 
 
@@ -1044,6 +1070,33 @@ async def pump_command(
         "duration_s": body.duration_s,
         "queued": True,
     }
+
+
+@router.post("/nodes/{node_id}/update", status_code=202)
+async def trigger_node_update(
+    node_id: str,
+    user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Dashboard 'Update now': trigger an immediate --manual update on a glass
+    node. Fire-and-forget over MQTT; the node reports its new version on the
+    next heartbeat. Refused for offline nodes (can't receive the command) and
+    non-glass nodes."""
+    node = db_get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    if (node.get("node_type") or "").lower() != "glass":
+        raise HTTPException(status_code=400,
+                            detail=f"Node {node_id} is not a glass node (type={node.get('node_type')!r})")
+    mqtt_service = get_mqtt_service()
+    if not mqtt_service:
+        raise HTTPException(status_code=503, detail="MQTT service not available")
+    state = mqtt_service.get_node_state(node_id)
+    if not state or state.get("status") != "ONLINE":
+        raise HTTPException(status_code=409, detail=f"Node {node_id} is offline")
+    ok = mqtt_service.send_update_command(node_id)
+    if not ok:
+        raise HTTPException(status_code=502, detail="Failed to publish update command")
+    return {"status": "queued", "node_id": node_id}
 
 
 @router.post("/nodes/{node_id}/snooze")
