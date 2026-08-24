@@ -69,6 +69,20 @@ from shared.mqtt_topics import (
 
 logger = logging.getLogger("mqtt_client")
 
+SERVER_HOLD_TTL = 900  # seconds: a pushed server-hold self-expires if the
+# server stops re-asserting, so a dead/unreachable server never pins a node held.
+
+
+def _write_hold_file(path: str, held: bool) -> None:
+    """Write the update-hold flag ("1"/"0") for the on-node updater to read.
+    Best-effort: a write failure (dir missing, perms) must never break the
+    heartbeat. The edge is the SOLE writer of this file."""
+    try:
+        with open(path, "w") as f:
+            f.write("1" if held else "0")
+    except OSError as e:
+        logger.warning(f"could not write hold file {path}: {e}")
+
 
 def _read_deployed_version(path: str):
     """Return the deployed commit SHA from the marker file, or None.
@@ -150,6 +164,20 @@ class MQTTClient:
         self._version_file = os.environ.get(
             "EDGE_DEPLOYED_SHA_FILE", "/opt/sdprs/.edge_deployed_sha"
         )
+
+        # Update-hold: the edge is the sole writer of /run/sdprs/update_hold.
+        # Aggregates the two hold sources (local capture + server alert) and is
+        # written every heartbeat; the on-node updater reads it (with an mtime
+        # TTL) to defer a SCHEDULED update. --manual bypasses it.
+        self._hold_file = os.environ.get(
+            "EDGE_UPDATE_HOLD_FILE", "/run/sdprs/update_hold"
+        )
+        self._local_capture_hold = False
+        self._local_capture_reason = None
+        self._server_hold = False
+        self._server_hold_reason = None
+        self._server_hold_ts = None
+        self._clock = time.monotonic  # injectable for tests
 
         # 運行標誌
         self._running = False
@@ -317,6 +345,7 @@ class MQTTClient:
         """發布心跳訊息。"""
         # 收集心跳資料
         local_ip = self._get_local_ip()  # 計算一次，供 ip 與 mac 共用
+        held, hold_reason = self._compute_hold()
         heartbeat_data = {
             "node_id": self._node_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -339,6 +368,11 @@ class MQTTClient:
             # update without needing a service restart. None until a Phase-1+
             # node has a marker file.
             "version": _read_deployed_version(self._version_file),
+            # Update-hold: aggregated from local capture + server alert (see
+            # _compute_hold). Lets the dashboard show "held" and lets the
+            # on-node updater's own file read stay in sync via the write below.
+            "update_held": held,
+            "hold_reason": hold_reason,
         }
 
         # 發布
@@ -348,6 +382,11 @@ class MQTTClient:
         if self._client:
             self._client.publish(topic, payload, qos=0)
             logger.debug(f"Heartbeat published: {heartbeat_data}")
+
+        # The edge is the sole writer of the hold file; refresh it every
+        # heartbeat so the on-node updater's TTL-based read stays current.
+        # Best-effort — see _write_hold_file docstring.
+        _write_hold_file(self._hold_file, held)
 
     def _get_local_ip(self) -> Optional[str]:
         """取得本機 LAN IP（送出心跳的來源介面位址）。
@@ -460,6 +499,27 @@ class MQTTClient:
             self._visual_health = visual
         if audio is not None:
             self._audio_health = audio
+
+    def set_local_capture_hold(self, active: bool, reason=None) -> None:
+        """Raised by the main loop while an event is mid-capture/cooldown."""
+        self._local_capture_hold = bool(active)
+        self._local_capture_reason = reason if active else None
+
+    def set_server_hold(self, hold: bool, reason=None) -> None:
+        """Set from a server 'hold' command; stamped so it self-expires after
+        SERVER_HOLD_TTL if the server stops re-asserting."""
+        self._server_hold = bool(hold)
+        self._server_hold_reason = reason if hold else None
+        self._server_hold_ts = self._clock() if hold else None
+
+    def _compute_hold(self):
+        """(held, reason_code). Local capture wins the reason over server."""
+        if self._local_capture_hold:
+            return True, self._local_capture_reason
+        if self._server_hold and self._server_hold_ts is not None \
+                and (self._clock() - self._server_hold_ts) <= SERVER_HOLD_TTL:
+            return True, self._server_hold_reason
+        return False, None
 
     def publish_stream_status(self, status_data: dict):
         """
