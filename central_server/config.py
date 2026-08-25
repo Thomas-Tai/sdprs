@@ -139,6 +139,10 @@ if PYDANTIC_AVAILABLE:
         UPDATE_RELEASE_REPO: str = "Thomas-Tai/sdprs"
         UPDATE_RELEASE_BRANCH: str = "edge-release"
 
+        # Alert-hold reconcile (Phase 3). Self-degrading; never blocks startup.
+        HOLD_RECONCILE_ENABLED: bool = True
+        HOLD_RECONCILE_INTERVAL_S: int = 60
+
         # mediamtx Prometheus scrape (item 14) — empty = stream-health UI hidden
         MEDIAMTX_METRICS_URL: str = "http://localhost:9998/metrics"
 
@@ -235,6 +239,8 @@ else:
         HLS_MAX_SEGMENTS: int
         HLS_VIEWER_TIMEOUT_SECONDS: int
         MAX_UPLOAD_BYTES: int
+        HOLD_RECONCILE_ENABLED: bool
+        HOLD_RECONCILE_INTERVAL_S: int
 
         def __init__(self):
             self.DASHBOARD_USER = _get_env_str("DASHBOARD_USER", required=True)
@@ -275,6 +281,8 @@ else:
             self.HLS_MAX_SEGMENTS = _get_env_int("HLS_MAX_SEGMENTS", 5)
             self.HLS_VIEWER_TIMEOUT_SECONDS = _get_env_int("HLS_VIEWER_TIMEOUT_SECONDS", 300)
             self.MAX_UPLOAD_BYTES = _get_env_int("MAX_UPLOAD_BYTES", 110 * 1024 * 1024)
+            self.HOLD_RECONCILE_ENABLED = _get_env_bool("HOLD_RECONCILE_ENABLED", True)
+            self.HOLD_RECONCILE_INTERVAL_S = _get_env_int("HOLD_RECONCILE_INTERVAL_S", 60)
 
 
 @lru_cache()

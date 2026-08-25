@@ -151,6 +151,17 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to start release-check poller: {e}")
         app.state.release_check = None
 
+    # Alert-hold reconcile (Phase 3). Self-degrading; never blocks startup.
+    try:
+        if settings.HOLD_RECONCILE_ENABLED and getattr(app.state, "scheduler", None):
+            mqtt_svc_for_reconcile = getattr(app.state, "mqtt_service", None)
+            if mqtt_svc_for_reconcile is not None:
+                app.state.scheduler.add_job(
+                    mqtt_svc_for_reconcile.reconcile_alert_holds, "interval",
+                    seconds=settings.HOLD_RECONCILE_INTERVAL_S, id="hold_reconcile")
+    except Exception as e:
+        logger.warning(f"Failed to start hold reconcile: {e}")
+
     logger.info("SDPRS Central Server started successfully")
 
     yield

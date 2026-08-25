@@ -83,7 +83,12 @@ class MQTTService:
         
         # Lock for thread-safe node_states access
         self._lock = threading.Lock()
-        
+
+        # Per-node "have we sent hold=True" tracking for reconcile_alert_holds
+        # (Phase 3): lets us send hold=False exactly once on a held->clear
+        # transition instead of every tick.
+        self._hold_asserted: Dict[str, bool] = {}
+
     def start(self):
         """
         Start the MQTT client and connect to the broker.
@@ -575,6 +580,42 @@ class MQTTService:
         payload = {"hold": bool(hold), "reason": reason, "timestamp": utcnow().isoformat()}
         logger.info(f"Sending hold={hold} to {node_id} (reason={reason})")
         return self.publish(topic, payload, qos=1)
+
+    def _default_active_lookup(self, node_id: str) -> bool:
+        """True iff the node has an active (unresolved) alert."""
+        try:
+            from .event_service import list_events
+            res = list_events(status_filter="PENDING_VIDEO,PENDING,ACKNOWLEDGED",
+                              node_filter=node_id, page_size=1)
+            return res.get("total", 0) > 0
+        except Exception as e:  # DB hiccup — do not raise into the scheduler
+            logger.warning(f"active-alert lookup failed for {node_id}: {e}")
+            return False
+
+    def reconcile_alert_holds(self, active_lookup=None) -> None:
+        """Per online glass node, hold iff it has an unresolved alert. Re-assert
+        hold=True each tick (refreshes the edge's SERVER_HOLD_TTL); send
+        hold=False once on a held->clear transition; stay silent for nodes that
+        were never held. Best-effort — never raises into the scheduler."""
+        if active_lookup is None:
+            active_lookup = self._default_active_lookup
+        if getattr(self, "_hold_asserted", None) is None:
+            self._hold_asserted = {}
+        with self._lock:
+            targets = [(nid, st) for nid, st in self.node_states.items()
+                       if st.get("type") == "glass" and st.get("status") == "ONLINE"]
+        for nid, _st in targets:
+            try:
+                want = bool(active_lookup(nid))
+            except Exception as e:
+                logger.warning(f"hold reconcile lookup error for {nid}: {e}")
+                continue
+            if want:
+                self.send_hold_command(nid, True, "active_alert")
+                self._hold_asserted[nid] = True
+            elif self._hold_asserted.get(nid):
+                self.send_hold_command(nid, False, None)
+                self._hold_asserted[nid] = False
 
     def send_snooze_config(self, node_id: str, snooze_until: Optional[str], snooze_reason: Optional[str] = None) -> bool:
         """
