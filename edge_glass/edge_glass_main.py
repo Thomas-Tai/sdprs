@@ -29,6 +29,10 @@ SDPRS 邊緣節點主程式 (M2 版本)
     python edge_glass_main.py --simulate  # 模擬觸發測試
 """
 
+# Deploy-verification marker: 2026-08-25 bump to exercise the fleet
+# auto-update round-trip end-to-end (edge-release publish -> dashboard 有更新
+# -> per-node 立即更新 -> node pulls & restarts -> 最新). No behavior change.
+
 import argparse
 import logging
 import os
