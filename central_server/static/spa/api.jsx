@@ -471,6 +471,8 @@
       // value.
       version: n.version || null,
       updateAvailable: (n.update_available ?? null),
+      updateHeld: (n.update_held ?? null),
+      holdReason: (n.hold_reason ?? null),
     };
   }
 

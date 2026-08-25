@@ -523,7 +523,14 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
       setToast({ tone: 'error', msg: '此列缺少節點識別碼，無法更新' });
       return;
     }
-    if (!window.confirm(`確定要立即更新節點「${target.name || target.id}」？\n節點會在背景更新（快照 → 健康檢查 → 失敗自動回滾），完成後於下次心跳回報新版本。`)) return;
+    const holdReasonText = (code) =>
+      code === 'event_capture' ? '進行中的錄製'
+      : code === 'active_alert' ? '未解除的警報'
+      : '監測進行中';
+    const msg = target.updateHeld
+      ? `此節點目前有${holdReasonText(target.holdReason)}，立即更新會中斷監測並中止進行中的作業。\n仍要立即更新節點「${target.name || target.id}」嗎？`
+      : `確定要立即更新節點「${target.name || target.id}」？\n節點會在背景更新（快照 → 健康檢查 → 失敗自動回滾），完成後於下次心跳回報新版本。`;
+    if (!window.confirm(msg)) return;
     Promise.resolve(api.triggerUpdate(target.id))
       .then(() => { if (mountedRef.current) setToast({ tone: 'success', msg: `已要求節點「${target.name || target.id}」更新` }); })
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '更新要求失敗: ' + window.actionErrorText(err) }); });

@@ -616,6 +616,55 @@ ${PRELUDE}
 })();
 `;
 
+// ---------------------------- Phase 3: stronger confirm on a HELD node's --
+// 「立即更新」. A node mid-capture or with an unresolved alert can still be
+// force-updated (operator override), but the confirm must name WHY it is
+// held and warn that proceeding interrupts monitoring — a free node keeps
+// the plain confirm from TEST_STATUS_UPDATE_NOW above.
+const TEST_STATUS_UPDATE_HELD = `
+window.__TEST_PROMISE = (async () => {
+${PRELUDE}
+  try {
+    const calls = [];
+    const confirmMsgs = [];
+    window.SDPRS_API = {
+      triggerUpdate: (id) => { calls.push(id); return Promise.resolve({ status: 'queued', node_id: id }); },
+    };
+    window.confirm = (msg) => { confirmMsgs.push(msg); return true; };
+
+    // Held ONLINE glass node (mid-capture) that is also behind the tip.
+    const heldNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true, updateHeld: true, holdReason: 'event_capture' };
+    // Not-held ONLINE glass node.
+    const freeNode = { id: 'CAM-2', name: '大堂', location: '大堂', type: 'camera', status: 'online', snoozeMin: 0, version: 'def4567890abc', updateAvailable: true, updateHeld: false, holdReason: null };
+    ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
+      nodes: [heldNode, freeNode], onSelectNode: () => {}, onRefresh: () => {},
+    })));
+    await settle();
+
+    const btns = Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('立即更新') !== -1);
+    A('both online glass rows get a 立即更新 button', btns.length === 2, btns.length);
+
+    // Click the HELD row's button: confirm text must name the reason + warn.
+    click(btns[0]);
+    await settle();
+    A('held row triggers a confirm', confirmMsgs.length === 1, JSON.stringify(confirmMsgs));
+    A('held confirm names the reason (進行中的錄製)', (confirmMsgs[0] || '').indexOf('進行中的錄製') !== -1, confirmMsgs[0]);
+    A('held confirm warns it interrupts monitoring', (confirmMsgs[0] || '').indexOf('中斷監測') !== -1, confirmMsgs[0]);
+    A('held row still calls triggerUpdate after confirm (override)', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
+
+    // Click the FREE row: standard confirm, no held wording.
+    confirmMsgs.length = 0;
+    click(btns[1]);
+    await settle();
+    A('free row confirm does NOT mention 中斷監測', (confirmMsgs[0] || '').indexOf('中斷監測') === -1, confirmMsgs[0]);
+    A('free row calls triggerUpdate', calls.length === 2 && calls[1] === 'CAM-2', JSON.stringify(calls));
+  } catch (e) {
+    results.push({ name: 'status update-held suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
+  }
+  window.__TEST_RESULT = results;
+})();
+`;
+
 // ------------------------ monitor.jsx: live-view readiness (follow-up Task 1) --
 // The tile used to flip to 'live' on a blind setTimeout(3000): on a slow client
 // that mounts <video> against a playlist with no segment yet — a black tile
@@ -1209,7 +1258,7 @@ ${PRELUDE}
       json: () => Promise.resolve(data), text: () => Promise.resolve(''),
     });
     window.fetch = (path) => (path.indexOf('/api/nodes') === 0)
-      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99', ip: '172.16.37.42', hostname: 'sdprs-glass-01', mac: 'dc:a6:32:2e:37:7f', version: '723456fdeadbeef', update_available: true }])
+      ? jsonRes([{ node_id: 'webcam_cam99', node_type: 'webcam', status: 'ONLINE', client_id: 'webcam_cli99', client_name: 'Front Desk PC', location: 'Cam 99', ip: '172.16.37.42', hostname: 'sdprs-glass-01', mac: 'dc:a6:32:2e:37:7f', version: '723456fdeadbeef', update_available: true, update_held: true, hold_reason: 'active_alert' }])
       : jsonRes([]); // every other loader: benign empty payload
     const rl = await api.refreshLive();
     const mapped = ((rl && rl.nodes) || []).find(n => n.id === 'webcam_cam99');
@@ -1226,6 +1275,11 @@ ${PRELUDE}
     // update_available is bool|null (unknown), carried through verbatim.
     A('mapNode surfaces version', !!mapped && mapped.version === '723456fdeadbeef', mapped && mapped.version);
     A('mapNode surfaces update_available as updateAvailable', !!mapped && mapped.updateAvailable === true, mapped && mapped.updateAvailable);
+    // Phase 3: hold state rides the same snake->camel contract as version/
+    // updateAvailable above; pin it the same end-to-end way (real mapNode via
+    // refreshLive over the stubbed /api/nodes payload).
+    A('mapNode surfaces update_held as updateHeld', !!mapped && mapped.updateHeld === true, mapped && mapped.updateHeld);
+    A('mapNode surfaces hold_reason as holdReason', !!mapped && mapped.holdReason === 'active_alert', mapped && mapped.holdReason);
 
     // Phase 2 「立即更新」: like deleteWebcamClient above, status.jsx guards its
     // button on this export — silently dropping it from the public object would
@@ -1680,6 +1734,7 @@ const SUITES = [
   { name: 'Task 5                      status.jsx (webcam columns)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_COLUMNS },
   { name: 'Follow-up 2/3               status.jsx (webcam delete)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_WEBCAM_DELETE },
   { name: 'Task 7                      status.jsx (update-now / version badge)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_UPDATE_NOW },
+  { name: 'Phase 3                     status.jsx (update-held confirm)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/status.jsx', test: TEST_STATUS_UPDATE_HELD },
   { name: 'Follow-up 1                 monitor.jsx (live readiness)', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_MONITOR_LIVE },
   { name: 'OPS-004 live-start errors     monitor.jsx', deps: ['icons.jsx', 'data.jsx', 'components.jsx'], target: 'pages/monitor.jsx', test: TEST_OPS_LIVE_ERRORS },
   { name: 'CMP-F11                     components.jsx', deps: ['icons.jsx', 'data.jsx'], target: 'components.jsx', test: TEST_PALETTE },
