@@ -129,6 +129,11 @@ class NodeStatus(BaseModel):
     # either the node's version or the release tip is unknown.
     version: Optional[str] = None
     update_available: Optional[bool] = None
+    # Phase 3: whether an auto-update is currently held back (event capture in
+    # progress / active alert) and, if so, the English hold-reason code.
+    # Translation to Traditional Chinese for the dashboard is the SPA's job.
+    update_held: Optional[bool] = None
+    hold_reason: Optional[str] = None
 
 
 class NodeListResponse(BaseModel):
@@ -375,6 +380,8 @@ async def list_nodes(
             has_key=bool(db_row.get("api_key_hash")),
             version=state.get("version"),
             update_available=compute_update_available(state.get("version"), _tip),
+            update_held=state.get("update_held"),
+            hold_reason=state.get("hold_reason"),
         )
 
         result.append(node_status)
@@ -402,6 +409,8 @@ async def list_nodes(
             update_available=compute_update_available(
                 (row.get("metadata") or {}).get("version"), _tip
             ),
+            update_held=(row.get("metadata") or {}).get("update_held"),
+            hold_reason=(row.get("metadata") or {}).get("hold_reason"),
         ))
 
     # Task 5 (Step 0a): surface registered webcam cameras as nodes. Webcam
@@ -712,6 +721,8 @@ async def get_node(
         has_key=bool(db_node.get("api_key_hash")),
         version=state.get("version"),
         update_available=compute_update_available(state.get("version"), _tip),
+        update_held=state.get("update_held"),
+        hold_reason=state.get("hold_reason"),
     )
 
 
