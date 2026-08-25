@@ -30,7 +30,14 @@ else
 fi
 
 echo "[3/5] seed deployed SHA + runtime dir"
-mkdir -p /run/sdprs
+# /run is tmpfs; the sdprs-user edge process writes update_hold + edge_ready
+# here. tmpfiles.d recreates the dir owned by sdprs on every boot (before
+# services start). --create applies it now.
+cat > /etc/tmpfiles.d/sdprs.conf <<'EOF'
+d /run/sdprs 0755 sdprs sdprs -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/sdprs.conf 2>/dev/null || mkdir -p /run/sdprs
+echo "      installed /etc/tmpfiles.d/sdprs.conf (/run/sdprs owned by sdprs)"
 if [ ! -f /opt/sdprs/.edge_deployed_sha ]; then
   git -C "$TMP" rev-parse HEAD > /opt/sdprs/.edge_deployed_sha
   chown sdprs:sdprs /opt/sdprs/.edge_deployed_sha 2>/dev/null || true

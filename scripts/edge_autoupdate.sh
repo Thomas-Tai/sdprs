@@ -32,6 +32,8 @@ CONF="${SDPRS_UPDATE_CONF:-/etc/sdprs-edge-update.conf}"
 : "${HEALTH_INTERVAL:=3}"
 : "${KEEP_SNAPSHOTS:=3}"
 : "${HOLD_MAX_AGE:=300}"
+: "${EDGE_READY_FILE:=$RUN_DIR/edge_ready}"
+: "${REQUIRE_EDGE_READY:=1}"
 : "${OWNER:=sdprs:sdprs}"
 : "${GIT:=git}"; : "${RSYNC:=rsync}"; : "${SYSTEMCTL:=systemctl}"
 : "${TAR:=tar}"; : "${CHOWN:=chown}"; : "${SLEEP:=sleep}"
@@ -136,6 +138,7 @@ main() {
     cleanup_tmp; exit 0
   fi
 
+  rm -f "$EDGE_READY_FILE" 2>/dev/null || true
   "$SYSTEMCTL" restart "$SVC"
   if health_check; then
     echo "$remote" > "$DEPLOYED_SHA_FILE"
@@ -197,6 +200,7 @@ health_check() {
   [ "${HEALTH_INTERVAL:-0}" -lt 1 ] && HEALTH_INTERVAL=1
   polls=$(( HEALTH_TIMEOUT / HEALTH_INTERVAL )); [ "$polls" -lt 1 ] && polls=1
   base="$("$SYSTEMCTL" show -p NRestarts --value "$SVC" 2>/dev/null || echo 0)"
+  local ready=""
   for ((i=0; i<polls; i++)); do
     "$SLEEP" "$HEALTH_INTERVAL"
     active="$("$SYSTEMCTL" is-active "$SVC" 2>/dev/null || echo inactive)"
@@ -204,8 +208,14 @@ health_check() {
     if [ "$active" != "active" ] || [ "$cur" -gt "$base" ]; then
       return 1
     fi
+    [ -f "$EDGE_READY_FILE" ] && ready=1
+    if [ "${REQUIRE_EDGE_READY:-1}" != "1" ] || [ -n "$ready" ]; then
+      return 0
+    fi
   done
-  return 0
+  # Timed out: service stayed active but never asserted readiness.
+  log "health-check: edge_ready ($EDGE_READY_FILE) never appeared within ${HEALTH_TIMEOUT}s"
+  return 1
 }
 
 restore_snapshot() {

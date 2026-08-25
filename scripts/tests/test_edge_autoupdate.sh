@@ -53,6 +53,9 @@ case "$1" in
       echo "${STUB_NRESTARTS:-0}"
     fi
     ;;
+  restart)
+    if [ -n "${STUB_EDGE_READY:-}" ]; then touch "${STUB_EDGE_READY_DIR:-/tmp}/edge_ready"; fi
+    ;;
 esac
 exit 0
 EOF
@@ -177,7 +180,8 @@ cleanup
 # 6) update applies -> clone+snapshot+rsync+restart, SHA advances to remote
 new_sandbox
 echo "old" > "$SB/state/.edge_deployed_sha"
-run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active NOW_OVERRIDE=04:00
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    STUB_EDGE_READY=1 STUB_EDGE_READY_DIR="$SB/run" NOW_OVERRIDE=04:00
 rc=$?
 A "apply exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
 A "apply clones" "$(calls | grep -q 'git clone' && echo 1 || echo 0)" "$(calls)"
@@ -196,6 +200,35 @@ rc=$?
 A "rollback exits non-zero" "$([ $rc -ne 0 ] && echo 1)" "rc=$rc"
 A "rollback restores snapshot (tar xzf)" "$(calls | grep -q 'tar xzf' && echo 1 || echo 0)" "$(calls)"
 A "rollback leaves SHA old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+cleanup
+
+# 7b) edge_ready appears on restart -> health passes, SHA advances
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    STUB_EDGE_READY=1 STUB_EDGE_READY_DIR="$SB/run" NOW_OVERRIDE=04:00
+rc=$?
+A "edge_ready present -> apply exits 0" "$([ $rc -eq 0 ] && echo 1)" "rc=$rc"
+A "edge_ready present -> SHA advances" "$([ "$(sha)" = "new" ] && echo 1)" "$(sha)"
+cleanup
+
+# 7c) edge_ready never appears -> health FAILS -> rollback, SHA stays old
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    NOW_OVERRIDE=04:00   # STUB_EDGE_READY unset => file never created
+rc=$?
+A "no edge_ready -> exits non-zero" "$([ $rc -ne 0 ] && echo 1)" "rc=$rc"
+A "no edge_ready -> rollback (tar xzf)" "$(calls | grep -q 'tar xzf' && echo 1 || echo 0)" "$(calls)"
+A "no edge_ready -> SHA stays old" "$([ "$(sha)" = "old" ] && echo 1)" "$(sha)"
+cleanup
+
+# 7d) REQUIRE_EDGE_READY=0 -> gate skipped, SHA advances without the file
+new_sandbox
+echo "old" > "$SB/state/.edge_deployed_sha"
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    REQUIRE_EDGE_READY=0 NOW_OVERRIDE=04:00
+A "gate off -> SHA advances" "$([ "$(sha)" = "new" ] && echo 1)" "$(sha)"
 cleanup
 
 # 8) remote changed but rsync itemize empty -> record SHA, NO restart
@@ -258,7 +291,8 @@ for i in 1 2 3 4; do
   : > "$f"
   touch -d "2026-01-0${i}T00:00:00" "$f"
 done
-run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active NOW_OVERRIDE=04:00
+run STUB_REMOTE_SHA=new STUB_RSYNC_ITEMIZE=">f marker" STUB_ISACTIVE=active \
+    STUB_EDGE_READY=1 STUB_EDGE_READY_DIR="$SB/run" NOW_OVERRIDE=04:00
 remaining=$(ls "$SB/state"/edge_glass.backup.*.tgz 2>/dev/null | wc -l | tr -d ' ')
 A "prune keeps only KEEP_SNAPSHOTS(3) files" "$([ "$remaining" = "3" ] && echo 1)" \
   "remaining=$remaining $(ls "$SB/state"/edge_glass.backup.*.tgz 2>/dev/null)"
