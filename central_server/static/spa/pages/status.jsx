@@ -921,8 +921,10 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
                           )}
                           {/* Phase 3: held-state badge, visible BEFORE the click so
                               the operator sees a node is mid-capture / has an active
-                              alert without opening the confirm. */}
-                          {n.updateHeld && (
+                              alert without opening the confirm. Gated on non-offline
+                              (matches the 立即更新 button): 「錄製中」is a live-activity
+                              claim, so it must not linger on an offline row. */}
+                          {n.updateHeld && n.status !== 'offline' && (
                             <span className="ml-1 px-1 rounded bg-sev-warn/20 text-sev-warn"
                               title={holdReasonText(n.holdReason)}>🔒 {holdBadgeText(n.holdReason)}</span>
                           )}

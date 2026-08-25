@@ -643,15 +643,20 @@ ${PRELUDE}
     const heldNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true, updateHeld: true, holdReason: 'event_capture' };
     // Not-held ONLINE glass node.
     const freeNode = { id: 'CAM-2', name: '大堂', location: '大堂', type: 'camera', status: 'online', snoozeMin: 0, version: 'def4567890abc', updateAvailable: true, updateHeld: false, holdReason: null };
+    // Held but OFFLINE glass node: a stale live-activity claim (警報中) must NOT
+    // render on an offline row, and it gets no 立即更新 button either.
+    const offlineHeld = { id: 'CAM-3', name: '車道', location: '車道', type: 'camera', status: 'offline', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true, updateHeld: true, holdReason: 'active_alert' };
     ReactDOM.flushSync(() => root.render(React.createElement(StatusPage, {
-      nodes: [heldNode, freeNode], onSelectNode: () => {}, onRefresh: () => {},
+      nodes: [heldNode, freeNode, offlineHeld], onSelectNode: () => {}, onRefresh: () => {},
     })));
     await settle();
 
     const rowBtns = () => Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('立即更新') !== -1);
-    A('both online glass rows get a 立即更新 button', rowBtns().length === 2, rowBtns().length);
-    // #1a: held-state is visible on the row BEFORE any click (compact badge).
-    A('held row shows a 🔒 held badge (錄製中) without opening the modal', container.textContent.indexOf('錄製中') !== -1, container.textContent);
+    A('both online glass rows get a 立即更新 button (offline held excluded)', rowBtns().length === 2, rowBtns().length);
+    // #1a: held-state is visible on the ONLINE row BEFORE any click (compact badge).
+    A('held online row shows a 🔒 held badge (錄製中) without opening the modal', container.textContent.indexOf('錄製中') !== -1, container.textContent);
+    // M2: the OFFLINE held node's live-activity badge (警報中) is suppressed.
+    A('offline held row does NOT show a 🔒 held badge (警報中)', container.textContent.indexOf('警報中') === -1, container.textContent);
 
     // HELD row → modal names the reason + warns + offers the amber override.
     click(rowBtns()[0]);
