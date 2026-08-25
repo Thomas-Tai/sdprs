@@ -2,6 +2,19 @@
 
 const { useState: useState_p, useMemo: useMemo_p } = React;
 
+// Phase 3: map the stable English hold-reason code (from the edge, carried on the
+// heartbeat) to zh-TW. `holdReasonText` is the full form for the confirm modal;
+// `holdBadgeText` is the compact form for the row badge. Kept module-scope so the
+// row badge and the 立即更新 modal render the same wording from one source.
+const holdReasonText = (code) =>
+  code === 'event_capture' ? '進行中的錄製'
+  : code === 'active_alert' ? '未解除的警報'
+  : '監測進行中';
+const holdBadgeText = (code) =>
+  code === 'event_capture' ? '錄製中'
+  : code === 'active_alert' ? '警報中'
+  : '保留中';
+
 // Copy-to-clipboard for the "shown once" API keys. Prefer the async Clipboard
 // API (needs a secure context — https or localhost), and fall back to a hidden
 // <textarea> + execCommand('copy') so it still works when the dashboard is
@@ -416,6 +429,10 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
   // window.SDPRS_API.deleteNode.
   const [edgeDeleteTarget, setEdgeDeleteTarget] = useState_p(null); // { id, name, type, status } | null
   const [edgeDeleteBusy, setEdgeDeleteBusy] = useState_p(false);
+
+  // Phase 3「立即更新」confirm modal target: the node awaiting confirmation, or
+  // null. Held nodes (mid-capture / active alert) get a danger-styled confirm.
+  const [updateTarget, setUpdateTarget] = useState_p(null); // node | null
   // Every camera row that belongs to the same client PC. Deleting the client
   // takes ALL of them down, so the confirm dialog has to enumerate them from
   // the FULL node list — not `filtered`, or an active type/status/location
@@ -437,13 +454,14 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
       if (clearKeyTarget) { if (!clearKeyBusy) setClearKeyTarget(null); return; }
       if (deleteTarget) { if (!deleteBusy) setDeleteTarget(null); return; }
       if (edgeDeleteTarget) { if (!edgeDeleteBusy) setEdgeDeleteTarget(null); return; }
+      if (updateTarget) { setUpdateTarget(null); return; }
       if (showAddModal) { if (!createdKey && !addBusy) setShowAddModal(false); return; }
       if (revokedKey) { setRevokedKey(null); return; }
       if (nodeKeyRevealed) { setNodeKeyRevealed(null); return; }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, edgeDeleteTarget, edgeDeleteBusy, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
+  }, [revokeTarget, revokeBusy, clearKeyTarget, clearKeyBusy, deleteTarget, deleteBusy, edgeDeleteTarget, edgeDeleteBusy, updateTarget, showAddModal, createdKey, addBusy, revokedKey, nodeKeyRevealed]);
   const confirmDeleteWebcam = () => {
     if (deleteBusy || !deleteTarget) return;
     // G1 guard (same as SnoozeRow/StreamRow): without the API bundle the
@@ -507,12 +525,13 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '刪除失敗: ' + window.actionErrorText(err) }); })
       .finally(() => { if (mountedRef.current) setEdgeDeleteBusy(false); });
   };
-  // Phase 2「立即更新」: fire an immediate --manual update on an ONLINE glass
-  // node. Recoverable (retriggerable; the node runs snapshot → health-check →
-  // auto-rollback unattended), so — unlike delete/revoke, which use the in-app
-  // modal above — this uses the native confirm(). API-guard toast (no latch),
-  // id guard, mountedRef guard. The node reports its new version organically on
-  // its next heartbeat; this call only queues the MQTT command.
+  // Phase 3「立即更新」: open an in-app confirm modal (mirrors the delete/revoke
+  // modals above) instead of the native confirm(). The modal surfaces held-state
+  // (event capture / active alert) with a danger-styled confirm, so an operator
+  // never interrupts monitoring by reflex — but can still override. Recoverable
+  // (retriggerable; the node runs snapshot → health-check → auto-rollback
+  // unattended). This handler only validates + opens the modal; the request is
+  // sent by confirmUpdateNow below.
   const onUpdateNow = (target) => {
     const api = window.SDPRS_API;
     if (!(api && api.triggerUpdate)) {
@@ -523,16 +542,24 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
       setToast({ tone: 'error', msg: '此列缺少節點識別碼，無法更新' });
       return;
     }
-    const holdReasonText = (code) =>
-      code === 'event_capture' ? '進行中的錄製'
-      : code === 'active_alert' ? '未解除的警報'
-      : '監測進行中';
-    const msg = target.updateHeld
-      ? `此節點目前有${holdReasonText(target.holdReason)}，立即更新會中斷監測並中止進行中的作業。\n仍要立即更新節點「${target.name || target.id}」嗎？`
-      : `確定要立即更新節點「${target.name || target.id}」？\n節點會在背景更新（快照 → 健康檢查 → 失敗自動回滾），完成後於下次心跳回報新版本。`;
-    if (!window.confirm(msg)) return;
+    setUpdateTarget(target);
+  };
+  // Confirm handler for the update modal. The call only QUEUES the MQTT command;
+  // whether the node actually applies it (it may be already at the tip, or lack
+  // the on-node manual-update unit) shows up organically via the version badge on
+  // the next heartbeat — so the toast says "queued", not "updated", to avoid
+  // overclaiming success for a command that can legitimately no-op on the node.
+  const confirmUpdateNow = () => {
+    const target = updateTarget;
+    setUpdateTarget(null);
+    if (!target || !target.id) return;
+    const api = window.SDPRS_API;
+    if (!(api && api.triggerUpdate)) {
+      setToast({ tone: 'error', msg: '暫時無法連線後端，請稍後再試' });
+      return;
+    }
     Promise.resolve(api.triggerUpdate(target.id))
-      .then(() => { if (mountedRef.current) setToast({ tone: 'success', msg: `已要求節點「${target.name || target.id}」更新` }); })
+      .then(() => { if (mountedRef.current) setToast({ tone: 'success', msg: `已將節點「${target.name || target.id}」排入更新佇列（背景執行，完成後回報新版本）` }); })
       .catch(err => { if (mountedRef.current) setToast({ tone: 'error', msg: '更新要求失敗: ' + window.actionErrorText(err) }); });
   };
   // OPS-016 / NEW-UX-004: in-app revoke confirmation — mirrors confirmDeleteWebcam
@@ -891,6 +918,13 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
                           )}
                           {n.updateAvailable === false && (
                             <span className="ml-1 text-emerald-400">最新</span>
+                          )}
+                          {/* Phase 3: held-state badge, visible BEFORE the click so
+                              the operator sees a node is mid-capture / has an active
+                              alert without opening the confirm. */}
+                          {n.updateHeld && (
+                            <span className="ml-1 px-1 rounded bg-sev-warn/20 text-sev-warn"
+                              title={holdReasonText(n.holdReason)}>🔒 {holdBadgeText(n.holdReason)}</span>
                           )}
                         </span>
                       )}
@@ -1262,6 +1296,44 @@ const StatusPage = ({ nodes = [], onSelectNode, onRefresh, hiddenIds = new Set()
                 className="flex-1 py-2 rounded-lg bg-sev-critical text-white text-sm font-bold disabled:opacity-50"
               >
                 {edgeDeleteBusy ? '刪除中...' : '確定刪除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 3「立即更新」confirm modal (replaces window.confirm). A HELD node
+          gets an amber warning line + an amber "仍要更新" (override) button; a free
+          node gets the plain sky "確定更新". Confirm labels differ from the row's
+          「立即更新」trigger so the two are never confused. */}
+      {updateTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog" aria-modal="true" aria-label="立即更新節點"
+          onClick={() => setUpdateTarget(null)}>
+          <div className="bg-surface-panel border border-border-subtle rounded-xl p-5 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-ink-primary mb-3">立即更新節點</h3>
+            <p className="text-xs text-ink-secondary mb-2">
+              確定要立即更新節點「
+              <span className="text-ink-primary font-bold">{updateTarget.name || updateTarget.id}</span>
+              」？節點會在背景更新（快照 → 健康檢查 → 失敗自動回滾），完成後於下次心跳回報新版本。
+            </p>
+            {updateTarget.updateHeld && (
+              <p className="text-xs text-sev-warn font-bold mb-2">⚠ 此節點目前有{holdReasonText(updateTarget.holdReason)}，立即更新會中斷監測並中止進行中的作業。</p>
+            )}
+            <div className="flex gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => setUpdateTarget(null)}
+                className="flex-1 py-2 rounded-lg bg-surface-elevated border border-border-subtle text-ink-secondary text-sm font-bold"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={confirmUpdateNow}
+                className={`flex-1 py-2 rounded-lg text-white text-sm font-bold ${updateTarget.updateHeld ? 'bg-sev-warn hover:bg-amber-600' : 'bg-sky-600 hover:bg-sky-500'}`}
+              >
+                {updateTarget.updateHeld ? '仍要更新' : '確定更新'}
               </button>
             </div>
           </div>

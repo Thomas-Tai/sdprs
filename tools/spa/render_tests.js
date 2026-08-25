@@ -570,10 +570,9 @@ ${PRELUDE}
 // POST /nodes/{id}/update), and pump/webcam rows have no edge-release
 // concept at all. Update-now is recoverable (retriggerable, no destructive
 // side effect beyond a service restart the node already runs unattended on
-// its own schedule) so — UNLIKE the delete/revoke flows above, which
-// deliberately use an in-app modal — this handler uses the native
-// window.confirm(). jsdom has no confirm() implementation of its own, so it
-// must be stubbed before the click or the handler throws.
+// its own schedule). Phase 3: the row 立即更新 button now opens an IN-APP
+// confirm modal (like delete/revoke) rather than the native confirm() — so the
+// request fires from the modal's 確定更新 button, not from the row click.
 const TEST_STATUS_UPDATE_NOW = `
 window.__TEST_PROMISE = (async () => {
 ${PRELUDE}
@@ -582,7 +581,6 @@ ${PRELUDE}
     window.SDPRS_API = {
       triggerUpdate: (id) => { calls.push(id); return Promise.resolve({ status: 'queued', node_id: id }); },
     };
-    window.confirm = () => true;
 
     // Behind the release tip: updateAvailable true, badge should read 有更新.
     const onlineBehind = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true };
@@ -606,9 +604,18 @@ ${PRELUDE}
     A('up-to-date row shows a 最新 badge', container.textContent.indexOf('最新') !== -1);
     A('behind-tip row shows its short SHA (first 7 of the version)', container.textContent.indexOf('abc1234') !== -1);
 
+    // Row click opens the modal; nothing is sent until it is confirmed.
     click(updateBtns[0]);
     await settle();
-    A('clicking 立即更新 calls triggerUpdate with that row node id', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
+    const dlg = container.querySelector('[role="dialog"][aria-label="立即更新節點"]');
+    A('clicking 立即更新 opens the in-app confirm modal', !!dlg);
+    A('no request fires until the modal is confirmed', calls.length === 0, JSON.stringify(calls));
+    const confirmBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.indexOf('確定更新') !== -1);
+    A('free-node modal shows the 確定更新 confirm (not the held override label)', !!confirmBtn);
+    click(confirmBtn);
+    await settle();
+    A('confirming the modal calls triggerUpdate with that row node id', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
+    A('modal closes after confirm', !container.querySelector('[role="dialog"][aria-label="立即更新節點"]'));
   } catch (e) {
     results.push({ name: 'status update-now suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
   }
@@ -616,21 +623,21 @@ ${PRELUDE}
 })();
 `;
 
-// ---------------------------- Phase 3: stronger confirm on a HELD node's --
-// 「立即更新」. A node mid-capture or with an unresolved alert can still be
-// force-updated (operator override), but the confirm must name WHY it is
-// held and warn that proceeding interrupts monitoring — a free node keeps
-// the plain confirm from TEST_STATUS_UPDATE_NOW above.
+// ---------------------------- Phase 3: HELD-node 「立即更新」in-app modal -----
+// A node mid-capture or with an unresolved alert shows a 🔒 held badge on its
+// row (visible before any click), and its 立即更新 opens an in-app confirm
+// modal that names WHY it is held + warns that proceeding interrupts
+// monitoring, with an amber "仍要更新" override button. The operator can still
+// force it. A free node opens the same modal with no held wording and a plain
+// "確定更新" confirm. (Replaces the old native window.confirm() flow.)
 const TEST_STATUS_UPDATE_HELD = `
 window.__TEST_PROMISE = (async () => {
 ${PRELUDE}
   try {
     const calls = [];
-    const confirmMsgs = [];
     window.SDPRS_API = {
       triggerUpdate: (id) => { calls.push(id); return Promise.resolve({ status: 'queued', node_id: id }); },
     };
-    window.confirm = (msg) => { confirmMsgs.push(msg); return true; };
 
     // Held ONLINE glass node (mid-capture) that is also behind the tip.
     const heldNode = { id: 'CAM-1', name: '西灣橋', location: '西灣', type: 'camera', status: 'online', snoozeMin: 0, version: 'abc1234567890', updateAvailable: true, updateHeld: true, holdReason: 'event_capture' };
@@ -641,22 +648,36 @@ ${PRELUDE}
     })));
     await settle();
 
-    const btns = Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('立即更新') !== -1);
-    A('both online glass rows get a 立即更新 button', btns.length === 2, btns.length);
+    const rowBtns = () => Array.from(container.querySelectorAll('button')).filter(b => b.textContent.indexOf('立即更新') !== -1);
+    A('both online glass rows get a 立即更新 button', rowBtns().length === 2, rowBtns().length);
+    // #1a: held-state is visible on the row BEFORE any click (compact badge).
+    A('held row shows a 🔒 held badge (錄製中) without opening the modal', container.textContent.indexOf('錄製中') !== -1, container.textContent);
 
-    // Click the HELD row's button: confirm text must name the reason + warn.
-    click(btns[0]);
+    // HELD row → modal names the reason + warns + offers the amber override.
+    click(rowBtns()[0]);
     await settle();
-    A('held row triggers a confirm', confirmMsgs.length === 1, JSON.stringify(confirmMsgs));
-    A('held confirm names the reason (進行中的錄製)', (confirmMsgs[0] || '').indexOf('進行中的錄製') !== -1, confirmMsgs[0]);
-    A('held confirm warns it interrupts monitoring', (confirmMsgs[0] || '').indexOf('中斷監測') !== -1, confirmMsgs[0]);
-    A('held row still calls triggerUpdate after confirm (override)', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
+    const heldDlg = container.querySelector('[role="dialog"][aria-label="立即更新節點"]');
+    A('held row opens the confirm modal', !!heldDlg);
+    A('held modal names the reason (進行中的錄製)', (heldDlg ? heldDlg.textContent : '').indexOf('進行中的錄製') !== -1, heldDlg && heldDlg.textContent);
+    A('held modal warns it interrupts monitoring (中斷監測)', (heldDlg ? heldDlg.textContent : '').indexOf('中斷監測') !== -1, heldDlg && heldDlg.textContent);
+    const overrideBtn = Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === '仍要更新');
+    A('held modal confirm is the override label (仍要更新)', !!overrideBtn);
+    A('no request fires before the modal is confirmed', calls.length === 0, JSON.stringify(calls));
+    click(overrideBtn);
+    await settle();
+    A('confirming a held node still calls triggerUpdate (override)', calls.length === 1 && calls[0] === 'CAM-1', JSON.stringify(calls));
 
-    // Click the FREE row: standard confirm, no held wording.
-    confirmMsgs.length = 0;
-    click(btns[1]);
+    // FREE row → same modal, no held wording, plain 確定更新 confirm.
+    click(rowBtns()[1]);
     await settle();
-    A('free row confirm does NOT mention 中斷監測', (confirmMsgs[0] || '').indexOf('中斷監測') === -1, confirmMsgs[0]);
+    const freeDlg = container.querySelector('[role="dialog"][aria-label="立即更新節點"]');
+    A('free row opens the confirm modal', !!freeDlg);
+    A('free modal does NOT mention 中斷監測', (freeDlg ? freeDlg.textContent : '').indexOf('中斷監測') === -1, freeDlg && freeDlg.textContent);
+    A('free modal has no held override button (仍要更新)', !Array.from(container.querySelectorAll('button')).some(b => b.textContent.trim() === '仍要更新'));
+    const freeConfirm = Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === '確定更新');
+    A('free modal confirm is the plain 確定更新 label', !!freeConfirm);
+    click(freeConfirm);
+    await settle();
     A('free row calls triggerUpdate', calls.length === 2 && calls[1] === 'CAM-2', JSON.stringify(calls));
   } catch (e) {
     results.push({ name: 'status update-held suite threw', pass: false, detail: e && e.stack ? e.stack.split('\\n').slice(0, 3).join(' | ') : String(e) });
