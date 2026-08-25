@@ -42,14 +42,8 @@ hasf "$INST" 'install -m 0440'
 hasf "$INST" 'visudo -cf'
 
 # --- Phase 3: installer writes tmpfiles.d so /run/sdprs is owned by sdprs ---
-ok() { PASS=$((PASS+1)); echo "  ok   $1"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
-grep -q 'tmpfiles.d/sdprs.conf' scripts/edge_autoupdate_install.sh \
-  && ok "installer writes tmpfiles.d for /run/sdprs" \
-  || bad "installer writes tmpfiles.d for /run/sdprs"
-grep -q 'd /run/sdprs 0755 sdprs sdprs' scripts/edge_autoupdate_install.sh \
-  && ok "tmpfiles line owns /run/sdprs as sdprs" \
-  || bad "tmpfiles line owns /run/sdprs as sdprs"
+hasf "$INST" 'tmpfiles\.d/sdprs\.conf'
+hasf "$INST" 'd /run/sdprs 0755 sdprs sdprs'
 
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

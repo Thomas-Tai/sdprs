@@ -209,11 +209,16 @@ health_check() {
       return 1
     fi
     [ -f "$EDGE_READY_FILE" ] && ready=1
-    if [ "${REQUIRE_EDGE_READY:-1}" != "1" ] || [ -n "$ready" ]; then
-      return 0
-    fi
   done
-  # Timed out: service stayed active but never asserted readiness.
+  # Full HEALTH_TIMEOUT soak survived (service stayed active, no NRestarts climb).
+  # We keep polling the WHOLE window even after edge_ready appears so a service
+  # that comes up, writes edge_ready, then crash-loops later in the window is
+  # still caught by the is-active/NRestarts checks above (matching the original
+  # soak duration). Success additionally requires the readiness signal, unless
+  # REQUIRE_EDGE_READY is disabled.
+  if [ "${REQUIRE_EDGE_READY:-1}" != "1" ] || [ -n "$ready" ]; then
+    return 0
+  fi
   log "health-check: edge_ready ($EDGE_READY_FILE) never appeared within ${HEALTH_TIMEOUT}s"
   return 1
 }

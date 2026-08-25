@@ -36,8 +36,12 @@ echo "[3/5] seed deployed SHA + runtime dir"
 cat > /etc/tmpfiles.d/sdprs.conf <<'EOF'
 d /run/sdprs 0755 sdprs sdprs -
 EOF
-systemd-tmpfiles --create /etc/tmpfiles.d/sdprs.conf 2>/dev/null || mkdir -p /run/sdprs
-echo "      installed /etc/tmpfiles.d/sdprs.conf (/run/sdprs owned by sdprs)"
+if systemd-tmpfiles --create /etc/tmpfiles.d/sdprs.conf 2>/dev/null; then
+  echo "      installed /etc/tmpfiles.d/sdprs.conf (/run/sdprs owned by sdprs)"
+else
+  mkdir -p /run/sdprs
+  echo "      systemd-tmpfiles unavailable — fell back to 'mkdir -p /run/sdprs' (dir not sdprs-owned)"
+fi
 if [ ! -f /opt/sdprs/.edge_deployed_sha ]; then
   git -C "$TMP" rev-parse HEAD > /opt/sdprs/.edge_deployed_sha
   chown sdprs:sdprs /opt/sdprs/.edge_deployed_sha 2>/dev/null || true
