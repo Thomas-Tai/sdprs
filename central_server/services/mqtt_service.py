@@ -276,6 +276,8 @@ class MQTTService:
                     "hostname": data.get("hostname"),
                     "mac": data.get("mac"),
                     "version": data.get("version"),
+                    "update_held": bool(data.get("update_held", False)),
+                    "hold_reason": data.get("hold_reason"),
                     "stream_status": self.node_states.get(node_id, {}).get("stream_status")
                 }
 
@@ -287,7 +289,9 @@ class MQTTService:
                 "visual_health": data.get("visual_health"),
                 "audio_health": data.get("audio_health"),
                 "uptime_seconds": data.get("uptime_seconds"),
-                "version": data.get("version")
+                "version": data.get("version"),
+                "update_held": bool(data.get("update_held", False)),
+                "hold_reason": data.get("hold_reason")
             }
 
             if self.db:
@@ -561,6 +565,15 @@ class MQTTService:
         topic = topic_cmd(node_id, "update")
         payload = {"timestamp": utcnow().isoformat()}
         logger.info(f"Sending update command to {node_id}")
+        return self.publish(topic, payload, qos=1)
+
+    def send_hold_command(self, node_id: str, hold: bool, reason=None) -> bool:
+        """Tell an edge node to hold/release SCHEDULED auto-updates. The edge
+        folds this into /run/sdprs/update_hold (self-expiring via SERVER_HOLD_TTL
+        if we stop re-asserting). --manual bypasses the hold regardless."""
+        topic = topic_cmd(node_id, "hold")
+        payload = {"hold": bool(hold), "reason": reason, "timestamp": utcnow().isoformat()}
+        logger.info(f"Sending hold={hold} to {node_id} (reason={reason})")
         return self.publish(topic, payload, qos=1)
 
     def send_snooze_config(self, node_id: str, snooze_until: Optional[str], snooze_reason: Optional[str] = None) -> bool:
