@@ -441,9 +441,20 @@ def setup_retention_scheduler(
         replace_existing=True
     )
     
+    # Report the backend the job will actually use. `db_path` is the SQLite
+    # path and is unused under PG: run_retention_cleanup branches on
+    # database.get_backend() and never opens SQLite there, so logging the path
+    # unconditionally advertised a file the job never touches. Lazy import
+    # mirrors run_retention_cleanup's local `from .. import database`; init_db
+    # has already run by the time the lifespan reaches this call, so
+    # get_backend() reads the live value rather than the pre-init default.
+    from .. import database
+    backend = database.get_backend()
+    db_desc = db_path if backend == "sqlite" else backend
+
     logger.info(
         f"Scheduled daily retention cleanup at 03:00 "
-        f"(db={db_path}, storage={storage_dir}, retention={retention_days} days)"
+        f"(db={db_desc}, storage={storage_dir}, retention={retention_days} days)"
     )
 
 
