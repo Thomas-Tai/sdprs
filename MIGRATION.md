@@ -5,6 +5,115 @@ Read before deploying an update that crosses one of the dated entries below.
 
 ---
 
+## 2026-08-27 — SECURITY: platform credential exposure, full rotation required
+
+### What happened
+
+The hosting provider disclosed that project **environment-variable data was
+retrieved by an attacker**. This was a platform-side incident, not a
+vulnerability in this codebase — there is no code fix to apply, but every
+credential the deployment held must be treated as compromised.
+
+Exposure window: **2026-08-27 → 2026-09-01** (disclosure to rotation).
+
+The provider's notice named only the variables matching its own scanned
+key-name and value-format patterns. **Treat that list as a floor, not a
+ceiling** — it did not include `MQTT_PASSWORD`, whose leak mattered most
+here because the broker is reachable from the public internet via TCP proxy
+(anonymous access is disabled, so the password was the only control).
+
+### What was done on 2026-09-01
+
+Eight credentials were rotated and confirmed working: the dashboard
+password, `SECRET_KEY`, the shared `EDGE_API_KEY`, `MQTT_PASSWORD`, and the
+Postgres role password, plus related values the notice did not name.
+
+Post-incident audits found **no evidence of exploitation**:
+
+- Database: no writes, modifications, or deletions during or after the
+  window; node registrations all expected; no attacker-created Postgres
+  role (only `root` can log in, everything else is a built-in `pg_*`);
+  Postgres uptime unbroken.
+- GitHub: zero commits during the window, no webhooks, no deploy keys,
+  no unexpected collaborators. The `edge-release` supply-chain path is
+  intact.
+- Full git-history secret scan: no live credential has ever been
+  committed. Two historical values were found, both already removed the
+  same day they were added (2026-03-28) and rotated twice since.
+
+**MQTT broker activity during the window is permanently unverifiable** —
+mosquitto logs to the container's stdout with no mounted volume, so they
+did not survive the restart. See "Remaining hardening" below.
+
+### Migration for existing deployments
+
+**Edge nodes are the blocking item.** Nodes authenticating with the shared
+`EDGE_API_KEY` still hold the pre-rotation value and **cannot authenticate
+until re-keyed**. Nodes migrated to per-node keys are unaffected — those are
+stored server-side as `api_key_hash`, never in plaintext, and were not part
+of the exposure.
+
+For each node still on the shared key, update `EDGE_API_KEY` and
+`MQTT_PASSWORD` in its on-node config and restart the service.
+
+If you are rotating these credentials yourself, three ordering traps matter:
+
+1. **Postgres.** `POSTGRES_PASSWORD` is read by the image **only on first
+   init with an empty `PGDATA`**. Changing the environment variable alone
+   desyncs the config from reality: the app breaks and the leaked password
+   stays valid. Correct order is `ALTER USER <role> WITH PASSWORD ...`
+   inside the running container, *then* update the environment variable,
+   *then* restart the server.
+
+2. **`DATABASE_URL` is a reference chain**
+   (`postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@...`) and
+   resolves automatically. **Never hand-edit it** — doing so pins a stale
+   password that survives the next rotation.
+
+3. **`MQTT_PASSWORD` lives in two services.** It must match across the
+   server and the broker. Update both together and restart the broker
+   first — its entrypoint regenerates the password file from the
+   environment on every container start.
+
+### Impact of rotation
+
+- **`SECRET_KEY`** — invalidates every session cookie; all operators
+  re-authenticate.
+- **`EDGE_API_KEY`** — breaks every node still on the shared key until
+  re-keyed. Per-node-key nodes are unaffected.
+- **`MQTT_PASSWORD`** — breaks any node or client with the old value.
+- **Dashboard password / Postgres role password** — no cascade beyond the
+  login itself.
+
+### Verification
+
+Server startup should show settings validation passing, the database
+initialising, and no authentication errors. Confirm each re-keyed node
+reappears on the dashboard and resumes heartbeating.
+
+### Remaining hardening
+
+- **Mount a volume for the broker's logs.** Without one, connection logs
+  die with the container, which is why this incident's MQTT activity could
+  not be reconstructed. This is the single change that would most improve
+  the next investigation.
+- **Confirm whether the database is publicly exposed** (provider dashboard,
+  networking settings). Given the broker is public, do not assume it isn't.
+- **Consider retiring the shared `EDGE_API_KEY` entirely** once every node
+  is on a per-node key — it is the only credential in this set whose
+  rotation requires touching hardware.
+
+### A note on where credentials are kept
+
+Rotation records containing plaintext credentials must not be written into
+a cloud-synced directory. Beyond the obvious exposure, **cloud storage
+retains previous file versions and a recycle bin**, so redacting or
+deleting such a file locally does not remove the credentials from the
+service — they must also be purged from version history. Use a password
+manager instead.
+
+---
+
 ## 2026-07-16 — SECURITY: fail-closed credential validation
 
 ### What changed
